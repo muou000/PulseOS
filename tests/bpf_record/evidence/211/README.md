@@ -1,5 +1,14 @@
 # Production recorder evidence (#211)
 
+> **Retention update — 2026-11-16:** The raw `.tar.gz` bundles described below
+> have been removed from the current tree. Retained indexes, hashes, counts and
+> replay reports record historical verification; they do not provide a complete
+> replay from this checkout. Bundle names and links below are historical references.
+> The old replay commands require complete bundles held separately; metadata
+> cannot reconstruct their bytes. For new evidence, follow the
+> [fresh-run instructions](../../README.md) and keep raw output out of Git.
+> See the [sampling evidence retention policy](../../../../docs/sampling-evidence-retention.md).
+
 2026-11-16: 14 independently replayed, passing QEMU runs per architecture.
 `riscv64.tar.gz` and `loongarch64.tar.gz` contain one directory per suite:
 the seven isolated `stacks-*` cases, `mapping`, `recovery`, `negative`,

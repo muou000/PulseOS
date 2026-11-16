@@ -1,5 +1,14 @@
 # Observation tools: actual guest evidence (2026-11-15)
 
+> **Retention update — 2026-11-16:** The raw `.tar.gz` bundles described below
+> have been removed from the current tree. Retained indexes, hashes, counts and
+> replay reports record historical verification; they do not provide a complete
+> replay from this checkout. Bundle names and links below are historical references.
+> The old replay commands require complete bundles held separately; metadata
+> cannot reconstruct their bytes. For new evidence, follow the
+> [fresh-run instructions](../../README.md) and keep raw output out of Git.
+> See the [sampling evidence retention policy](../../../../docs/sampling-evidence-retention.md).
+
 Eight actual RV64/LA64 runs cover task-clock, sched-switch, mixed scheduler and
 page-fault completion. Two earlier failing fault workloads are retained: adjacent
 anonymous pages were batch-mapped, so they did not produce the required write

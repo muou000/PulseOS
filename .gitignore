@@ -24,3 +24,12 @@ __pycache__/
 *$py.class
 .pytest_cache/
 tests/lmbench/bin/
+
+# Sampling runs are disposable artifacts; retain summaries and small fixtures.
+/tests/bpf_record/evidence/**/*.tar.*
+/tests/bpf_sampling/evidence/**/*.tar.*
+/records/issue210-validation.tar.gz
+/records/bpf*.tar.*
+*.pbcapture
+perf.data
+perf.data.*

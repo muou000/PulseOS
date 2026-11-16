@@ -1,5 +1,12 @@
 # Generic guest recorder acceptance (#195, #211, #213)
 
+Keep new raw captures, serial logs, ELF/image copies and generated archives in
+local run directories or separate artifact storage; do not commit them to Git.
+Commit compact results, input/tool identities, hashes and reproduction commands
+under the [sampling evidence retention policy](../../docs/sampling-evidence-retention.md).
+Historical `evidence/` summaries and indexes remain, but their raw bundles have
+been retired from the current tree and full replay requires separate copies.
+
 Build the enabled kernels with the repository gate, then run the recorder
 against separate guest processes:
 

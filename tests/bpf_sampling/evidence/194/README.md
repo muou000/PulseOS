@@ -1,5 +1,14 @@
 # #194：真实 CPU capture → perf → 函数火焰图
 
+> **Retention update — 2026-11-16:** The raw `.tar.gz` bundles described below
+> have been removed from the current tree. Retained indexes, hashes, counts and
+> replay reports record historical verification; they do not provide a complete
+> replay from this checkout. Bundle names and links below are historical references.
+> The old replay commands require complete bundles held separately; metadata
+> cannot reconstruct their bytes. For new evidence, follow the
+> [fresh-run instructions](../../README.md) and keep raw output out of Git.
+> See the [sampling evidence retention policy](../../../../docs/sampling-evidence-retention.md).
+
 日期：2026-11-15。`index.json` 保存两个原始采集包及每个成员的 SHA-256。
 `replay-report.json` 是新临时目录中重新导入、运行实际 perf/FlameGraph 的验证结果。
 原 capture 状态保持 partial；这些结果证明已记录样本的函数与权重，不代表完整 CPU 归因。

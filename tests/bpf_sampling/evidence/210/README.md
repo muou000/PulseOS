@@ -1,5 +1,14 @@
 # Current capture v6 native evidence (#210)
 
+> **Retention update — 2026-11-16:** The raw `.tar.gz` bundles described below
+> have been removed from the current tree. Retained indexes, hashes, counts and
+> replay reports record historical verification; they do not provide a complete
+> replay from this checkout. Bundle names and links below are historical references.
+> The old replay commands require complete bundles held separately; metadata
+> cannot reconstruct their bytes. For new evidence, follow the
+> [fresh-run instructions](../../README.md) and keep raw output out of Git.
+> See the [sampling evidence retention policy](../../../../docs/sampling-evidence-retention.md).
+
 These are fresh RISC-V guest collections from the #210 implementation, using
 `-cpu max`, 8 GiB RAM, eight CPUs and the AGENTS.md snapshot-disk QEMU command.
 `index.json` records SHA-256 for each compressed bundle and every member.

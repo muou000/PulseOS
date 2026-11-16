@@ -1,5 +1,7 @@
 """Oracle regressions use immutable historical bytes, never new-run evidence."""
 from collections import Counter
+import hashlib
+import json
 from pathlib import Path
 import struct
 import subprocess
@@ -15,10 +17,15 @@ from e2e import CPUFields, capture_facts, command, compare_query, fixture_chain,
 class OriginalCaptureOracleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        archive = Path(__file__).parent / "evidence/211/riscv64.tar.gz"
+        directory = Path(__file__).parent / "fixtures"
+        index = json.loads((directory / "index.json").read_text())
+        archive = directory / index["archive"]
+        assert hashlib.sha256(archive.read_bytes()).hexdigest() == index["sha256"]
         with tarfile.open(archive) as stream:
             cls.original = stream.extractfile("riscv64/stacks-mixed/mixed.pbcapture").read()
-            cls.fixture = stream.extractfile("riscv64/stacks-mixed/record-fixture.elf").read()
+            cls.fixture = stream.extractfile(
+                "riscv64/stacks-task/artifacts/0dec7702fde7adf808862aaba5e9dfc4cce8a524250c850618a17e02f4126d62.elf"
+            ).read()
 
     def test_known_functions_come_from_original_elf_not_perf_demangler(self):
         with tempfile.TemporaryDirectory() as name:

@@ -1,0 +1,770 @@
+{
+  "date": "2026-11-16",
+  "code_commit": "9169652f2c2f9118301832161c581d9d22f26906",
+  "merged_main_commit": "a1a7e016bf135127172d564add38bdad51ff48f9",
+  "scope": "independent replay of historical bytes before retirement; no new QEMU run or kernel build",
+  "archive_verification": {
+    "archives": 6,
+    "members": 4220,
+    "passed": true
+  },
+  "guest_runs_revalidated": 36,
+  "finalized_captures": 60,
+  "records": 94842,
+  "capture_status": "IncompleteError",
+  "failed_write_prefixes": 2,
+  "positive_queries": 21,
+  "strict_negatives": 1,
+  "svg_outputs": 42,
+  "queries": [
+    {
+      "arch": "riscv64",
+      "label": "cpu-user",
+      "passed": true,
+      "selected_samples": 96,
+      "source_counts": {
+        "4": 96
+      },
+      "source_period_ns": {
+        "4": 960000000
+      },
+      "capture_sha256": "485b21105e06c47c4ffb19de1b7c9f9443421b9214ea9d508145bce11b454d26",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "cpu-kernel",
+      "passed": true,
+      "selected_samples": 681,
+      "source_counts": {
+        "1": 100,
+        "8": 99,
+        "6": 98,
+        "3": 94,
+        "7": 98,
+        "5": 98,
+        "2": 92,
+        "4": 2
+      },
+      "source_period_ns": {
+        "1": 1000000000,
+        "2": 920000000,
+        "3": 940000000,
+        "4": 20000000,
+        "5": 980000000,
+        "6": 980000000,
+        "7": 980000000,
+        "8": 990000000
+      },
+      "capture_sha256": "485b21105e06c47c4ffb19de1b7c9f9443421b9214ea9d508145bce11b454d26",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "task-user",
+      "passed": true,
+      "selected_samples": 98,
+      "source_counts": {
+        "1": 98
+      },
+      "source_period_ns": {
+        "1": 980000000
+      },
+      "capture_sha256": "a094c513a446ea9f9ad21d30a1309d9904b29447f10d42f625287a43f63dfd77",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "mixed-user",
+      "passed": true,
+      "selected_samples": 26,
+      "source_counts": {
+        "14": 1,
+        "6": 2,
+        "8": 1,
+        "17": 12,
+        "12": 1,
+        "5": 2,
+        "9": 4,
+        "1": 3
+      },
+      "source_period_ns": {
+        "1": 30000000,
+        "5": 20000000,
+        "6": 20000000,
+        "8": 10000000,
+        "9": 40000000,
+        "12": 10000000,
+        "14": 10000000,
+        "17": 120000000
+      },
+      "capture_sha256": "884caf970e547c5bcbae251040d93d3b55bad982a25f2f89621d1463cff2a77b",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "mixed-kernel",
+      "passed": true,
+      "selected_samples": 1608,
+      "source_counts": {
+        "4": 100,
+        "7": 102,
+        "1": 97,
+        "9": 96,
+        "8": 95,
+        "6": 100,
+        "12": 100,
+        "5": 98,
+        "13": 100,
+        "2": 98,
+        "10": 98,
+        "3": 99,
+        "11": 99,
+        "16": 96,
+        "15": 101,
+        "14": 100,
+        "17": 29
+      },
+      "source_period_ns": {
+        "1": 970000000,
+        "2": 980000000,
+        "3": 990000000,
+        "4": 1000000000,
+        "5": 980000000,
+        "6": 1000000000,
+        "7": 1020000000,
+        "8": 950000000,
+        "9": 960000000,
+        "10": 980000000,
+        "11": 990000000,
+        "12": 1000000000,
+        "13": 1000000000,
+        "14": 1000000000,
+        "15": 1010000000,
+        "16": 960000000,
+        "17": 290000000
+      },
+      "capture_sha256": "884caf970e547c5bcbae251040d93d3b55bad982a25f2f89621d1463cff2a77b",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "installed-program-user",
+      "passed": true,
+      "selected_samples": 98,
+      "source_counts": {
+        "1": 98
+      },
+      "source_period_ns": {
+        "1": 989899078
+      },
+      "capture_sha256": "4744f6f4587c9b228abcb681a72915792abd10a6bab82ef9ce68705ff5869a60",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "mapping-user",
+      "passed": true,
+      "selected_samples": 160,
+      "source_counts": {
+        "3": 7,
+        "9": 80,
+        "8": 52,
+        "1": 21
+      },
+      "source_period_ns": {
+        "1": 210000000,
+        "3": 70000000,
+        "8": 520000000,
+        "9": 800000000
+      },
+      "capture_sha256": "4f227249b88d372d8da305d693b2e0f44603998b0ee05aa078953651849443f3",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "installed-program-kernel",
+      "passed": true,
+      "selected_samples": 101,
+      "source_counts": {
+        "1": 101
+      },
+      "source_period_ns": {
+        "1": 101000000
+      },
+      "capture_sha256": "b4550b9f98a9e6a5d9155e4cf660528ab6fbfb41f8be7b2c0ec5c0326ab9363d",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "nonleader-exec-user",
+      "passed": true,
+      "selected_samples": 128,
+      "source_counts": {
+        "1": 128
+      },
+      "source_period_ns": {
+        "1": 1280000000
+      },
+      "capture_sha256": "eae1d58893f3e8eb4cac0ea2ae58b02e50214d43149165c89a82766d70e412c8",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "nonleader-exec-tid-53",
+      "passed": true,
+      "selected_samples": 95,
+      "source_counts": {
+        "1": 95
+      },
+      "source_period_ns": {
+        "1": 950000000
+      },
+      "capture_sha256": "eae1d58893f3e8eb4cac0ea2ae58b02e50214d43149165c89a82766d70e412c8",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "riscv64",
+      "label": "nonleader-exec-tid-55",
+      "passed": true,
+      "selected_samples": 33,
+      "source_counts": {
+        "1": 33
+      },
+      "source_period_ns": {
+        "1": 330000000
+      },
+      "capture_sha256": "eae1d58893f3e8eb4cac0ea2ae58b02e50214d43149165c89a82766d70e412c8",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "cpu-user",
+      "passed": true,
+      "selected_samples": 101,
+      "source_counts": {
+        "6": 28,
+        "3": 10,
+        "7": 13,
+        "2": 20,
+        "1": 3,
+        "4": 6,
+        "8": 20,
+        "5": 1
+      },
+      "source_period_ns": {
+        "1": 30000000,
+        "2": 200000000,
+        "3": 100000000,
+        "4": 60000000,
+        "5": 10000000,
+        "6": 280000000,
+        "7": 130000000,
+        "8": 200000000
+      },
+      "capture_sha256": "5e16c62395af87521272c56d8407150e0a457a458b62cc4819eaa4cfe2987474",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "cpu-kernel",
+      "passed": true,
+      "selected_samples": 686,
+      "source_counts": {
+        "7": 86,
+        "1": 97,
+        "2": 77,
+        "3": 87,
+        "8": 79,
+        "5": 98,
+        "4": 91,
+        "6": 71
+      },
+      "source_period_ns": {
+        "1": 970000000,
+        "2": 770000000,
+        "3": 870000000,
+        "4": 910000000,
+        "5": 980000000,
+        "6": 710000000,
+        "7": 860000000,
+        "8": 790000000
+      },
+      "capture_sha256": "5e16c62395af87521272c56d8407150e0a457a458b62cc4819eaa4cfe2987474",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "task-user",
+      "passed": true,
+      "selected_samples": 94,
+      "source_counts": {
+        "1": 94
+      },
+      "source_period_ns": {
+        "1": 940000000
+      },
+      "capture_sha256": "5032425233cd40769e0d27dd7ba3f88353f360cd88693d3670bd2d5a9265b3cc",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "mixed-user",
+      "passed": true,
+      "selected_samples": 54,
+      "source_counts": {
+        "7": 3,
+        "15": 3,
+        "10": 4,
+        "4": 2,
+        "17": 18,
+        "2": 6,
+        "12": 3,
+        "6": 3,
+        "14": 2,
+        "5": 2,
+        "13": 2,
+        "8": 2,
+        "1": 2,
+        "9": 1,
+        "16": 1
+      },
+      "source_period_ns": {
+        "1": 20000000,
+        "2": 60000000,
+        "4": 20000000,
+        "5": 20000000,
+        "6": 30000000,
+        "7": 30000000,
+        "8": 20000000,
+        "9": 10000000,
+        "10": 40000000,
+        "12": 30000000,
+        "13": 20000000,
+        "14": 20000000,
+        "15": 30000000,
+        "16": 10000000,
+        "17": 180000000
+      },
+      "capture_sha256": "fbe2d17b33096348e5c9166fc5ab82e9e584d945d711f4196845997b4b69cf7b",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "mixed-kernel",
+      "passed": true,
+      "selected_samples": 1588,
+      "source_counts": {
+        "5": 97,
+        "1": 99,
+        "9": 100,
+        "3": 100,
+        "11": 100,
+        "4": 99,
+        "12": 97,
+        "13": 97,
+        "8": 98,
+        "16": 99,
+        "7": 96,
+        "15": 96,
+        "6": 97,
+        "14": 98,
+        "2": 94,
+        "10": 96,
+        "17": 25
+      },
+      "source_period_ns": {
+        "1": 990000000,
+        "2": 940000000,
+        "3": 1000000000,
+        "4": 990000000,
+        "5": 970000000,
+        "6": 970000000,
+        "7": 960000000,
+        "8": 980000000,
+        "9": 1000000000,
+        "10": 960000000,
+        "11": 1000000000,
+        "12": 970000000,
+        "13": 970000000,
+        "14": 980000000,
+        "15": 960000000,
+        "16": 990000000,
+        "17": 250000000
+      },
+      "capture_sha256": "fbe2d17b33096348e5c9166fc5ab82e9e584d945d711f4196845997b4b69cf7b",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "mapping-user",
+      "passed": true,
+      "selected_samples": 159,
+      "source_counts": {
+        "2": 25,
+        "9": 78,
+        "6": 17,
+        "4": 1,
+        "7": 5,
+        "1": 18,
+        "8": 10,
+        "3": 5
+      },
+      "source_period_ns": {
+        "1": 180000000,
+        "2": 250000000,
+        "3": 50000000,
+        "4": 10000000,
+        "6": 170000000,
+        "7": 50000000,
+        "8": 100000000,
+        "9": 780000000
+      },
+      "capture_sha256": "070a57a74de29bed98da9dc62496241ee38dd3caa417a17251a0b15b6ebf4da9",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "installed-program-kernel",
+      "passed": true,
+      "selected_samples": 119,
+      "source_counts": {
+        "1": 119
+      },
+      "source_period_ns": {
+        "1": 119000000
+      },
+      "capture_sha256": "62ff0bfe0f20a33b4c0207af8bd38502098401fdb2f7f8ae0c55f6c217232462",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "nonleader-exec-user",
+      "passed": true,
+      "selected_samples": 128,
+      "source_counts": {
+        "1": 128
+      },
+      "source_period_ns": {
+        "1": 1280000000
+      },
+      "capture_sha256": "93f02cae44e7e87e7e55e618d958abffb8e605a8df4953c61e7d2624f2684562",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "nonleader-exec-tid-65",
+      "passed": true,
+      "selected_samples": 98,
+      "source_counts": {
+        "1": 98
+      },
+      "source_period_ns": {
+        "1": 980000000
+      },
+      "capture_sha256": "93f02cae44e7e87e7e55e618d958abffb8e605a8df4953c61e7d2624f2684562",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    },
+    {
+      "arch": "loongarch64",
+      "label": "nonleader-exec-tid-67",
+      "passed": true,
+      "selected_samples": 30,
+      "source_counts": {
+        "1": 30
+      },
+      "source_period_ns": {
+        "1": 300000000
+      },
+      "capture_sha256": "93f02cae44e7e87e7e55e618d958abffb8e605a8df4953c61e7d2624f2684562",
+      "capture_status": "IncompleteError",
+      "original_unchanged": true
+    }
+  ],
+  "perf_outputs": [
+    {
+      "path": "loongarch64-cpu-kernel/period/perf.data",
+      "bytes": 59512,
+      "sha256": "efbbd9614d17ba8febf4189ef9798f6d6f9b121eeea440606be63812cbc1ee5c",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-cpu-kernel/samples/perf.data",
+      "bytes": 59512,
+      "sha256": "efbbd9614d17ba8febf4189ef9798f6d6f9b121eeea440606be63812cbc1ee5c",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-cpu-user/period/perf.data",
+      "bytes": 29448,
+      "sha256": "1cb03f324a1f663832f43031f5de71fc50593df2f919aa6a099e8d8d7577e8c9",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-cpu-user/samples/perf.data",
+      "bytes": 29448,
+      "sha256": "1cb03f324a1f663832f43031f5de71fc50593df2f919aa6a099e8d8d7577e8c9",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-installed-program-kernel/period/perf.data",
+      "bytes": 14632,
+      "sha256": "c2a6976c8fcccd6c0e35260d1524dc5e21a871ceef323b66e9c8026cdaa037e4",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-installed-program-kernel/samples/perf.data",
+      "bytes": 14632,
+      "sha256": "c2a6976c8fcccd6c0e35260d1524dc5e21a871ceef323b66e9c8026cdaa037e4",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-mapping-user/period/perf.data",
+      "bytes": 50696,
+      "sha256": "0b57f014aeba4cde50ab82d0bd8e79ce17cffac79b5a032e79b250ab6d5198be",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-mapping-user/samples/perf.data",
+      "bytes": 50696,
+      "sha256": "0b57f014aeba4cde50ab82d0bd8e79ce17cffac79b5a032e79b250ab6d5198be",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-mixed-kernel/period/perf.data",
+      "bytes": 141552,
+      "sha256": "58f0efc82f6718b741193234c69c88b989aedbe6375b1f12fd2b5b99899167b5",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-mixed-kernel/samples/perf.data",
+      "bytes": 141552,
+      "sha256": "58f0efc82f6718b741193234c69c88b989aedbe6375b1f12fd2b5b99899167b5",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-mixed-user/period/perf.data",
+      "bytes": 16744,
+      "sha256": "4aec7d67b06a7d1499153c5981793a82dc1b5a2b1208eecdc19105ac93e313bd",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-mixed-user/samples/perf.data",
+      "bytes": 16744,
+      "sha256": "4aec7d67b06a7d1499153c5981793a82dc1b5a2b1208eecdc19105ac93e313bd",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-nonleader-exec-tid-65/period/perf.data",
+      "bytes": 32304,
+      "sha256": "8957f2c92d6d27000727d44b75c8331de29ea8f51cc031dbd65661bffee8f18c",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-nonleader-exec-tid-65/samples/perf.data",
+      "bytes": 32304,
+      "sha256": "8957f2c92d6d27000727d44b75c8331de29ea8f51cc031dbd65661bffee8f18c",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-nonleader-exec-tid-67/period/perf.data",
+      "bytes": 13328,
+      "sha256": "e6f56f9622983ed15e005e0b7f457094bcaf677f4571f873f6f30fbba282e3fd",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-nonleader-exec-tid-67/samples/perf.data",
+      "bytes": 13328,
+      "sha256": "e6f56f9622983ed15e005e0b7f457094bcaf677f4571f873f6f30fbba282e3fd",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-nonleader-exec-user/period/perf.data",
+      "bytes": 39984,
+      "sha256": "b4bc186c017b3f6cc4e5bb9dd4ed584aae48a4a018f7cf10af8b02045426c5ee",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-nonleader-exec-user/samples/perf.data",
+      "bytes": 39984,
+      "sha256": "b4bc186c017b3f6cc4e5bb9dd4ed584aae48a4a018f7cf10af8b02045426c5ee",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-task-user/period/perf.data",
+      "bytes": 26872,
+      "sha256": "e9690d40b6f5bac8d7da31c5e577b5544e5e85a1aa27e77f3368dede63c06491",
+      "identical_to_original": true
+    },
+    {
+      "path": "loongarch64-task-user/samples/perf.data",
+      "bytes": 26872,
+      "sha256": "e9690d40b6f5bac8d7da31c5e577b5544e5e85a1aa27e77f3368dede63c06491",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-cpu-kernel/period/perf.data",
+      "bytes": 59132,
+      "sha256": "a68631cdf0def97a08fd710992fda675cb1e8dde99d848edbea54baf6ab09802",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-cpu-kernel/samples/perf.data",
+      "bytes": 59132,
+      "sha256": "a68631cdf0def97a08fd710992fda675cb1e8dde99d848edbea54baf6ab09802",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-cpu-user/period/perf.data",
+      "bytes": 27412,
+      "sha256": "4314a7acb7e7987d8226801a7b4bccc83a392d9a94252143852f3d10655a0510",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-cpu-user/samples/perf.data",
+      "bytes": 27412,
+      "sha256": "4314a7acb7e7987d8226801a7b4bccc83a392d9a94252143852f3d10655a0510",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-installed-program-kernel/period/perf.data",
+      "bytes": 12404,
+      "sha256": "6f535fe6ea94cbbb4986c38f3d0786589977fb3d0eb25e5a892f868a7ba9ac59",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-installed-program-kernel/samples/perf.data",
+      "bytes": 12404,
+      "sha256": "6f535fe6ea94cbbb4986c38f3d0786589977fb3d0eb25e5a892f868a7ba9ac59",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-installed-program-user/period/perf.data",
+      "bytes": 24308,
+      "sha256": "f6fb04d17dc025d8b016f33a925d7f5c3242f365a0e8c71863c9a51e7b1b4fa7",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-installed-program-user/samples/perf.data",
+      "bytes": 24308,
+      "sha256": "f6fb04d17dc025d8b016f33a925d7f5c3242f365a0e8c71863c9a51e7b1b4fa7",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-mapping-user/period/perf.data",
+      "bytes": 49148,
+      "sha256": "b5c12979aac915c75f15b8fd729a70a65cae1e427bdb87d4c52ddb1c40e0c58a",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-mapping-user/samples/perf.data",
+      "bytes": 49148,
+      "sha256": "b5c12979aac915c75f15b8fd729a70a65cae1e427bdb87d4c52ddb1c40e0c58a",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-mixed-kernel/period/perf.data",
+      "bytes": 143060,
+      "sha256": "26e11c72abef0304ac70c938789cd8d15b8dbf61bf1effbd36b511dca5122ead",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-mixed-kernel/samples/perf.data",
+      "bytes": 143060,
+      "sha256": "26e11c72abef0304ac70c938789cd8d15b8dbf61bf1effbd36b511dca5122ead",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-mixed-user/period/perf.data",
+      "bytes": 8708,
+      "sha256": "468ef3571c00f445c64fa4dc1d165e645f8811c88a7043d24716c3f5e65b395e",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-mixed-user/samples/perf.data",
+      "bytes": 8708,
+      "sha256": "468ef3571c00f445c64fa4dc1d165e645f8811c88a7043d24716c3f5e65b395e",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-nonleader-exec-tid-53/period/perf.data",
+      "bytes": 31356,
+      "sha256": "29c7947f128df07a095485827b517e37a27d7c08eb26408d9aadd363e3dff8f2",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-nonleader-exec-tid-53/samples/perf.data",
+      "bytes": 31356,
+      "sha256": "29c7947f128df07a095485827b517e37a27d7c08eb26408d9aadd363e3dff8f2",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-nonleader-exec-tid-55/period/perf.data",
+      "bytes": 13964,
+      "sha256": "15a329336d50b0abc5e06f44036af65f0c44e69a8bce7f78db80637e0676dafa",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-nonleader-exec-tid-55/samples/perf.data",
+      "bytes": 13964,
+      "sha256": "15a329336d50b0abc5e06f44036af65f0c44e69a8bce7f78db80637e0676dafa",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-nonleader-exec-user/period/perf.data",
+      "bytes": 39804,
+      "sha256": "956dd41c16e29b8f3494997e0e31763ac3011df3e86f9a47c54ff11da881c424",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-nonleader-exec-user/samples/perf.data",
+      "bytes": 39804,
+      "sha256": "956dd41c16e29b8f3494997e0e31763ac3011df3e86f9a47c54ff11da881c424",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-task-user/period/perf.data",
+      "bytes": 27940,
+      "sha256": "22fc345168dfedc26f98bd3233ed5ba8daf454c8b666eea4b5682df705661002",
+      "identical_to_original": true
+    },
+    {
+      "path": "riscv64-task-user/samples/perf.data",
+      "bytes": 27940,
+      "sha256": "22fc345168dfedc26f98bd3233ed5ba8daf454c8b666eea4b5682df705661002",
+      "identical_to_original": true
+    }
+  ],
+  "tool_versions": {
+    "perf": "6.8.12",
+    "FlameGraph": "41fee1f99f9276008b7cd112fca19dc3ea84ac32"
+  },
+  "cleanup_regressions": {
+    "python_recorder": 38,
+    "python_sampling": 110,
+    "sampling_skipped_without_optional_tools": 1,
+    "native_pipeline_tests_run_separately": 10,
+    "rust_historical_format_rejection": 1
+  },
+  "passed": true
+}

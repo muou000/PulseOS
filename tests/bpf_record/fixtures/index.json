@@ -1,0 +1,49 @@
+{
+  "archive": "oracle-inputs.tar.gz",
+  "bytes": 369861,
+  "format": "pulse-bpf-regression-fixtures",
+  "members": {
+    "historical-v2/archive.json": {
+      "bytes": 13820,
+      "original_member": "riscv64-task-20261115-004328-xkagr4j6/archive.json",
+      "sha256": "e24fb1a5c0ec625c16afd03bda7f5af8b5f0961997db4d00083e416a5f045f1c",
+      "source": "191"
+    },
+    "historical-v2/capture.pbcapture": {
+      "bytes": 49737,
+      "original_member": "riscv64-task-20261115-004328-xkagr4j6/capture.pbcapture",
+      "sha256": "aca9be494563e577412468b8b14f651685978d34a2ee3bb2286f7923db7ca186",
+      "source": "191"
+    },
+    "riscv64/stacks-mixed/mixed.pbcapture": {
+      "bytes": 2106723,
+      "original_member": "riscv64/stacks-mixed/mixed.pbcapture",
+      "sha256": "0ebe8a720b1d57e1987942645ffc1771e4a96522df4645840f3d0dc08dd9a3b2",
+      "source": "211"
+    },
+    "riscv64/stacks-task/artifacts/0dec7702fde7adf808862aaba5e9dfc4cce8a524250c850618a17e02f4126d62.elf": {
+      "bytes": 782400,
+      "original_member": "riscv64/stacks-task/artifacts/0dec7702fde7adf808862aaba5e9dfc4cce8a524250c850618a17e02f4126d62.elf",
+      "sha256": "0dec7702fde7adf808862aaba5e9dfc4cce8a524250c850618a17e02f4126d62",
+      "source": "211"
+    },
+    "riscv64/stacks-task/stack-task.pbcapture": {
+      "bytes": 131545,
+      "original_member": "riscv64/stacks-task/stack-task.pbcapture",
+      "sha256": "ee42f053e461d941efdc3197f1071733153f98fbebbf15cf8fb7720c66fc4372",
+      "source": "211"
+    }
+  },
+  "sha256": "7b464d8c6280f9d53967cf624e2e188e3289b9cb761b818748969f88ba1191eb",
+  "sources": {
+    "191": {
+      "archive": "tests/bpf_sampling/evidence/191/rv-task.tar.gz",
+      "sha256": "bb4a4c4f153098995d016ef2a5610f9a132683ef8d477cca633c4e4f6fd9ca04"
+    },
+    "211": {
+      "archive": "tests/bpf_record/evidence/211/riscv64.tar.gz",
+      "sha256": "3c171921d871688862c5c9ad98522bca3faa411076529ae859dc902cd7d823b1"
+    }
+  },
+  "version": 1
+}

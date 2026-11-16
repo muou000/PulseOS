@@ -26,7 +26,10 @@ class PerfPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             prefix = "riscv64/stacks-task/"
-            with tarfile.open(repo / "tests/bpf_record/evidence/211/riscv64.tar.gz") as archive:
+            fixtures = repo / "tests/bpf_record/fixtures"
+            index = json.loads((fixtures / "index.json").read_text())
+            self.assertEqual(pipeline.digest(fixtures / index["archive"]), index["sha256"])
+            with tarfile.open(fixtures / index["archive"]) as archive:
                 for member in archive.getmembers():
                     if (member.name.startswith(prefix)
                             and ("/artifacts/" in member.name or member.name.endswith("stack-task.pbcapture"))

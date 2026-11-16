@@ -1222,22 +1222,23 @@ fn typed_phase_and_stream_markers_must_agree_without_ambiguous_precedence() {
 #[test]
 fn historical_archive_retains_its_identity_and_is_not_accepted_as_current_capture() {
     let f = Fixture::new(Vec::new());
-    let evidence =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/bpf_sampling/evidence/191");
+    let fixtures =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/bpf_record/fixtures");
     let output=Command::new("python3").args(["-c",r#"
 import tarfile,json,sys,hashlib,struct,pathlib
-base=pathlib.Path(sys.argv[1]);case=next(v for v in json.load(open(base/'index.json')) if v['label']=='rv-task')
-with tarfile.open(base/case['bundle']) as archive:
- raw=archive.extractfile(case['run']+'/capture.pbcapture').read()
- facts=json.load(archive.extractfile(case['run']+'/archive.json'))
-assert hashlib.sha256(raw).hexdigest()==case['members_sha256']['capture.pbcapture']
+base=pathlib.Path(sys.argv[1]);index=json.load(open(base/'index.json'))
+assert hashlib.sha256((base/index['archive']).read_bytes()).hexdigest()==index['sha256']
+with tarfile.open(base/index['archive']) as archive:
+ raw=archive.extractfile('historical-v2/capture.pbcapture').read()
+ facts=json.load(archive.extractfile('historical-v2/archive.json'))
+assert hashlib.sha256(raw).hexdigest()==index['members']['historical-v2/capture.pbcapture']['sha256']
 offset,count=struct.unpack_from('<QQ',raw,40);time=[];ids=[]
 for _ in range(count):
  ids.append(struct.unpack_from('<I',raw,offset)[0]);time.append(struct.unpack_from('<Q',raw,offset+8)[0]);offset+=48+struct.unpack_from('<I',raw,offset+40)[0]
 assert 7 not in ids
 phase=facts['measurements']['attached_capture'];assert sum(phase['start_ns']<=t<phase['stop_ns'] for t in time)==82
 pathlib.Path(sys.argv[2]).write_bytes(raw)
-"#]).arg(evidence).arg(&f.capture).output().unwrap();
+"#]).arg(fixtures).arg(&f.capture).output().unwrap();
     assert!(
         output.status.success(),
         "{}",

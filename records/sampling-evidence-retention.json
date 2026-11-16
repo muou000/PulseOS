@@ -1,0 +1,324 @@
+{
+  "date": "2026-11-16",
+  "source_commit": "9169652f2c2f9118301832161c581d9d22f26906",
+  "scope": "historical sampling archives removed from the current tree; published Git history not rewritten",
+  "removed_archives": [
+    {
+      "path": "records/issue210-validation.tar.gz",
+      "bytes": 43223,
+      "sha256": "3fa4570b54e5655e2744b7c8b25ca9cf06ed95f9744653d9900a44e42c367e67"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/loongarch64-benchmark.tar.gz",
+      "bytes": 2471381,
+      "sha256": "4c5898762ba17f85a06ad2c4bfcbadcab6579462478dd5c5837c0be407d9277a"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/loongarch64-existing-rejected-z5pj2ze0.tar.gz",
+      "bytes": 12987,
+      "sha256": "23842b0b5dc842e0459bee6d97e41039464c3b5f0ce081abf69c8635a1304a5a"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/loongarch64-existing.tar.gz",
+      "bytes": 2992530,
+      "sha256": "caf3ea3a6da9cb4bcc1b0ffb2a057903f75ba8fd8d0a4a3c46ab3b4a960978f8"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/loongarch64-full.tar.gz",
+      "bytes": 3069863,
+      "sha256": "da732d49f01e7f49bfbd729fcd50fa7f60a28f0b9e588f569ad92de3a1f98784"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/loongarch64-recovery.tar.gz",
+      "bytes": 2486899,
+      "sha256": "e82b0f5cb5d991465de0123894e856c86c54d4d974305a7ddb922c176d43a43e"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/loongarch64-task.tar.gz",
+      "bytes": 19450,
+      "sha256": "8d80abd75c082c07248eb34a995f94a88951d3fbce61cf2a75b93231fc43ca3a"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/riscv64-benchmark.tar.gz",
+      "bytes": 2223968,
+      "sha256": "d4e53370472abeb1a4820e92778552cb582312d3361989668bf5a9b2dcf17570"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/riscv64-existing-rejected-20yk32j1.tar.gz",
+      "bytes": 127323,
+      "sha256": "1e83901fa01db266d84e837a31c0c46918428ef83bf609ea66354c99cf34559a"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/riscv64-existing.tar.gz",
+      "bytes": 2730066,
+      "sha256": "0c1fc3b168497f993e7605406134c14d01d4ce8e1cc358811bc623f28919c80b"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/riscv64-full.tar.gz",
+      "bytes": 2739257,
+      "sha256": "7c2e58a2ef9a50c7e54c05ce29c8bb53504c4388f89479d8daeeb9f43361dfed"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/riscv64-recovery.tar.gz",
+      "bytes": 2239472,
+      "sha256": "1ae79c73d3ff92ea909fdf32a4032bc84558a13fd6cc8c80b7bd97741059e22b"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/riscv64-smoke-rejected-u7t35t65.tar.gz",
+      "bytes": 344698,
+      "sha256": "7fffa05887fe3c91cb3fe78a2231d023de520d09a28b067127fd27b5587d8a4b"
+    },
+    {
+      "path": "tests/bpf_record/evidence/195/riscv64-task.tar.gz",
+      "bytes": 20533,
+      "sha256": "5b566f735b20385d6cecc94d761cf90d864583a87af69f94e5d82e2ea169cf05"
+    },
+    {
+      "path": "tests/bpf_record/evidence/210/loongarch64-mixed.tar.gz",
+      "bytes": 2690701,
+      "sha256": "45d1b80a650db90db5559961cf9a2072e0d3a25c03ef56f7bc2d5aaaada335dc"
+    },
+    {
+      "path": "tests/bpf_record/evidence/211/loongarch64.tar.gz",
+      "bytes": 17614445,
+      "sha256": "c30333f79213da00483c16a4b7bff823d664d52d3f64c677c5871b8413ceab99"
+    },
+    {
+      "path": "tests/bpf_record/evidence/211/regressions.tar.gz",
+      "bytes": 11231047,
+      "sha256": "9e4e9f0b7f69cff2b2f6a8f27ab47402c07713e50471b677ece6ad4fc8bc33f5"
+    },
+    {
+      "path": "tests/bpf_record/evidence/211/riscv64.tar.gz",
+      "bytes": 11985808,
+      "sha256": "3c171921d871688862c5c9ad98522bca3faa411076529ae859dc902cd7d823b1"
+    },
+    {
+      "path": "tests/bpf_record/evidence/211/validation-logs.tar.gz",
+      "bytes": 33240,
+      "sha256": "8fb5dc08a8cff291264621e6de99d23e45905b5cac1509a068be275c0e1675a1"
+    },
+    {
+      "path": "tests/bpf_record/evidence/212/native-replay.tar.gz",
+      "bytes": 515080,
+      "sha256": "7ad56bad40a5668983f36a84c24ae5f1e546e6995f24c7e93fcd0f4bbd8c9bc1"
+    },
+    {
+      "path": "tests/bpf_record/evidence/212/validation.tar.gz",
+      "bytes": 45666,
+      "sha256": "2d686252decee311802418cb9fda469e2e20b1d80e0547421fb26c1bf03c3598"
+    },
+    {
+      "path": "tests/bpf_record/evidence/213/counterexamples.tar.gz",
+      "bytes": 7163062,
+      "sha256": "77be0da1d6d1bad4d7c55941d2e8c8df322af198e1bd8ac83e66b9e213a42aec"
+    },
+    {
+      "path": "tests/bpf_record/evidence/213/extension.tar.gz",
+      "bytes": 9721238,
+      "sha256": "2d5758b9c21b8cef3078c99ef67e87bf8074d9d4d280b9818e622c5624d2d4d0"
+    },
+    {
+      "path": "tests/bpf_record/evidence/213/matrix.tar.gz",
+      "bytes": 37734437,
+      "sha256": "a7b9f3eb1f6997890f7a4b239127d63a46b63d52b4457eeecf94b4553850ccaf"
+    },
+    {
+      "path": "tests/bpf_record/evidence/213/native.tar.gz",
+      "bytes": 14739688,
+      "sha256": "a5ec54a598c976fdc5a3eed56806fc13d55793fbdab72922183aa3d26f61b2e6"
+    },
+    {
+      "path": "tests/bpf_record/evidence/213/regressions.tar.gz",
+      "bytes": 8812207,
+      "sha256": "e884442b590cbf822224af8e94a17ebeb30011e65a76113eee60b1a52ba1c6dc"
+    },
+    {
+      "path": "tests/bpf_record/evidence/213/validation.tar.gz",
+      "bytes": 134111,
+      "sha256": "02fd2c3a87942b5feac1e7d7300efc7779a16d4b5aebe28e4446ff7c9c1aeb32"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/loongarch64-fault-initial-failure.tar.gz",
+      "bytes": 223976,
+      "sha256": "20a9eed092fe6994389ffe408ae172f7dd92ae8baf7dd6c1885c4d78da1d3cc8"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/loongarch64-fault.tar.gz",
+      "bytes": 372866,
+      "sha256": "b79ab5ee806d373dd176eda9a792c0bc3ad53ee38ab36e086acf60e9999e4970"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/loongarch64-sched.tar.gz",
+      "bytes": 596710,
+      "sha256": "82877aa604578dd4f5aedb75267752bbc7296e62985bd7bbe4e3275ac4009eb2"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/loongarch64-task.tar.gz",
+      "bytes": 267524,
+      "sha256": "4b81d25aa85083438e26d7a951882eaf5b00426acb92e50b1471ae8102992dda"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/loongarch64-trace.tar.gz",
+      "bytes": 333190,
+      "sha256": "bc3a7a19514425076871245f63af7c3ace1de1d23d2cadcbe618a515ad3dea86"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/riscv64-fault-initial-failure.tar.gz",
+      "bytes": 223355,
+      "sha256": "0f10596726a1603a77d816257da96175432c59385849200a76b499fd69097d2c"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/riscv64-fault.tar.gz",
+      "bytes": 363201,
+      "sha256": "213a27b1602e0057fdb67527edc03eac00203eefc219be2d803daea6ecda959d"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/riscv64-sched.tar.gz",
+      "bytes": 555640,
+      "sha256": "9e0bd6e8a7bd8f32cdf370c084169e489aee1d63dfa3c38b4ba8628fb60e6caa"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/riscv64-task.tar.gz",
+      "bytes": 268801,
+      "sha256": "30dc89ca3e8b6fe41bcd8f3965367099e6f1a1a0a68c573ca21e997a1a74f1e7"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/184-188/riscv64-trace.tar.gz",
+      "bytes": 327001,
+      "sha256": "e54c4074a2aa6cfbf12e9156601d8becb4b2c813dfb2511117929d6d84455947"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/aborted.tar.gz",
+      "bytes": 204736,
+      "sha256": "6fa235a2365510dc0464f05d5f89a2b1bb51c3fae55bd8a7fc82ff8a44246c68"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/export-overflow.tar.gz",
+      "bytes": 226914,
+      "sha256": "9953b0844358ef758f8d919b60786090cef8fbd03eafdc681be3f94d93fc84cf"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/la-task.tar.gz",
+      "bytes": 227597,
+      "sha256": "e818add8f8c59169817a76e0bc0a32113b5dc3391aad483368dd35e3b4cfba77"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/la-trace-wrap.tar.gz",
+      "bytes": 265345,
+      "sha256": "abb7ea4d1b1ba114cbc13bb9f8ddbde747c9f7dc8a2505353d9b2eed9b085274"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/ring-overflow.tar.gz",
+      "bytes": 245903,
+      "sha256": "cc5a024fc36e1c417db9eb28234f5c0ea36d7e2f6c09ced1d5992ed38ad29cf0"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/rv-task.tar.gz",
+      "bytes": 229669,
+      "sha256": "bb4a4c4f153098995d016ef2a5610f9a132683ef8d477cca633c4e4f6fd9ca04"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/rv-trace-wrap.tar.gz",
+      "bytes": 261433,
+      "sha256": "7b6506427e43683555762aa8a7bdf2d597c300d8d73d1e73dccdaeeeb5827c23"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/zero-consumer.tar.gz",
+      "bytes": 203597,
+      "sha256": "3edcde629f647e3ab0502a0d3fc46c632a7252f2c2bcc82e3be31b9531c9bf02"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/191/zero-producer.tar.gz",
+      "bytes": 203367,
+      "sha256": "c4754622c8a5821e73005c58bee38c93198fcb8ac6e19c445413cd838883fb03"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/192/la-cpu.tar.gz",
+      "bytes": 2706350,
+      "sha256": "a679f70a5b81933507a6b93c14f7119b6d32fa2fa3c9769d6b02d30aaaa71184"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/192/la-task.tar.gz",
+      "bytes": 2400445,
+      "sha256": "d67fcb4d9cc2a781ffd9e3659d9e88f3ad8fbd578954234de038013d8305be17"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/192/rv-cpu.tar.gz",
+      "bytes": 3023568,
+      "sha256": "03b253824ed5c0f07301f127c6e2d40a5368cc8d6426f26c38c0f63d8042026a"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/192/rv-task.tar.gz",
+      "bytes": 2619627,
+      "sha256": "620d9a65ba35ae07496284ff53ac4b0f7b27f75df53e3a53195bda60713b864a"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/192/validation.tar.gz",
+      "bytes": 28505,
+      "sha256": "673d7fc7f8d7974463631ccf9f2a21b1d678e01d8f2940ab1435997b8dab764f"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/193/la-cpu.tar.gz",
+      "bytes": 5397630,
+      "sha256": "228c30266f7d3e5dd9fad3327d0983c756e580656cb9eb3d840d6cfc13920378"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/193/rv-cpu.tar.gz",
+      "bytes": 5820123,
+      "sha256": "edc031211b975c0d734fa64ce49efeb59aea72a516162b04e53e66caed24c46f"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/193/validation.tar.gz",
+      "bytes": 37158,
+      "sha256": "201deae61d87718d33b91eae4b08db713834147c13e018a5caf925bfc1db1204"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/194/la-cpu.tar.gz",
+      "bytes": 9231864,
+      "sha256": "e385d39840c8b7c3911051ccda167f12837110a31760c26b08e906216d518c0d"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/194/rv-cpu.tar.gz",
+      "bytes": 9810649,
+      "sha256": "15f26855af796395b24b2589733411e168b7e89f3ba33457432282245aa42c99"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/196/la-fault.tar.gz",
+      "bytes": 2577956,
+      "sha256": "9f487884c5e69ea36cefc35dea8e64511e0e9eae82e83899ea5c36e7e1b51353"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/196/rv-baseline.tar.gz",
+      "bytes": 2667849,
+      "sha256": "e6637092dc1ebf91f38329e4419b0a5a00fed31a50e2cb3aa11f9b465f36e2da"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/196/rv-fault.tar.gz",
+      "bytes": 2800321,
+      "sha256": "fb53eb477a9defc5dbad41e6eda245789b0921e950014af7b8d520c5920730de"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/196/validation.tar.gz",
+      "bytes": 5095673,
+      "sha256": "ac749f59e97e96a969ea8c34f3a9d14214c025705ed8c7e99cfa2ee2db98a5b7"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/210/rv-budget-negative.tar.gz",
+      "bytes": 1220509,
+      "sha256": "6eac44f1fb159b9578fa2a74353a60c2f70ed887df7f2919f113e442b937befd"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/210/rv-cpu-stacks-mappings.tar.gz",
+      "bytes": 9094744,
+      "sha256": "1b5a546403ab7d6ba1e07cdd734ac69680a3829ce933c732023639c749e099ff"
+    },
+    {
+      "path": "tests/bpf_sampling/evidence/210/rv-task-stacks.tar.gz",
+      "bytes": 4933127,
+      "sha256": "f8205f403d289780328a527e3e400b11a78144134f37cf02af55ccbe0f7cc71b"
+    }
+  ],
+  "removed_bytes": 219009303,
+  "retained": "original indexes, replay summaries, acceptance records, key results and minimal regression fixture; hashes do not reconstruct removed bytes"
+}

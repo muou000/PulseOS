@@ -1,5 +1,14 @@
 # Issue 191 real guest evidence — 2026-11-15
 
+> **Retention update — 2026-11-16:** The raw `.tar.gz` bundles described below
+> have been removed from the current tree. Retained indexes, hashes, counts and
+> replay reports record historical verification; they do not provide a complete
+> replay from this checkout. Bundle names and links below are historical references.
+> The old replay commands require complete bundles held separately; metadata
+> cannot reconstruct their bytes. For new evidence, follow the
+> [fresh-run instructions](../../README.md) and keep raw output out of Git.
+> See the [sampling evidence retention policy](../../../../docs/sampling-evidence-retention.md).
+
 These compressed bundles preserve actual QEMU output, consumed RAW frames,
 standalone captures and analyzer results. They are not synthetic format fixtures.
 The three negative probes deliberately fail and do not produce a capture.

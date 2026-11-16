@@ -1,5 +1,14 @@
 # Recorder perf exporter replay (#212)
 
+> **Retention update — 2026-11-16:** The raw `.tar.gz` bundles described below
+> have been removed from the current tree. Retained indexes, hashes, counts and
+> replay reports record historical verification; they do not provide a complete
+> replay from this checkout. Bundle names and links below are historical references.
+> The old replay commands require complete bundles held separately; metadata
+> cannot reconstruct their bytes. For new evidence, follow the
+> [fresh-run instructions](../../README.md) and keep raw output out of Git.
+> See the [sampling evidence retention policy](../../../../docs/sampling-evidence-retention.md).
+
 2026-11-16: twelve host replays of unchanged #211 captures passed with native
 `perf version 6.8.12` and FlameGraph revision
 `41fee1f99f9276008b7cd112fca19dc3ea84ac32`. The declared file subset is separately

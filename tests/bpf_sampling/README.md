@@ -1,5 +1,12 @@
 # Real software sampling and capture (#190 / #191)
 
+Keep new raw captures, serial logs, ELF/image copies and generated archives in
+local run directories or separate artifact storage; do not commit them to Git.
+Commit compact results, input/tool identities, hashes and reproduction commands
+under the [sampling evidence retention policy](../../docs/sampling-evidence-retention.md).
+Historical `evidence/` summaries and indexes remain, but their raw bundles have
+been retired from the current tree and full replay requires separate copies.
+
 This freestanding RV64/LA64 guest uses raw Linux-shaped syscalls and checks actual
 `PERF_SAMPLE_RAW` records produced by a loaded BPF program. It never synthesizes
 sample/loss counters. With `--archive`, the host converts its actual RAW frames

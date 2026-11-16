@@ -1,0 +1,30 @@
+{
+  "scope": "verbatim small historical result files extracted before archive retirement; benchmark-summary.json is a labelled subset of original results",
+  "files": {
+    "qualification.json": {
+      "archive_member": "native/qualification.json",
+      "sha256": "afacf160a286f7a827ccc8b97ff9d6db0a4b0190e94553fea7cf95f7da07a610",
+      "bytes": 28309
+    },
+    "environment.json": {
+      "archive_member": "validation/environment.json",
+      "sha256": "90e965d0467413e2fa978c81e113d75b1c680d7efa38157d99eb6b64c444d126",
+      "bytes": 4831
+    },
+    "validation.json": {
+      "archive_member": "validation/validation.json",
+      "sha256": "ac4c70f8ce3b1ff545e9f56dd5751cad969f24669c780c98d9a77f3fba19d9fb",
+      "bytes": 5583
+    },
+    "bpf-final-riscv64.provenance.json": {
+      "archive_member": "validation/bpf-final-riscv64.provenance.json",
+      "sha256": "b63318cb266515629caecd2d7b6d75b06f43c31a93583bbdd54031105289bf23",
+      "bytes": 5882
+    },
+    "bpf-final-loongarch64.provenance.json": {
+      "archive_member": "validation/bpf-final-loongarch64.provenance.json",
+      "sha256": "fae859c5e28ca5508a09b6737923b126490e0a4172d69fabcc80ad270840786f",
+      "bytes": 6179
+    }
+  }
+}

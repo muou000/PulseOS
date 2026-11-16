@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-16",
+  "validated_code_commit": "d89c79d3f818c42fcfc7bc3256a4a68942a854c1",
+  "baseline": "c51e43db",
+  "host_tests": {
+    "rust_regular": 515,
+    "rust_native_perf": 7,
+    "python_sampling": 110,
+    "python_recorder": 38
+  },
+  "builds": {
+    "default_dual_arch": "passed",
+    "bpf_dual_arch": "passed"
+  },
+  "review": {
+    "standards_remaining": 0,
+    "spec_remaining": 0
+  },
+  "boot_source_comparison": {
+    "riscv64": {
+      "same_source_tree_as_final_build": true,
+      "tree_sha256": "c4d7eb3bdbd3b6447d030fcb17249bcda75a828b9a81428a5bdcc7481efd1692",
+      "boot_source_commit": "d527944c1633063bb0e344f3db9f961f922432be",
+      "final_build_commit": "b611b7cbbf22e4a2e2d02364582e589a74907b82",
+      "boot_elf_sha256": "174f82be70a79375f2a288ef5810cced2d83efa8e1f026790b54b6fd8b797f47",
+      "final_elf_sha256": "174f82be70a79375f2a288ef5810cced2d83efa8e1f026790b54b6fd8b797f47",
+      "original_build_manifest": "bpf-riscv64.provenance.json"
+    },
+    "loongarch64": {
+      "same_source_tree_as_final_build": true,
+      "tree_sha256": "c4d7eb3bdbd3b6447d030fcb17249bcda75a828b9a81428a5bdcc7481efd1692",
+      "boot_source_commit": "d527944c1633063bb0e344f3db9f961f922432be",
+      "final_build_commit": "b611b7cbbf22e4a2e2d02364582e589a74907b82",
+      "boot_elf_sha256": "31851e048fbd3c4636e11fca1bc68ff0b59dd6a62d1d3638fe5464e06294a036",
+      "final_elf_sha256": "31851e048fbd3c4636e11fca1bc68ff0b59dd6a62d1d3638fe5464e06294a036",
+      "original_build_manifest": "bpf-loongarch64.provenance.json"
+    }
+  },
+  "final_tool_sources": {
+    "tests/bpf_record/acceptance.py": "6adaae1e16d2a889b544f86b7e0fdea4af225f0fcdb75d3ff34c1b6ce58b7019",
+    "tests/bpf_record/run.py": "554116e18652d6e20efe9596f3bd718d486739077651405538e2165f14bbc408",
+    "tests/bpf_record/e2e.py": "d8c12ebcc86957888492190ce1d520be3e3e2c355159ef32f441ed58ad840931",
+    "tests/bpf_record/qualify.py": "554489ba6970d8b3abb1bcfe0828b208bba00e263880cbe7a13015a892394117",
+    "tests/bpf_record/evidence.py": "8639f609645e35f552121233cca8a871c98f1b94bf0636cd0dcef2d2c5277558",
+    "tests/bpf_record/capture.py": "6d0dbe24b794474125e20985d88ef1b3f15e9eb976a0c91e9a4d698d9f8379c5",
+    "tests/bpf_record/verify.py": "07d85071928e3259a8cf7ba974736f9a34548cac29e527a4d8eb646cdef80995",
+    "scripts/perf_pipeline.py": "a90eeeb1982a0a58f02409d8f1363e15b52a40872911fc030a8effe86dc2a210",
+    "scripts/perf_symbols.py": "e87dd7f15b3c9c905f54f1d59aa67c1b1ad0181733960bf8951436090bda806d",
+    "tools/bpf-record/build.py": "175c44d2ddf87371cabef5cb39548e1691e0694e06d52a2eb21be9b7f245442b",
+    "tools/bpf-record/collect.py": "0f8a36cd97cfa4d5ad0a306a63987fe4b97d21a49ba2ca94f9e5081fd50916b5"
+  },
+  "logs_sha256": {
+    "analyzer-build.log": "60f2f024ac6cc2ae330c0031f9226d1a086e351c726ada1ad91adf28285a02a3",
+    "cargo-check.log": "8e72791c2a8017adc63b1c74279c1fb2df41f48761733dc710550045fc9ecfdf",
+    "guest-matrix-fresh.log": "5c6687f13c7839a16f7a3fb0d5f82646bbdd5b301c53a0f737ebd3c5f6f2dca3",
+    "guest-matrix.log": "8cc9aba0c4174afc11109745bad67bd2bb3327eff0d959ff867351e86a02391c",
+    "loongarch64---fault-classes-replay.log": "e32049137f6d13ac37af12d2e473924033dc73b19d84ec5b2dd0a07ea9e96d29",
+    "loongarch64---fault-classes.log": "268b0dda0793e5cbad46b72528dfe2296f10d971a3977d4035d0be6a98ba341f",
+    "loongarch64-sched-replay.log": "64b487b19e07a019edabf67e22c28d1c21ee0f98bdd7b749c653f1b01365df56",
+    "loongarch64-sched.log": "f05cf8865c38488675f2d9e614f08f32bb23fb48b44684c0808f64222ade7a77",
+    "loongarch64-zero-consumer.log": "eb9f021d74e89a1405954332b95144766f4f23c5c6f98da6ed9aaa8c89cbe5a7",
+    "loongarch64-zero-producer.log": "5c43dda0722c0fdeea04f1d13b719888b7f0c87e94105b6cb7f7c90fed0fc121",
+    "make-bpf-final.log": "1a00d1eced8faf5c602ce26b8539acb2bdd0834341b56bf01dccc72f60e4e9ca",
+    "make-bpf.log": "f789bfc5d25324dfe16a6d900774886308442fb7a8cdf9a1a864808e29ed82a7",
+    "make-default-final.log": "455e617d7395d1bbaa35f257ab714583312db0f5aea6a6fd445cddd8be249f0a",
+    "make-default.log": "8524df955fec9e201d9ec50a3420271f86dc315669e613e6db90fad4739fd9c7",
+    "native-rust-tests.log": "79d3976045436e0290a859035a651dbbdc017613721c87fe18d6de177766e137",
+    "python-recorder-final.log": "3c33c9f70720387809a99c356770cfb01ce62ac6f1864e3de446deee60c38f7e",
+    "python-recorder.log": "51b718b76cfad1a1bc42634aa69fe7a098ef9f70a2fc6dbb177186f06cb7554b",
+    "python-sampling.log": "723644b3d4b75d66dd641ef7dc3e67a6fab6925b02d767707b0a6c36908a371f",
+    "regression-runner.log": "02536167f75d1a57355dd8914da08f33a57a962579e29c1b4e54383cd1ceb55f",
+    "riscv64---fault-classes-replay.log": "77002a08f7ae8b34f07727646792a009244d9862474d4f22772041bef0cb6353",
+    "riscv64---fault-classes.log": "962329ebf7ca9658a42f19483190fb1cf5e923abf07156debe083106d0ed1644",
+    "riscv64-sched-replay.log": "aa1f7d7949c53811473b24d0fcb31b473c4d3681ab5fa493729f4f2fa68b8b93",
+    "riscv64-sched.log": "7eee4db06011dc5d6a3d17f7691ceaaaeab9974fdb6c80d1dc06fc391b3c6bad",
+    "riscv64-zero-consumer.log": "1484555bb3750930cab6b1ae22abcdf5dbdf8ddbcce8a2ce8f8a1beea49ecadd",
+    "riscv64-zero-producer.log": "6ad4e1494af185c05c5d6feb13bfe3cf7a2070d0863888a984b59a283b4039cb",
+    "rust-tests.log": "abbb90fc30f81d3e21796ed352544f85d5121f3770b456ff190eaa4816674ee1",
+    "zero-regression-runner.log": "a712b595559b851568202ec1e319489c39b4f41c2c897c2b0299b7788ba3d8ef"
+  },
+  "build_gate_commit": "b611b7cb",
+  "portable_verifier_fix": "d89c79d3: decode current report before installed-I/O proof; same original capture red/green; kernel source tree unchanged"
+}
