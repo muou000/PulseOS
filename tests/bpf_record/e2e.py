@@ -17,6 +17,7 @@ import re
 import struct
 import subprocess
 import sys
+from typing import NamedTuple
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,18 @@ sys.path.append(str(ROOT / "tests/bpf_sampling"))
 from perf_evidence import native_samples, verify_named_chain
 from stack_evidence import elf_symbols
 from verify_observation_evidence import decode_capture, check
+
+
+class CPUFields(NamedTuple):
+    logical_source: int
+    ip: int
+    pid: int
+    tid: int
+    timestamp_ns: int
+    cpu: int
+    period_ns: int
+    mode: int
+    callchain: tuple[int, ...]
 
 
 class Cursor:
@@ -195,9 +208,9 @@ def selected_samples(facts, query):
                 "termination": reasons[termination], "bytes_read": read, "byte_limit": limit, "ips": list(ips)}
         selected.append({"sequence_index": index, "task_id": record.task, "semantic": semantic,
             "termination": termination, "payload_sha256": hashlib.sha256(record.payload).hexdigest(),
-            "fields": (facts["bindings"][index], ip, record.pid, record.tid,
-                       record.time, record.cpu, period, mode, chain)})
-    return sorted(selected, key=lambda item: (item["fields"][4], item["sequence_index"]))
+            "fields": CPUFields(facts["bindings"][index], ip, record.pid, record.tid,
+                                record.time, record.cpu, period, mode, chain)})
+    return sorted(selected, key=lambda item: (item["fields"].timestamp_ns, item["sequence_index"]))
 
 
 def digest(path):
@@ -216,9 +229,9 @@ def fixture_chain(path, expected_sha, selected):
         check(len(matches) == 1, f"original fixture lacks unique Rust-v0 function {name}")
         start, end, symbol = matches[0]
         result.append({"function": "fixture::" + name, "symbol": symbol, "start": start, "end": end})
-    check(any(len(sample["fields"][8]) >= 4 and sample["fields"][7] == 2 and
+    check(any(len(sample["fields"].callchain) >= 4 and sample["fields"].mode == 2 and
               all(row["start"] <= pc - int(index != 0) < row["end"]
-                  for index, (pc, row) in enumerate(zip(sample["fields"][8][1:4], result)))
+                  for index, (pc, row) in enumerate(zip(sample["fields"].callchain[1:4], result)))
               for sample in selected), "original capture lacks the known three-function user chain")
     return result
 
@@ -228,12 +241,14 @@ def save(path, data):
 
 
 def command(directory, name, argv):
+    from run import helpers
     argv = [str(arg) for arg in argv]
     result = subprocess.run(argv, text=True, capture_output=True,
                             env={**os.environ, "LC_ALL": "C", "DEBUGINFOD_URLS": ""})
     (directory / f"{name}.stdout").write_text(result.stdout)
     (directory / f"{name}.stderr").write_text(result.stderr)
     save(directory / f"{name}.command.json", {"argv": argv, "returncode": result.returncode})
+    helpers.permission_check(result.stdout + "\n" + result.stderr)
     return result
 
 
@@ -242,18 +257,45 @@ def succeeded(result, label):
     return result.stdout
 
 
-def compare_query(selected, report, table, folded, weight):
+def compare_capture_status(facts, report):
+    check(report["status"] == facts["status"] and report["is_complete"] is (facts["status"] == "Complete"),
+          "Query completeness differs from original capture")
+
+
+def compare_folded(selected, text, weight, capture_status):
+    expected, actual = Counter(), Counter()
+    for sample in selected:
+        fields, stack = sample["fields"], sample["semantic"]
+        identity = f"pid:{fields.pid}:tid:{fields.tid}" if fields.mode == 2 else f"task:{sample['task_id']}"
+        parts = ([] if capture_status == "Complete" else ["[INCOMPLETE_CAPTURE]"])
+        parts += [identity, "[user]" if fields.mode == 2 else "[kernel]"]
+        if stack is None:
+            ips = [fields.ip]
+        else:
+            if stack["termination"] != "complete_at_terminator":
+                parts.append(f"[{stack['stack_status']}:{stack['termination']}]")
+            ips = list(reversed(stack["ips"]))
+        parts.extend(f"pc:0x{ip:x}" for ip in ips)
+        expected[";".join(parts)] += 1 if weight == "samples" else fields.period_ns
+    for line in text.splitlines():
+        stack, separator, amount = line.rpartition(" ")
+        check(separator and stack and amount.isdecimal() and int(amount) > 0, "invalid folded stacks/weight")
+        actual[stack] += int(amount)
+    check(actual == expected, "folded stacks differ from original identities, saved PCs, termination or per-stack weight")
+
+
+def compare_query(selected, report, table, folded, weight, capture_status):
     fields = [sample["fields"] for sample in selected]
-    total = len(fields) if weight == "samples" else sum(row[6] for row in fields)
+    total = len(fields) if weight == "samples" else sum(row.period_ns for row in fields)
     unit = "samples" if weight == "samples" else "period_ns"
     check(report["sample_weight"] == {"samples": len(fields), "total": total, "unit": unit}, "JSON Query weight mismatch")
-    expected = [{"sequence_index": sample["sequence_index"], "logical_source": row[0],
-        "weight": 1 if weight == "samples" else row[6], "timestamp_ns": row[4], "cpu_id": row[5],
-        "pid": row[2], "tid": row[3], "task_id": sample["task_id"],
-        "sample_period": row[6], "ip": row[1], "mode": row[7]} for sample, row in zip(selected, fields)]
+    expected = [{"sequence_index": sample["sequence_index"], "logical_source": row.logical_source,
+        "weight": 1 if weight == "samples" else row.period_ns, "timestamp_ns": row.timestamp_ns, "cpu_id": row.cpu,
+        "pid": row.pid, "tid": row.tid, "task_id": sample["task_id"],
+        "sample_period": row.period_ns, "ip": row.ip, "mode": row.mode} for sample, row in zip(selected, fields)]
     check(report["cpu_samples"] == expected, "JSON Query records differ from original capture")
-    stacks = [{"logical_source": row[0], "timestamp_ns": row[4], "cpu_id": row[5],
-               "pid": row[2], "tid": row[3], "task_id": sample["task_id"], "sample": sample["semantic"]}
+    stacks = [{"logical_source": row.logical_source, "timestamp_ns": row.timestamp_ns, "cpu_id": row.cpu,
+               "pid": row.pid, "tid": row.tid, "task_id": sample["task_id"], "sample": sample["semantic"]}
               for sample, row in zip(selected, fields) if sample["semantic"] is not None]
     check(report["stack_samples"] == stacks, "JSON stack fields differ from original capture")
     check(f"CPU samples: {len(fields)}; weight: {total} {unit}" in table, "table Query weight mismatch")
@@ -262,10 +304,10 @@ def compare_query(selected, report, table, folded, weight):
     rows = [tuple(map(int, row)) for row in re.findall(
         r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+.*?\s(?:perf_event_v2|software_stack_v3)\s+period=",
         table, re.M)]
-    expected_rows = [(sample["sequence_index"], row[0], row[4], row[5], row[2], row[3], sample["task_id"])
+    expected_rows = [(sample["sequence_index"], row.logical_source, row.timestamp_ns, row.cpu, row.pid, row.tid, sample["task_id"])
                      for sample, row in zip(selected, fields)]
     check(rows == expected_rows, "table Query record/source identities mismatch")
-    check(sum(int(line.rsplit(" ", 1)[1]) for line in folded.splitlines()) == total, "folded Query weight mismatch")
+    compare_folded(selected, folded, weight, capture_status)
 
 
 def kernel_chain_proof(native, bundle, kernel):
@@ -309,8 +351,10 @@ def negative_exports(directory, analyzer, capture, filters, artifacts):
                 path.write_bytes(b"deliberately wrong ELF for negative oracle\n")
         output = target / "rejected.perf.data"
         result = command(target, "export", [analyzer, capture, "--bundle", target, *filters, "--perf-data", output])
-        check(result.returncode != 0 and not output.exists() and not Path(str(output) + ".json").exists(),
-              f"{name}: expected strict export rejection without success output")
+        diagnostic = "Error: ELF unavailable:" if name == "missing-symbol-bundle" else "Error: ELF SHA256 mismatch"
+        check(result.returncode == 1 and result.stderr.strip().startswith(diagnostic)
+              and not output.exists() and not Path(str(output) + ".json").exists(),
+              f"{name}: expected semantic rejection without success output")
         results.append({"case": name, "diagnostic": result.stderr.strip(), "passed": True})
     original = capture.read_bytes()
     record_start = struct.unpack_from("<Q", original, 40)[0]
@@ -326,7 +370,11 @@ def negative_exports(directory, analyzer, capture, filters, artifacts):
         path = target / "derived-negative.pbcapture"
         path.write_bytes(changed)
         result = command(target, "read", [analyzer, path, "--json"])
-        check(result.returncode != 0, f"{name}: invalid derived capture accepted")
+        reason = {"missing-trailer": "TruncatedTrailer", "corrupt-trailer": "BadTrailerMagic",
+                  "corrupt-record": "ChecksumMismatch", "removed-record": "TruncatedTrailer"}[name]
+        diagnostic = "Error: failed to parse BPF capture: Capture error: " + reason
+        check(result.returncode == 1 and result.stderr.strip().startswith(diagnostic),
+              f"{name}: expected semantic rejection {reason}")
         results.append({"case": name, "derived_from_sha256": digest(capture),
                         "modified_sha256": digest(path), "diagnostic": result.stderr.strip(), "passed": True})
     return results
@@ -376,8 +424,9 @@ def run(args):
         "diagnostics_sha256": facts["diagnostics_sha256"], "capture_counters": facts["counters"],
         "original_cpu_samples": len(selected_samples(facts, {})), "selected_samples": len(selected),
         "original_records": len(facts["records"]), "selected_records": selected,
-        "source_counts": dict(Counter(row["fields"][0] for row in selected)),
-        "source_period_ns": {key: sum(row["fields"][6] for row in selected if row["fields"][0] == key) for key in sorted({row["fields"][0] for row in selected})},
+        "source_counts": dict(Counter(row["fields"].logical_source for row in selected)),
+        "source_period_ns": {key: sum(row["fields"].period_ns for row in selected if row["fields"].logical_source == key)
+                             for key in sorted({row["fields"].logical_source for row in selected})},
         "typed_sources": list(facts["sources"].values()), "queries": [], "passed": False}
     save(output / "e2e.json", result)
     manifest = json.loads(succeeded(command(output, "artifact-manifest", [analyzer, capture, "--artifact-manifest"]), "artifact manifest"))
@@ -401,8 +450,8 @@ def run(args):
             "--json", "--oncpu", target / "query.folded", "--perf-data", target / "perf.data"])
         report = json.loads(succeeded(exported, "export"))
         table = succeeded(command(target, "table", [analyzer, capture, *selection]), "table")
-        compare_query(selected, report, table, (target / "query.folded").read_text(), weight)
-        check(report["status"] == facts["status"] and report["is_complete"] is False, "Query promoted partial capture")
+        compare_query(selected, report, table, (target / "query.folded").read_text(), weight, facts["status"])
+        compare_capture_status(facts, report)
         check(report["recorder"]["record_sources"] == facts["bindings"], "report changed original source bindings")
         check({row["logical_source"] for row in report["recorder"]["sources"]} == set(facts["sources"]), "report omitted typed sources")
         for declared in report["recorder"]["sources"]:
@@ -417,7 +466,7 @@ def run(args):
         check(Counter(sample["fields"] for sample in selected) == Counter(actual), "native perf differs from original source/IP/identity/time/CPU/period/mode/callchain")
         native_report = (target / "native/report.stdout").read_text()
         rows = re.findall(r"^\s*\d+(?:\.\d+)?%\s+(\d+)\s+(\d+)\s+.*?\s+\[[k.u]\]\s+(.+)$", native_report, re.M)
-        period = sum(sample["fields"][6] for sample in selected)
+        period = sum(sample["fields"].period_ns for sample in selected)
         check(sum(int(row[0]) for row in rows) == len(selected) and sum(int(row[1]) for row in rows) == period, "native perf function rows omit samples/periods")
         if args.require_chain:
             verify_named_chain((target / "native/script.stdout").read_text(), (target / "native/calltree.stdout").read_text(), symbols)

@@ -102,7 +102,7 @@ def queries(locations, arch):
     ]
     path = locations[arch, "nonleader-exec"] / "nonleader-exec.pbcapture"
     samples = selected_samples(capture_facts(path.read_bytes(), arch), {"mode": "user"})
-    tids = sorted({sample["fields"][3] for sample in samples})
+    tids = sorted({sample["fields"].tid for sample in samples})
     if len(tids) != 2 or len({sample["task_id"] for sample in samples}) != 1:
         raise ValueError("nonleader exec lacks two observed numeric TIDs on one stable task")
     for tid in tids:
@@ -181,7 +181,7 @@ def qualify(args):
             result = json.loads(result_path.read_text()) if result_path.exists() else {}
             expected_rejection = arch == "loongarch64" and label == "installed-program-user"
             if expected_rejection:
-                passed = (completed.returncode != 0 and "mapped object SHA unavailable" in completed.stderr
+                passed = (completed.returncode == 1 and completed.stderr.strip() == "recorder e2e: export: Error: mapped object SHA unavailable"
                           and result.get("passed") is False and digest(capture_path) == original_sha
                           and not list(target.glob("*/perf.data*")) and not list(target.glob("*/native")))
             else:
@@ -197,7 +197,8 @@ def qualify(args):
                 "original_unchanged": digest(capture_path) == original_sha,
                 "diagnostic": completed.stderr.strip()})
             save(output / "qualification.json", report)
-            print(f"{'PASS' if passed else 'FAIL'} {arch} {label}", flush=True)
+            outcome = "PASS strict rejection" if passed and expected_rejection else "PASS native export" if passed else "FAIL"
+            print(f"{outcome} {arch} {label}", flush=True)
             if not passed:
                 return 1
     if any(digest(Path(matrix["path"]) / "index.json") != matrix["index_sha256"]
