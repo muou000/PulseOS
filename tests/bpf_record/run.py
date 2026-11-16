@@ -26,8 +26,9 @@ helpers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helpers)
 helpers.BASE = BASE
 ARCHES = helpers.ARCHES
-STACK_SUITES = ("stacks-task", "stacks-mixed", "stacks-existing", "stacks-sigint",
-                "stacks-exit", "stacks-overflow", "stacks-observation")
+STACK_SUITES = ("stacks-cpu", "stacks-task", "stacks-mixed", "stacks-existing", "stacks-sigint",
+                "stacks-sigterm", "stacks-exit", "stacks-overflow", "stacks-observation")
+ACCEPTANCE_SUITES = {"lifecycle", "negative", "benchmark", "recovery", "full", "stacks-observation"}
 spec = importlib.util.spec_from_file_location("recorder_collection", REPO / "tools/bpf-record/collect.py")
 assert spec and spec.loader
 collection = importlib.util.module_from_spec(spec)
@@ -159,8 +160,9 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
                          f"if grep -q EXISTING_WORKLOAD_FAIL {label}-workload.log; then exit 1; fi",
                          f"{fixture} dump {label}.pbcapture {label} || exit 1"])
             captures.append(label)
-    if suite == "recovery":
-        record("task", "task", "cpu", task=True)
+    if suite in ("recovery", "nonleader-exec"):
+        if suite == "recovery":
+            record("task", "task", "cpu", task=True)
         rows.extend(["rm -f exec-thread.tid exec-thread.go",
                      f"{fixture} exec-thread {duration} >exec-thread-workload.log 2>&1 &", "target=$!", "ready_waits=0",
                      "while [ ! -s exec-thread.tid ]; do", f"  {fixture} sleep 10", "  ready_waits=$((ready_waits+1))",
@@ -175,6 +177,7 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
                      'wait "$target" || exit 1', "cat exec-thread-workload.log",
                      f"{fixture} dump nonleader-exec.pbcapture nonleader-exec || exit 1"])
         captures.append("nonleader-exec")
+    if suite == "recovery":
         rows.extend([f"{fixture} cpu {duration + 1500} stop-failure &", "target=$!", f"{fixture} sleep 100"])
         call("stop-failure", f"--events cpu --cpus all --duration-ms {duration} --output stop-failure.pbcapture --test-stop-failure", failure=True)
         captures.append("stop-failure")
@@ -196,6 +199,8 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
         record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True)
     if suite == "stacks-task":
         record("stack-task", "task", "cpu", task=True, extra="--callchain fp --stack-depth 32")
+    if suite == "stacks-cpu":
+        record("stack-cpu", "cpu", "cpu", extra="--callchain fp --stack-depth 32")
     if suite == "stacks-mixed":
         record("mixed", "cpu,cpu,task,sched,fault", "mixed", task=True, extra="--callchain fp")
     if suite == "stacks-existing":
@@ -204,6 +209,8 @@ def cases_script(directory: str, suite: str, duration: int, *, kernel_elf: bool 
         rows.extend(['kill "$target"', 'wait "$target" || true'])
     if suite == "stacks-sigint":
         record("sigint", "cpu", "cpu", signal=2, extra="--callchain fp")
+    if suite == "stacks-sigterm":
+        record("sigterm-cpu", "cpu", "cpu", signal=15, extra="--callchain fp")
     if suite == "stacks-exit":
         record("target-exit", "task", "cpu", task=True, target_exit=True, extra="--callchain fp")
     if suite == "stacks-overflow":
@@ -325,7 +332,8 @@ def validate_case(label: str, case: dict, expected_failure: bool) -> list[str]:
             errors.append(f"{label}: continued output after disable/quiescence")
     if label == "stop-failure" and ("RECORD STOP " not in text or "RECORD SAVED " not in text):
         errors.append("stop-failure: failed to preserve stopped partial capture")
-    reasons = {"sigint": "signal:2", "sigterm": "signal:15", "target-exit": "target-exit", "nonleader-exec": "target-exit"}
+    reasons = {"sigint": "signal:2", "sigterm": "signal:15", "sigterm-cpu": "signal:15",
+               "target-exit": "target-exit", "nonleader-exec": "target-exit"}
     if label in reasons and f"reason={reasons[label]}" not in text:
         errors.append(f"{label}: stop reason was not {reasons[label]}")
     return errors
@@ -349,11 +357,14 @@ def validate_report(label: str, report: dict) -> list[str]:
         errors.append(f"{label}: source counts do not explain consumed records")
     observed = [source for source in sources if source["records_count"] > 0]
     if label == "mixed":
-        software = Counter((source["cpu"], source["event_id"]) for source in observed
-                           if source["kind"] in ("software-v2", "software-stack-v3") and source["cpu"] is not None)
+        software = Counter((source["cpu"], source["event_id"], source.get("period")) for source in observed
+                           if source["kind"] in ("software-v2", "software-stack-v3")
+                           and source["cpu"] is not None and (source.get("period") or 0) > 0)
+        task_samples = any(source["kind"] in ("software-v2", "software-stack-v3")
+                           and source["cpu"] is None and source["tid"] is not None for source in observed)
         trace_ids = {source["event_id"] for source in observed if source["kind"] == "tracepoint"}
-        if not software or max(software.values()) < 2 or not {6, 8} <= trace_ids:
-            errors.append("mixed: missing repeated software sources or equal-length trace/fault contexts")
+        if not software or max(software.values()) < 2 or not task_samples or not {6, 8} <= trace_ids:
+            errors.append("mixed: missing same-CPU/same-period instances, task samples or trace/fault contexts")
     elif label in ("fault", "sigterm", "existing-fault"):
         if not any(source["kind"] == "tracepoint" and source["event_id"] == 8 for source in observed):
             errors.append(f"{label}: no actual fault records")
@@ -593,6 +604,16 @@ def verify_saved_hash(case: dict, raw: bytes) -> str:
     return digest
 
 
+def recorder_identity(recorder: Path, arch: str, suite: str) -> dict:
+    """Require a byte-matched build witness for the declared executable variant."""
+    identity = json.loads((recorder.parent / "build.json").read_text())
+    variant = "acceptance" if suite in ACCEPTANCE_SUITES else "guest"
+    if (identity.get("sha256") != helpers.digest(recorder)
+            or identity.get("arch") != arch or identity.get("variant") != variant):
+        raise ValueError(f"{suite}: recorder build witness must match {arch} {variant} executable bytes")
+    return identity
+
+
 def stack_proof(timeline: dict, report: dict, collection_report: dict, *, require_depth: bool,
                 require_kernel: bool = False) -> dict:
     events = [event for event in timeline["events"] if event.get("event_id") == 0x1002]
@@ -698,26 +719,41 @@ def guest(args: argparse.Namespace) -> int:
         failed = False
         for suite in STACK_SUITES:
             child = argparse.Namespace(**{**vars(args), "suite": suite})
+            if getattr(args, "run_dir", None):
+                child.run_dir = args.run_dir / suite
             failed |= bool(guest(child))
         return int(failed)
     fixture = build_fixture(args.arch)
     if args.recorder:
         recorder = args.recorder.resolve(strict=True)
     else:
-        helpers.command([sys.executable, str(REPO / "tools/bpf-record/build.py"), "--arch", args.arch, "--acceptance"], cwd=REPO, timeout=180)
-        recorder = REPO / "tools/bpf-record/build" / args.arch / "acceptance/bpf-record"
+        build = [sys.executable, str(REPO / "tools/bpf-record/build.py"), "--arch", args.arch]
+        variant = "acceptance" if args.suite in ACCEPTANCE_SUITES else "guest"
+        if variant == "acceptance":
+            build.append("--acceptance")
+        helpers.command(build, cwd=REPO, timeout=180)
+        recorder = REPO / "tools/bpf-record/build" / args.arch / variant / "bpf-record"
     helpers.check_elf(recorder, args.arch)
+    recorder_build = recorder_identity(recorder, args.arch, args.suite)
     kernel = (args.kernel or REPO / ARCHES[args.arch]["kernel"]).resolve(strict=True)
     image = helpers.check_image(args.image or REPO / ARCHES[args.arch]["primary"])
-    run = helpers.new_run(f"{args.arch}-{args.suite}")
+    if getattr(args, "run_dir", None):
+        run = args.run_dir.resolve()
+        run.mkdir(parents=True, exist_ok=False)
+    else:
+        run = helpers.new_run(f"{args.arch}-{args.suite}")
     for source, name in ((recorder, "bpf-record.elf"), (fixture, "record-fixture.elf"), (kernel, "kernel")):
         shutil.copyfile(source, run / name)
     kernel_elf = kernel_identity(kernel, run)
     # Freeze the host consumer alongside the guest producer. Development runs
     # can outlive source edits, so rebuilding only after QEMU exits could pair
     # a new unpublished wire layout with an older copied producer.
-    helpers.command(["cargo", "build", "-p", "bpf-analyzer"], cwd=REPO, timeout=180)
-    shutil.copyfile(REPO / "target/debug/bpf-analyzer", run / "bpf-analyzer")
+    if getattr(args, "analyzer", None):
+        analyzer = args.analyzer.resolve(strict=True)
+    else:
+        helpers.command(["cargo", "build", "-p", "bpf-analyzer"], cwd=REPO, timeout=180)
+        analyzer = REPO / "target/debug/bpf-analyzer"
+    shutil.copyfile(analyzer, run / "bpf-analyzer")
     (run / "bpf-analyzer").chmod(0o755)
     for source, name in ((recorder.parent / "build.json", "recorder-build.json"),
                          (fixture.parent / "fixture-build.json", "fixture-build.json"),
@@ -770,9 +806,12 @@ def guest(args: argparse.Namespace) -> int:
               "suite": args.suite, "duration_ms": args.duration_ms, "command": command, "guest_command": shell,
               "image_sha256": image_hash, "boot_image_sha256": helpers.digest(image_copy),
               "kernel_sha256": helpers.digest(run / "kernel"), "recorder_sha256": helpers.digest(run / "bpf-record.elf"),
+              "recorder_build": recorder_build,
               "kernel_elf_sha256": helpers.digest(kernel_elf), "guest_capture_sha_witness": True,
               "fixture_sha256": helpers.digest(run / "record-fixture.elf"), "script_sha256": helpers.digest(run / "cases.sh"),
               "analyzer_sha256": helpers.digest(run / "bpf-analyzer"),
+              "qemu_version": helpers.command([command[0], "--version"]).splitlines()[0],
+              "qemu_sha256": helpers.digest(Path(command[0])),
               "workspace_commit": helpers.command(["git", "rev-parse", "HEAD"], cwd=REPO).strip()}
     (run / "inputs.json").write_text(json.dumps(inputs, indent=2) + "\n")
     print(f"Logs: {run}", flush=True)
@@ -804,7 +843,7 @@ def guest(args: argparse.Namespace) -> int:
                 timeline_path = run / f"{label}-timeline.json"
                 helpers.command([str(run / "bpf-analyzer"), str(path), "--timeline", str(timeline_path)], cwd=REPO)
                 proof = stack_proof(json.loads(timeline_path.read_text()), reports[label], collected,
-                                    require_depth=label == "stack-task", require_kernel=label == "mixed")
+                                    require_depth=label in ("stack-task", "stack-cpu"), require_kernel=label == "mixed")
                 (run / f"{label}-stack-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
             if label == "mapping-lifecycle":
                 proof = mapping_lifecycle_proof(text, collected["captured_manifest"])
@@ -859,9 +898,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build-fixture", "guest"))
     parser.add_argument("--arch", choices=tuple(ARCHES), required=True)
-    parser.add_argument("--suite", choices=("smoke", "mixed", "stacks", "mapping", "lifecycle", "negative", "benchmark", "existing", "recovery", "full") + STACK_SUITES, default="smoke")
+    parser.add_argument("--suite", choices=("smoke", "mixed", "stacks", "mapping", "lifecycle", "negative", "benchmark", "existing", "recovery", "nonleader-exec", "full") + STACK_SUITES, default="smoke")
     parser.add_argument("--duration-ms", type=int, default=1000)
     parser.add_argument("--recorder", type=Path)
+    parser.add_argument("--analyzer", type=Path, help="freeze this already-built host analyzer")
+    parser.add_argument("--run-dir", type=Path, help="new directory for this run; existing paths are rejected")
     parser.add_argument("--kernel", type=Path)
     parser.add_argument("--image", type=Path)
     parser.add_argument("--boot-timeout", type=float, default=120)
