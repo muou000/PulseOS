@@ -1,7 +1,9 @@
 mod ext;
 mod impls;
+mod segmented;
 
 pub use self::ext::{IoBufExt, IoBufMutExt};
+pub use self::segmented::Segmented;
 
 /// A trait for byte buffers that can be used as a source of bytes to read.
 ///

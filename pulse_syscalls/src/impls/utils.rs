@@ -8,6 +8,9 @@ use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
 use pulse_core::task::uaccess;
 
+mod pinned_buffers;
+pub(crate) use pinned_buffers::{PinnedUserBuffers, UserBufferCursor};
+
 use crate::validation::user_abi::{
     read_user_array_from, read_user_iovec_array_from, read_user_value_from, write_user_slice_to,
     write_user_value_to,
@@ -47,7 +50,7 @@ impl PinnedUserSlice {
 
 impl Drop for PinnedUserSlice {
     fn drop(&mut self) {
-        release_pinned_user_frames(&self.frames);
+        release_pinned_user_frames(&self.frames, || {});
     }
 }
 
@@ -58,21 +61,28 @@ fn release_pinned_user_frame(frame: PhysAddr) {
     }
 }
 
-fn release_pinned_user_frames(frames: &[PhysAddr]) {
+fn release_pinned_user_frames<const N: usize>(
+    frames: &heapless::Vec<PhysAddr, N>,
+    mut on_release: impl FnMut(),
+) {
     let table = frame_table();
-    let mut eligible = [PhysAddr::from(0); PINNED_USER_IO_MAX_PAGES];
+    let mut eligible = [PhysAddr::from(0); N];
     let mut count = 0;
     for &frame in frames {
-        if table.contains(frame) && table.dec_ref(frame) == 0 {
-            eligible[count] = frame;
-            count += 1;
+        if table.contains(frame) {
+            let remaining = table.dec_ref(frame);
+            on_release();
+            if remaining == 0 {
+                eligible[count] = frame;
+                count += 1;
+            }
         }
     }
     if count == 0 {
         return;
     }
     eligible[..count].sort_unstable_by_key(|frame| frame.as_usize());
-    let mut runs: heapless::Vec<(usize, usize), PINNED_USER_IO_MAX_PAGES> = heapless::Vec::new();
+    let mut runs: heapless::Vec<(usize, usize), N> = heapless::Vec::new();
     let mut run_start = eligible[0].as_usize();
     let mut run_len = 1;
     for &frame in &eligible[1..count] {
@@ -303,9 +313,10 @@ pub(crate) fn alloc_zeroed_bytes(
                     return Err(LinuxError::ENOMEM);
                 }
                 buf.resize(len, 0);
-            } else {
-                buf[..len].fill(0);
             }
+            // A regular-file operation may return an initialized prefix to
+            // the shared thread cache. Growing it only initializes the suffix.
+            buf[..len].fill(0);
             Ok(ScratchBuffer::ThreadLocal {
                 thread,
                 buffer: Some(buf),
@@ -475,7 +486,7 @@ fn pin_user_slice(
         let ptr = match NonNull::new((phys_to_virt(first) + (user_addr & 4095)).as_mut_ptr()) {
             Some(ptr) => ptr,
             None => {
-                release_pinned_user_frames(&frames);
+                release_pinned_user_frames(&frames, || {});
                 return None;
             }
         };

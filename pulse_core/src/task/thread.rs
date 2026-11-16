@@ -153,13 +153,20 @@ impl Thread {
     }
 
     pub fn put_io_buffer(&self, mut buf: alloc::vec::Vec<u8>) {
+        buf.clear();
+        self.put_initialized_io_buffer(buf);
+    }
+
+    /// Returns already initialized storage without forcing the next file I/O
+    /// to zero the same allocation again. Zeroed-buffer consumers must still
+    /// clear their requested prefix, including when they grow this storage.
+    pub fn put_initialized_io_buffer(&self, buf: alloc::vec::Vec<u8>) {
         // Large network requests may use this temporary buffer, but retaining
         // one on every thread after a single request would turn it into an
         // unbounded per-thread cache. Normal syscall I/O is chunked at 64 KiB.
         if buf.capacity() > IO_BUFFER_CACHE_MAX_CAPACITY {
             return;
         }
-        buf.clear();
         let mut guard = self.io_buffer.lock();
         *guard = buf;
     }

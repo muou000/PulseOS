@@ -1,6 +1,229 @@
 use axio::{BufReader, BufWriter, Cursor, SeekFrom, empty, prelude::*, repeat, sink};
 
 #[test]
+fn segmented_read_preserves_order_across_empty_and_partial_segments() {
+    let mut reader = axio::Segmented::new([&b""[..], &b"abc"[..], &b""[..], &b"defgh"[..]]);
+    let mut first = [0; 5];
+    assert_eq!(reader.remaining(), 8);
+    assert_eq!(reader.read(&mut []).unwrap(), 0);
+    assert_eq!(reader.read(&mut first).unwrap(), 5);
+    assert_eq!(&first, b"abcde");
+    assert_eq!(reader.remaining(), 3);
+    let mut tail = [0xA5; 5];
+    assert_eq!(reader.read(&mut tail).unwrap(), 3);
+    assert_eq!(&tail, b"fgh\xA5\xA5");
+    assert_eq!(reader.remaining(), 0);
+    assert_eq!(reader.read(&mut tail).unwrap(), 0);
+}
+
+#[test]
+fn segmented_write_fills_multiple_destinations_in_one_call() {
+    let mut first = [0xA5; 5];
+    let mut second = [0xA5; 6];
+    {
+        let segments = [&mut [][..], &mut first[1..4], &mut second[2..5]];
+        let mut writer = axio::Segmented::new(segments);
+        assert_eq!(writer.remaining_mut(), 6);
+        assert_eq!(writer.write(&[]).unwrap(), 0);
+        assert_eq!(writer.write(b"abcde").unwrap(), 5);
+        assert_eq!(writer.remaining_mut(), 1);
+        assert_eq!(writer.write(b"fg").unwrap(), 1);
+        assert_eq!(writer.remaining_mut(), 0);
+        assert_eq!(writer.write(b"g").unwrap(), 0);
+        writer.flush().unwrap();
+    }
+    assert_eq!(&first, b"\xA5abc\xA5");
+    assert_eq!(&second, b"\xA5\xA5def\xA5");
+}
+
+#[test]
+fn segmented_read_defers_an_error_until_after_delivering_the_prefix() {
+    struct Flaky {
+        bytes: &'static [u8],
+        fail_once: bool,
+    }
+    impl IoBuf for Flaky {
+        fn remaining(&self) -> usize {
+            self.bytes.len()
+        }
+    }
+    impl Read for Flaky {
+        fn read(&mut self, dst: &mut [u8]) -> axio::Result<usize> {
+            if core::mem::take(&mut self.fail_once) {
+                return Err(axio::Error::BadAddress);
+            }
+            self.bytes.read(dst)
+        }
+    }
+    let mut reader = axio::Segmented::new([
+        Flaky {
+            bytes: b"ab",
+            fail_once: false,
+        },
+        Flaky {
+            bytes: b"cd",
+            fail_once: true,
+        },
+    ]);
+    let mut dst = [0xA5; 4];
+    assert_eq!(reader.read(&mut dst).unwrap(), 2);
+    assert_eq!(dst, [b'a', b'b', 0xA5, 0xA5]);
+    assert_eq!(reader.remaining(), 2);
+    assert_eq!(reader.read(&mut []).unwrap(), 0);
+    assert_eq!(reader.read(&mut dst), Err(axio::Error::BadAddress));
+    assert_eq!(reader.read(&mut dst).unwrap(), 2);
+    assert_eq!(&dst[..2], b"cd");
+}
+
+#[test]
+fn segmented_write_defers_an_error_until_after_delivering_the_prefix() {
+    struct Flaky<'a> {
+        bytes: &'a mut [u8],
+        fail_once: bool,
+    }
+    impl IoBufMut for Flaky<'_> {
+        fn remaining_mut(&self) -> usize {
+            self.bytes.len()
+        }
+    }
+    impl Write for Flaky<'_> {
+        fn write(&mut self, src: &[u8]) -> axio::Result<usize> {
+            if core::mem::take(&mut self.fail_once) {
+                return Err(axio::Error::BadAddress);
+            }
+            self.bytes.write(src)
+        }
+        fn flush(&mut self) -> axio::Result<()> {
+            Ok(())
+        }
+    }
+    let mut first = [0xA5; 2];
+    let mut last = [0xA5; 2];
+    {
+        let mut writer = axio::Segmented::new([
+            Flaky {
+                bytes: &mut first,
+                fail_once: false,
+            },
+            Flaky {
+                bytes: &mut last,
+                fail_once: true,
+            },
+        ]);
+        assert_eq!(writer.write(b"abcd").unwrap(), 2);
+        assert_eq!(writer.remaining_mut(), 2);
+        assert_eq!(writer.write(&[]).unwrap(), 0);
+        assert_eq!(writer.write(b"cd"), Err(axio::Error::BadAddress));
+        assert_eq!(writer.write(b"cd").unwrap(), 2);
+    }
+    assert_eq!(&first, b"ab");
+    assert_eq!(&last, b"cd");
+}
+
+#[test]
+fn segmented_read_stops_at_a_short_or_zero_transfer_without_skipping_data() {
+    struct Limited {
+        bytes: &'static [u8],
+        limit: usize,
+    }
+    impl IoBuf for Limited {
+        fn remaining(&self) -> usize {
+            self.bytes.len()
+        }
+    }
+    impl Read for Limited {
+        fn read(&mut self, dst: &mut [u8]) -> axio::Result<usize> {
+            let len = dst.len().min(self.limit);
+            self.bytes.read(&mut dst[..len])
+        }
+    }
+    let mut reader = axio::Segmented::new([
+        Limited {
+            bytes: b"abc",
+            limit: 2,
+        },
+        Limited {
+            bytes: b"de",
+            limit: 0,
+        },
+        Limited {
+            bytes: b"fg",
+            limit: 2,
+        },
+    ]);
+    let mut dst = [0xA5; 7];
+    assert_eq!(reader.read(&mut dst).unwrap(), 2);
+    assert_eq!(dst, [b'a', b'b', 0xA5, 0xA5, 0xA5, 0xA5, 0xA5]);
+    assert_eq!(reader.remaining(), 5);
+    assert_eq!(reader.read(&mut dst).unwrap(), 1);
+    assert_eq!(dst[0], b'c');
+    assert_eq!(reader.remaining(), 4);
+    assert_eq!(reader.read(&mut dst).unwrap(), 0);
+    assert_eq!(reader.remaining(), 4);
+}
+
+#[test]
+fn segmented_write_stops_at_a_short_or_zero_transfer_without_skipping_data() {
+    struct Limited<'a> {
+        bytes: &'a mut [u8],
+        limit: usize,
+    }
+    impl IoBufMut for Limited<'_> {
+        fn remaining_mut(&self) -> usize {
+            self.bytes.len()
+        }
+    }
+    impl Write for Limited<'_> {
+        fn write(&mut self, src: &[u8]) -> axio::Result<usize> {
+            self.bytes.write(&src[..src.len().min(self.limit)])
+        }
+        fn flush(&mut self) -> axio::Result<()> {
+            Ok(())
+        }
+    }
+    let mut first = [0xA5; 3];
+    let mut middle = [0xA5; 2];
+    let mut last = [0xA5; 2];
+    {
+        let mut writer = axio::Segmented::new([
+            Limited {
+                bytes: &mut first,
+                limit: 2,
+            },
+            Limited {
+                bytes: &mut middle,
+                limit: 0,
+            },
+            Limited {
+                bytes: &mut last,
+                limit: 2,
+            },
+        ]);
+        assert_eq!(writer.write(b"abcdefg").unwrap(), 2);
+        assert_eq!(writer.remaining_mut(), 5);
+        assert_eq!(writer.write(b"cdefg").unwrap(), 1);
+        assert_eq!(writer.remaining_mut(), 4);
+        assert_eq!(writer.write(b"defg").unwrap(), 0);
+        assert_eq!(writer.remaining_mut(), 4);
+    }
+    assert_eq!(&first, b"abc");
+    assert_eq!(middle, [0xA5; 2]);
+    assert_eq!(last, [0xA5; 2]);
+}
+
+#[test]
+fn segmented_empty_lists_are_exhausted_without_access() {
+    let mut reader = axio::Segmented::new([] as [&[u8]; 0]);
+    let mut dst = [0xA5; 3];
+    assert_eq!(reader.remaining(), 0);
+    assert_eq!(reader.read(&mut dst).unwrap(), 0);
+    assert_eq!(dst, [0xA5; 3]);
+    let mut writer = axio::Segmented::new([] as [&mut [u8]; 0]);
+    assert_eq!(writer.remaining_mut(), 0);
+    assert_eq!(writer.write(b"abc").unwrap(), 0);
+}
+
+#[test]
 fn test_slice() {
     let mut buf: &[u8] = &[1, 2, 3, 4, 5];
     assert_eq!(buf.remaining(), 5);

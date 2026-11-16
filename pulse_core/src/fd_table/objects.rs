@@ -5,6 +5,46 @@ pub struct FileObject {
     nonblocking: AtomicBool,
 }
 
+/// A file operation borrowing the calling thread's bounded initialized I/O
+/// buffer. The allocation is returned on success, short I/O and every error;
+/// no cache mutex is held while preparing user memory or waiting for I/O.
+pub struct FileObjectIo<'a> {
+    inner: axfs::FileIo<'a>,
+    thread: Option<Arc<crate::task::Thread>>,
+}
+
+impl<'a> FileObjectIo<'a> {
+    fn new(mut inner: axfs::FileIo<'a>) -> Self {
+        let thread = crate::task::current_thread().ok();
+        if let Some(thread) = &thread {
+            inner.replace_staging(thread.take_io_buffer());
+        }
+        Self { inner, thread }
+    }
+}
+
+impl<'a> core::ops::Deref for FileObjectIo<'a> {
+    type Target = axfs::FileIo<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl core::ops::DerefMut for FileObjectIo<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Drop for FileObjectIo<'_> {
+    fn drop(&mut self) {
+        if let Some(thread) = &self.thread {
+            thread.put_initialized_io_buffer(self.inner.replace_staging(Vec::new()));
+        }
+    }
+}
+
 impl FileObject {
     pub fn new(inner: File) -> Self {
         Self {
@@ -25,6 +65,24 @@ impl FileObject {
 
     pub fn inner(&self) -> &File {
         &self.inner
+    }
+
+    pub fn supports_file_io(&self) -> bool {
+        self.inner.supports_file_io()
+    }
+
+    pub fn begin_read_io(&self, offset: Option<u64>) -> LinuxResult<FileObjectIo<'_>> {
+        let operation = match self.inner.try_begin_read_io(offset) {
+            Some(result) => result?,
+            None => axtask::future::block_on(self.inner.begin_read_io(offset))?,
+        };
+        Ok(FileObjectIo::new(operation))
+    }
+
+    pub fn begin_write_io(&self, offset: Option<u64>) -> LinuxResult<FileObjectIo<'_>> {
+        Ok(FileObjectIo::new(axtask::future::block_on(
+            self.inner.begin_write_io(offset),
+        )?))
     }
 
     /// Writes a slice whose backing storage remains valid until this method

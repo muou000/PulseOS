@@ -183,6 +183,23 @@ fn node_allows_page_cache(flags: NodeFlags) -> bool {
 
 mod cache;
 mod handle;
+mod position;
+#[cfg(feature = "file-io-test")]
+mod io_test;
+#[cfg(feature = "file-io-test")]
+mod io_checks;
+
+#[cfg(feature = "file-io-test")]
+pub use io_checks::run_file_io_checks;
+
+#[cfg(feature = "file-io-test")]
+pub use io_test::{
+    FileIoTestSnapshot, file_io_test_begin, file_io_test_disable, file_io_test_pinned_pages,
+    file_io_test_snapshot, file_io_test_pin_acquired, file_io_test_pin_released,
+    file_io_test_pins_balanced,
+};
+
+use position::{FilePosition, IoPosition};
 
 pub use cache::*;
 pub use handle::*;

@@ -1,0 +1,100 @@
+{
+  "source_commit": "81429b48bf0e32a0c2c4121c18c96a36c2e22843",
+  "date": "2026-11-16",
+  "runtime_features": {
+    "rv": [
+      "qemu"
+    ],
+    "la": [
+      "qemu"
+    ]
+  },
+  "file_io_test_enabled": false,
+  "kernel_sha256": {
+    "rv": "b97f7a91a673c5a8838108ef9738ed6c9993edb129653eaa742685f4d0e0ec62",
+    "la": "3f7e932151100dde79245221c06929cb7d71b46a1312d062d7e0ca61c401a092"
+  },
+  "test_gate_evidence": "Both semantics logs observe PSGI RESET rejected as unsupported; the same guest ELF passes with and without the test feature.",
+  "guest_run_count": 4,
+  "guest_runs": [
+    {
+      "run": "gate-semantics-rv",
+      "arch": "riscv64",
+      "suite": "semantics",
+      "status": "pass",
+      "kernel_sha256": "b97f7a91a673c5a8838108ef9738ed6c9993edb129653eaa742685f4d0e0ec62",
+      "guest_sha256": "d87d3db317ea6f7defcbda58dcc4e67054a01dfe8add6c5c8dcd6aae5ae91373",
+      "matches_feature_enabled_guest": true,
+      "reported_pass_groups": 9
+    },
+    {
+      "run": "gate-append-rv",
+      "arch": "riscv64",
+      "suite": "append",
+      "status": "pass",
+      "kernel_sha256": "b97f7a91a673c5a8838108ef9738ed6c9993edb129653eaa742685f4d0e0ec62",
+      "guest_sha256": "9c1307c5a8cce275ccf07f602aed4cb8b7733b1169dc591766f198acde34e857",
+      "matches_feature_enabled_guest": true,
+      "reported_pass_groups": 2
+    },
+    {
+      "run": "gate-semantics-la",
+      "arch": "loongarch64",
+      "suite": "semantics",
+      "status": "pass",
+      "kernel_sha256": "3f7e932151100dde79245221c06929cb7d71b46a1312d062d7e0ca61c401a092",
+      "guest_sha256": "b13a2fbc836e99a79a4edbd8dca4e210d545b4a97cc78c38d7738cb015b44d70",
+      "matches_feature_enabled_guest": true,
+      "reported_pass_groups": 9
+    },
+    {
+      "run": "gate-append-la",
+      "arch": "loongarch64",
+      "suite": "append",
+      "status": "pass",
+      "kernel_sha256": "3f7e932151100dde79245221c06929cb7d71b46a1312d062d7e0ca61c401a092",
+      "guest_sha256": "6b5dbf3ff103f43cd5e04e39fdd7a62ede95421fdccbdc78f2a3a0bb5201f1fb",
+      "matches_feature_enabled_guest": true,
+      "reported_pass_groups": 2
+    }
+  ],
+  "builds": [
+    {
+      "command": "make test",
+      "status": "pass",
+      "release_targets": 2,
+      "log": "provenance/build-normal.log"
+    },
+    {
+      "command": "make rv APP_FEATURES='qemu bpf-trace'",
+      "status": "pass",
+      "release_targets": 1,
+      "log": "provenance/build-bpf-rv.log"
+    }
+  ],
+  "archive": {
+    "file": "gates.tar.gz",
+    "bytes": 50926,
+    "sha256": "27fb115c68fbadaf75398349c02aa261041de76006f29dbf146aa08f9987eca2",
+    "entries": 26
+  },
+  "unchanged_primary_archive_sha256": "2b9485d01598968c63f07f17b3555c2dd6565224195edb45029e9566141b2e2f",
+  "unchanged_primary_result_sha256": "9e0246304fe956f0d2109f6291f6e59fa31e5f178d280041beffa57a3b0c97d2",
+  "timings_rerun": false,
+  "kernel_provenance": {
+    "rv": {
+      "file": "provenance/PulseOS_riscv64-qemu-virt.elf.provenance.json",
+      "provenance_sha256": "31319b7a3df8d1610f0d83a8733e7b44563c7436e29582a0bac93c5f3851adce",
+      "artifact_kind": "binary",
+      "artifact_sha256": "b97f7a91a673c5a8838108ef9738ed6c9993edb129653eaa742685f4d0e0ec62",
+      "configuration_features": "axfeat/defplat axfeat/log-level-info axfeat/bus-mmio smp qemu"
+    },
+    "la": {
+      "file": "provenance/PulseOS_loongarch64-qemu-virt.elf.provenance.json",
+      "provenance_sha256": "c1ebb0c3d1290e2e537a8bb981eb62503dcf430daa8237322997fad52e45cac6",
+      "artifact_kind": "elf",
+      "artifact_sha256": "3f7e932151100dde79245221c06929cb7d71b46a1312d062d7e0ca61c401a092",
+      "configuration_features": "axfeat/defplat axfeat/log-level-info axfeat/bus-pci smp qemu"
+    }
+  }
+}

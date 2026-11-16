@@ -453,6 +453,10 @@ pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> isize
 }
 
 pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> isize {
+    #[cfg(feature = "file-io-test")]
+    if option as u32 == crate::impls::file_io_test::PR_FILE_IO_TEST {
+        return crate::impls::file_io_test::prctl(arg2, _arg3, _arg4, _arg5);
+    }
     let process = match current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,

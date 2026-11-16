@@ -56,6 +56,13 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
     if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.supports_file_io() {
+            let segments = match normalize_iovecs(&iovecs) {
+                Ok(segments) => segments,
+                Err(error) => return -(error.code() as isize),
+            };
+            return super::regular::read(file_obj, &segments, None);
+        }
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;
             let offset = match file_obj.seek(SeekFrom::Current(0)) {
@@ -143,6 +150,13 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, pos_l: usize, pos_h: usi
         Err(e) => return -e.code() as isize,
     };
     if let Some(file_obj) = object.as_any().downcast_ref::<FileObject>() {
+        if file_obj.supports_file_io() {
+            let segments = match normalize_iovecs(&iovecs) {
+                Ok(segments) => segments,
+                Err(error) => return -(error.code() as isize),
+            };
+            return super::regular::read(file_obj, &segments, Some(offset as u64));
+        }
         if file_obj.inner().is_direct_regular_file() {
             let block_size = file_obj.inner().block_size() as usize;
             if (offset as usize) % block_size != 0 {
