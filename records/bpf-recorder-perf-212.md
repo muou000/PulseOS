@@ -65,3 +65,31 @@ make test APP_FEATURES="qemu bpf-trace" 2>&1 | tail -30
 
 Linux v6.12 是格式子集基线，实际 consumer 为 perf 6.8.12；FlameGraph 固定
 `41fee1f99f9276008b7cd112fca19dc3ea84ac32` 并校验内容 SHA。不在运行时下载工具。
+
+## 真实 capture 重放与审查
+
+[#212 重放证据](../tests/bpf_record/evidence/212/README.md) 包含十二组 Query，输入为
+#211 未修改的双架构 capture/ELF。独立 oracle 从原归档 timeline 的 payload bytes
+和 transport source bindings 解码期望值，与 native perf 全字段逐条比较。
+
+| 原 #211 capture（user Query） | samples | period_ns | partial chains |
+|---|---:|---:|---:|
+| RV mixed | 21 | 210,000,000 | 15 |
+| LA mixed | 49 | 490,000,000 | 24 |
+| RV nonleader exec | 138 | 1,380,000,000 | 0 |
+| LA nonleader exec | 123 | 1,230,000,000 | 0 |
+
+四组各验证两种单位；另外四组按 exec 前后 numeric TID 分别筛选。全部保留
+`IncompleteError`，无完整归因声明。部分 RV 地址被 perf 显示为本地汇编标签，
+真实输出原样保留；函数核对包括 `_start`，不宣称所有地址都已恢复函数名。
+本票执行 host replay，新的 guest 端到端流程仍由后续票验收。
+
+双轴审查发现同一项 P2：固定 collapser 将 TID 0 显示为 `?/0`，空链标记未匹配
+它的标签规则。修复后，Python 回归、原固定 Perl 的独立重放、kernel/idle 空链
+的原生 perf → SVG 两种单位均通过。Standards 没有规范违反或需要处理的代码异味。
+两轴复查均无剩余发现。主机验证共 **497 项 Rust 测试**（490 常规 + 7 原生 perf）
+及 **126 项 Python 测试**（109 sampling + 17 recorder）通过；`cargo check` 通过。
+
+一次初始默认构建在编译期间提交证据，改变了 provenance 中的 Git identity，
+因此被 `source inputs changed during build` 门禁拒绝；不计为通过。
+最终门禁在源文件和提交固定后重新运行。

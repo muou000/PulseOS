@@ -87,7 +87,12 @@ def mark_empty_chains(folded: str, samples: list[dict], unit: str) -> str:
     weights = Counter()
     for sample in samples:
         label = sample["comm"].replace(" ", "_")  # pinned --tid name transformation
-        weights[f"{label}-{sample['pid']}/{sample['tid']}"] += (
+        pid, tid = sample["pid"], sample["tid"]
+        # The pinned Perl script treats TID 0 as an omitted TID and displays
+        # an unknown PID. Match its label without changing captured identity.
+        if tid == 0:
+            pid, tid = "?", pid
+        weights[f"{label}-{pid}/{tid}"] += (
             1 if unit == "samples" else sample["period_ns"])
     rows = []
     for line in folded.splitlines():
