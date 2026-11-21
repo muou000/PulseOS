@@ -2112,11 +2112,21 @@ dependencies = [
  "memory_addr",
  "percpu",
  "pulse_bpf_schema",
+ "pulse_io_uring_core",
  "pulse_user_abi",
  "sha2",
  "spin 0.10.0",
  "starry-vdso",
  "xmas-elf",
+]
+
+[[package]]
+name = "pulse_io_uring_core"
+version = "0.1.0"
+dependencies = [
+ "axerrno",
+ "linux-raw-sys",
+ "pulse_user_abi",
 ]
 
 [[package]]
@@ -2145,6 +2155,7 @@ dependencies = [
  "memory_addr",
  "pulse_bpf_schema",
  "pulse_core",
+ "pulse_io_uring_core",
  "pulse_user_abi",
  "rand_core 0.10.1",
  "rand_pcg",

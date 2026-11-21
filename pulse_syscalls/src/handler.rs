@@ -478,6 +478,18 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
             args[3] as i32,
             args[4],
         ),
+        Sysno::io_uring_setup => impls::sys_io_uring_setup(args[0] as u32, args[1]),
+        Sysno::io_uring_enter => impls::sys_io_uring_enter(
+            args[0] as i32,
+            args[1] as u32,
+            args[2] as u32,
+            args[3] as u32,
+            args[4],
+            args[5],
+        ),
+        Sysno::io_uring_register => {
+            impls::sys_io_uring_register(args[0] as i32, args[1] as u32, args[2], args[3] as u32)
+        }
         _ => {
             axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize

@@ -11,6 +11,7 @@ pub(crate) mod epoll;
 pub(crate) mod fd;
 pub(crate) mod futex;
 pub(crate) mod io;
+pub(crate) mod io_uring;
 pub(crate) mod mm;
 pub(crate) mod resource;
 pub(crate) mod signal;

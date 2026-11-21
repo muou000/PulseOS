@@ -3,6 +3,7 @@
 mod bpf;
 mod fs;
 mod futex;
+mod io_uring;
 mod ipc;
 mod misc;
 mod mm;
@@ -22,6 +23,7 @@ pub use bpf::run_bpf_guest_checks;
 pub(crate) use fs::*;
 pub use fs::sys_sync;
 pub(crate) use futex::*;
+pub(crate) use io_uring::*;
 pub(crate) use ipc::*;
 pub(crate) use misc::*;
 pub(crate) use mm::*;

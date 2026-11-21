@@ -285,6 +285,47 @@ impl EventFdObject {
         crate::task::current_have_signals()
     }
 
+    fn try_add_counter(&self, value: u64) -> LinuxResult<bool> {
+        if value == u64::MAX {
+            return Err(LinuxError::EINVAL);
+        }
+        if value == 0 {
+            return Ok(true);
+        }
+        loop {
+            let counter = self.counter.load(Ordering::Acquire);
+            if !Self::can_write(counter, value) {
+                return Ok(false);
+            }
+            if self
+                .counter
+                .compare_exchange_weak(
+                    counter,
+                    counter + value,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.readable_sequence.fetch_add(1, Ordering::Release);
+                if !self.read_wait_queue.is_empty() {
+                    self.read_wait_queue.notify_all(true);
+                }
+                return Ok(true);
+            }
+        }
+    }
+
+    /// Signals an eventfd without blocking, returning `Err(EAGAIN)` if the
+    /// counter would saturate or `Err(EINVAL)` for `u64::MAX`.
+    pub fn signal_nonblocking(&self, value: u64) -> LinuxResult<()> {
+        if self.try_add_counter(value)? {
+            Ok(())
+        } else {
+            Err(LinuxError::EAGAIN)
+        }
+    }
+
     #[inline]
     fn can_write(counter: u64, value: u64) -> bool {
         u64::MAX - counter > value
@@ -387,36 +428,18 @@ impl FdObject for EventFdObject {
         }
 
         loop {
-            let counter = self.counter.load(Ordering::Acquire);
-            if !Self::can_write(counter, value) {
-                if self.nonblocking.load(Ordering::Acquire) {
-                    return Err(LinuxError::EAGAIN);
-                }
-                self.write_wait_queue.wait_until(|| {
-                    Self::can_write(self.counter.load(Ordering::Acquire), value)
-                        || Self::current_has_pending_signal()
-                });
-                if Self::current_has_pending_signal() {
-                    return Err(LinuxError::EINTR);
-                }
-                continue;
-            }
-
-            if self
-                .counter
-                .compare_exchange_weak(
-                    counter,
-                    counter + value,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                self.readable_sequence.fetch_add(1, Ordering::Release);
-                if !self.read_wait_queue.is_empty() {
-                    self.read_wait_queue.notify_all(true);
-                }
+            if self.try_add_counter(value)? {
                 return Ok(core::mem::size_of::<u64>());
+            }
+            if self.nonblocking.load(Ordering::Acquire) {
+                return Err(LinuxError::EAGAIN);
+            }
+            self.write_wait_queue.wait_until(|| {
+                Self::can_write(self.counter.load(Ordering::Acquire), value)
+                    || Self::current_has_pending_signal()
+            });
+            if Self::current_has_pending_signal() {
+                return Err(LinuxError::EINTR);
             }
         }
     }

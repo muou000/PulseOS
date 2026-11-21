@@ -3,7 +3,8 @@ use alloc::{sync::Arc, vec::Vec};
 use axfs::{CachedFile, FileFlags};
 use axhal::paging::MappingFlags;
 use linux_raw_sys::general::{
-    MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED,
+    MADV_DOFORK, MADV_DONTFORK, MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM,
+    MADV_SEQUENTIAL, MADV_WILLNEED,
     MAP_ANONYMOUS, MAP_DENYWRITE, MAP_EXECUTABLE, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_GROWSDOWN,
     MAP_HUGETLB, MAP_LOCKED, MAP_NONBLOCK, MAP_NORESERVE, MAP_POPULATE, MAP_PRIVATE, MAP_SHARED,
     MAP_SHARED_VALIDATE, MAP_STACK, MAP_SYNC, MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT,
@@ -457,7 +458,13 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> isize {
 
     let discard = match advice as u32 {
         MADV_DONTNEED | MADV_FREE => true,
-        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => false,
+        MADV_NORMAL
+        | MADV_RANDOM
+        | MADV_SEQUENTIAL
+        | MADV_WILLNEED
+        // Accepted as a no-op so liburing ring setup succeeds until VM_DONTCOPY fork exclusion is wired (#235).
+        | MADV_DONTFORK
+        | MADV_DOFORK => false,
         _ => return -LinuxError::EINVAL.code() as isize,
     };
 

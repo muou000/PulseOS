@@ -9,4 +9,4 @@ description = "Validity-safe user-space ABI codec boundary for PulseOS scalars a
 
 [dependencies]
 axerrno.workspace = true
-linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy", "elf_uapi"] }
+linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy", "elf_uapi", "io_uring"] }
