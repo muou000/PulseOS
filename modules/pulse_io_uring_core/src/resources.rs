@@ -51,6 +51,41 @@ pub fn checked_total_len(segments: &[UserIoSegment]) -> Result<usize, LinuxError
     Ok(total)
 }
 
+/// Validates `O_DIRECT` user buffer addresses and lengths against `block_size`.
+pub fn validate_direct_io_buffers(
+    segments: &[UserIoSegment],
+    block_size: usize,
+) -> Result<(), LinuxError> {
+    if block_size == 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    for segment in segments {
+        if !segment.addr.is_multiple_of(block_size) || !segment.len.is_multiple_of(block_size) {
+            return Err(LinuxError::EINVAL);
+        }
+    }
+    Ok(())
+}
+
+/// Validates an `O_DIRECT` file offset against `block_size`.
+#[inline]
+pub fn validate_direct_io_offset(offset: u64, block_size: usize) -> Result<(), LinuxError> {
+    if block_size == 0 || !offset.is_multiple_of(block_size as u64) {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates `O_DIRECT` file offset and user buffer alignment against `block_size`.
+pub fn validate_direct_io(
+    segments: &[UserIoSegment],
+    offset: u64,
+    block_size: usize,
+) -> Result<(), LinuxError> {
+    validate_direct_io_offset(offset, block_size)?;
+    validate_direct_io_buffers(segments, block_size)
+}
+
 /// 计算 `[addr, addr + len)` 横跨的 4 KiB 用户页数。
 pub fn page_count_for_range(addr: usize, len: usize) -> Result<usize, LinuxError> {
     if len == 0 {
@@ -656,5 +691,25 @@ mod tests {
         let old = reg.unregister(0, 0).unwrap();
         assert_eq!(old, vec![Some(10), Some(20), Some(30)]);
         assert_eq!(reg.get_cloned(0), Err(LinuxError::EBADF));
+    }
+
+    #[test]
+    fn direct_io_validation_enforces_alignment_for_offsets_and_segments() {
+        let ok = [
+            UserIoSegment::new(0x2000, 4096),
+            UserIoSegment::new(0x4000, 512),
+        ];
+        assert_eq!(validate_direct_io(&ok, 4096, 512), Ok(()));
+        assert_eq!(validate_direct_io(&ok, 1u64 << 33, 512), Ok(()));
+
+        // Zero block size or unaligned offset -> -EINVAL
+        assert_eq!(validate_direct_io(&ok, 0, 0), Err(LinuxError::EINVAL));
+        assert_eq!(validate_direct_io(&ok, 511, 512), Err(LinuxError::EINVAL));
+
+        // Unaligned user buffer address or length -> -EINVAL
+        let bad_addr = [UserIoSegment::new(0x2001, 512)];
+        assert_eq!(validate_direct_io(&bad_addr, 0, 512), Err(LinuxError::EINVAL));
+        let bad_len = [UserIoSegment::new(0x2000, 513)];
+        assert_eq!(validate_direct_io(&bad_len, 0, 512), Err(LinuxError::EINVAL));
     }
 }

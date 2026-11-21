@@ -200,6 +200,7 @@ pub use io_test::{
 };
 
 use position::{FilePosition, IoPosition};
+pub use position::FilePositionTicket;
 
 pub use cache::*;
 pub use handle::*;

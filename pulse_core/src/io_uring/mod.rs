@@ -51,8 +51,9 @@ use pulse_user_abi::io_uring::{
 
 use self::context::AsyncExecContext;
 use self::ops::{
-    PreparedOpSpec, compute_monotonic_deadline, execute_rw_request, prepare_sqe,
-    spawn_accept_future, spawn_poll_add_future, spawn_timer_future,
+    PreparedOpSpec, compute_monotonic_deadline, execute_fsync_request, execute_rw_request,
+    execute_sync_file_range_request, prepare_sqe, spawn_accept_future, spawn_poll_add_future,
+    spawn_timer_future,
 };
 use self::worker_pool::{alloc_ring_pool_id, global_worker_pool};
 use crate::fd_table::{EventFdObject, FdEntry, FdFlags, FdObject, PollEventSequence, PollRegistration};
@@ -71,6 +72,7 @@ struct RingInner {
     orch: RequestOrchestrator,
     specs: BTreeMap<RequestId, (PreparedOpSpec, AsyncExecContext)>,
     cancel_handles: BTreeMap<RequestId, CancelHandle>,
+    inline_deferred_starts: Vec<(RequestId, Vec<RequestId>)>,
 }
 
 /// Shared kernel state for an `io_uring` instance.
@@ -171,6 +173,7 @@ impl IoUringState {
                 orch: RequestOrchestrator::new(),
                 specs: BTreeMap::new(),
                 cancel_handles: BTreeMap::new(),
+                inline_deferred_starts: Vec::new(),
             }),
             fixed_buffers: SpinNoIrq::new((FixedBufferRegistry::new(), None)),
             fixed_files: SpinNoIrq::new(FixedFileRegistry::new()),
@@ -364,8 +367,40 @@ impl IoUringState {
     /// Emits `effects` and iteratively drives any newly activated `start_requests`
     /// (avoiding recursive kernel stack growth across long synchronous link chains).
     fn apply_effects(self: &Arc<Self>, effects: OrchestratorEffects, from_async: bool) {
-        let mut pending_starts: VecDeque<RequestId> =
-            self.publish_effects(effects, from_async).into();
+        let initial = self.publish_effects(effects, from_async);
+        self.drive_pending_starts(initial, from_async);
+    }
+
+    fn dispatch_completion_effects(
+        self: &Arc<Self>,
+        completed_id: RequestId,
+        effects: OrchestratorEffects,
+        from_async: bool,
+    ) {
+        let next_starts = self.publish_effects(effects, from_async);
+        if next_starts.is_empty() {
+            return;
+        }
+        {
+            let mut inner = self.inner.lock();
+            if let Some((_, deferred)) = inner
+                .inline_deferred_starts
+                .iter_mut()
+                .rfind(|(id, _)| *id == completed_id)
+            {
+                deferred.extend(next_starts);
+                return;
+            }
+        }
+        self.drive_pending_starts(next_starts, from_async);
+    }
+
+    fn drive_pending_starts(
+        self: &Arc<Self>,
+        initial: Vec<RequestId>,
+        from_async: bool,
+    ) {
+        let mut pending_starts: VecDeque<RequestId> = initial.into();
 
         while let Some(id) = pending_starts.pop_front() {
             if self.is_dying() {
@@ -385,10 +420,24 @@ impl IoUringState {
             }
             let entry = {
                 let mut inner = self.inner.lock();
-                inner.specs.remove(&id)
+                let entry = inner.specs.remove(&id);
+                if entry.is_some() {
+                    inner.inline_deferred_starts.push((id, Vec::new()));
+                }
+                entry
             };
             if let Some((spec, req_ctx)) = entry {
                 self.execute_started_request(id, spec, &req_ctx, &mut pending_starts);
+                let deferred = {
+                    let mut inner = self.inner.lock();
+                    inner
+                        .inline_deferred_starts
+                        .iter()
+                        .rposition(|(active_id, _)| *active_id == id)
+                        .map(|pos| inner.inline_deferred_starts.swap_remove(pos).1)
+                        .unwrap_or_default()
+                };
+                pending_starts.extend(deferred);
             }
         }
     }
@@ -522,11 +571,51 @@ impl IoUringState {
             PreparedOpSpec::Rw {
                 outcome,
                 is_write,
-                offset,
+                rw_flags,
                 force_async,
             } => match outcome {
-                Ok((entry, buffer)) => {
-                    execute_rw_request(self, ctx, req_id, entry, is_write, buffer, offset, force_async);
+                Ok(data) => {
+                    execute_rw_request(self, ctx, req_id, data, is_write, rw_flags, force_async);
+                }
+                Err(err) => {
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            },
+            PreparedOpSpec::Fsync {
+                outcome,
+                offset,
+                len,
+                data_only,
+                force_async,
+            } => match outcome {
+                Ok(entry) => {
+                    execute_fsync_request(self, req_id, entry, offset, len, data_only, force_async);
+                }
+                Err(err) => {
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            },
+            PreparedOpSpec::SyncFileRange {
+                outcome,
+                offset,
+                len,
+                sync_flags,
+                force_async,
+            } => match outcome {
+                Ok(entry) => {
+                    execute_sync_file_range_request(
+                        self,
+                        req_id,
+                        entry,
+                        offset,
+                        len,
+                        sync_flags,
+                        force_async,
+                    );
                 }
                 Err(err) => {
                     if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
@@ -621,7 +710,7 @@ impl IoUringState {
         drop(old_h);
         drop(old_spec);
         if let Some(eff) = eff {
-            self.apply_effects(eff, from_async);
+            self.dispatch_completion_effects(req_id, eff, from_async);
         }
     }
 
@@ -641,7 +730,7 @@ impl IoUringState {
         };
         drop(old_h);
         drop(old_spec);
-        self.apply_effects(eff, from_async);
+        self.dispatch_completion_effects(req_id, eff, from_async);
     }
 
     pub(crate) fn on_timeout_expired(
@@ -669,7 +758,7 @@ impl IoUringState {
         }
         if !eff.cqes.is_empty() || !eff.start_requests.is_empty() || !eff.cancel_requests.is_empty()
         {
-            self.apply_effects(eff, true);
+            self.dispatch_completion_effects(req_id, eff, true);
         }
     }
 
@@ -695,7 +784,7 @@ impl IoUringState {
         drop(old_spec);
         if !eff.cqes.is_empty() || !eff.start_requests.is_empty() || !eff.cancel_requests.is_empty()
         {
-            self.apply_effects(eff, true);
+            self.dispatch_completion_effects(lt_id, eff, true);
         }
     }
 

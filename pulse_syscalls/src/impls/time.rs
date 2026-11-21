@@ -1087,3 +1087,105 @@ pub fn sys_timer_delete(timerid: usize) -> isize {
         -LinuxError::EINVAL.code() as isize
     }
 }
+
+pub fn sys_timerfd_create(clockid: i32, flags: u32) -> isize {
+    axlog::debug!("sys_timerfd_create: clockid={}, flags={:#x}", clockid, flags);
+    let entry = match pulse_core::fd_table::timerfd_entry(clockid, flags) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    match crate::impls::fs::common::insert_fd_entry(entry) {
+        Ok(fd) => fd as isize,
+        Err(e) => -e.code() as isize,
+    }
+}
+
+fn lookup_timerfd(fd: usize) -> Result<pulse_core::fd_table::FdEntry, LinuxError> {
+    let entry = crate::impls::fs::common::get_fd_entry(fd)?;
+    if entry
+        .object
+        .as_any()
+        .is::<pulse_core::fd_table::TimerFdObject>()
+    {
+        Ok(entry)
+    } else {
+        Err(LinuxError::EINVAL)
+    }
+}
+
+pub fn sys_timerfd_settime(fd: usize, flags: u32, new_value: usize, old_value: usize) -> isize {
+    axlog::debug!(
+        "sys_timerfd_settime: fd={}, flags={:#x}, new_value={:#x}, old_value={:#x}",
+        fd,
+        flags,
+        new_value,
+        old_value
+    );
+    let new_spec = match read_user_itimerspec(new_value) {
+        Ok(spec) => spec,
+        Err(e) => return -e.code() as isize,
+    };
+    let val_dur = match timespec_to_duration(new_spec.it_value) {
+        Ok(d) => d,
+        Err(e) => return -e.code() as isize,
+    };
+    let int_dur = match timespec_to_duration(new_spec.it_interval) {
+        Ok(d) => d,
+        Err(e) => return -e.code() as isize,
+    };
+    let entry = match lookup_timerfd(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    let timerfd = entry
+        .object
+        .as_any()
+        .downcast_ref::<pulse_core::fd_table::TimerFdObject>()
+        .expect("TimerFdObject validated");
+
+    let val_ns = u64::try_from(val_dur.as_nanos()).unwrap_or(u64::MAX);
+    let int_ns = u64::try_from(int_dur.as_nanos()).unwrap_or(u64::MAX);
+    let (old_rem_ns, old_int_ns) = match timerfd.settime(flags, val_ns, int_ns) {
+        Ok(prev) => prev,
+        Err(e) => return -e.code() as isize,
+    };
+    if old_value != 0 {
+        let old_spec = itimerspec {
+            it_interval: ns_to_timespec(old_int_ns),
+            it_value: ns_to_timespec(old_rem_ns),
+        };
+        if let Err(e) = write_user_itimerspec(old_value, &old_spec) {
+            return -e.code() as isize;
+        }
+    }
+    0
+}
+
+pub fn sys_timerfd_gettime(fd: usize, curr_value: usize) -> isize {
+    axlog::debug!(
+        "sys_timerfd_gettime: fd={}, curr_value={:#x}",
+        fd,
+        curr_value
+    );
+    if curr_value == 0 {
+        return -LinuxError::EFAULT.code() as isize;
+    }
+    let entry = match lookup_timerfd(fd) {
+        Ok(entry) => entry,
+        Err(e) => return -e.code() as isize,
+    };
+    let timerfd = entry
+        .object
+        .as_any()
+        .downcast_ref::<pulse_core::fd_table::TimerFdObject>()
+        .expect("TimerFdObject validated");
+    let (rem_ns, int_ns) = timerfd.gettime();
+    let curr_spec = itimerspec {
+        it_interval: ns_to_timespec(int_ns),
+        it_value: ns_to_timespec(rem_ns),
+    };
+    match write_user_itimerspec(curr_value, &curr_spec) {
+        Ok(()) => 0,
+        Err(e) => -e.code() as isize,
+    }
+}

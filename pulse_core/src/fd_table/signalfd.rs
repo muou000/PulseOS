@@ -126,11 +126,57 @@ impl SignalFdObject {
         thread.has_waitset_signal(self.mask())
     }
 
+    pub fn try_read_nonblocking_for_thread(
+        &self,
+        thread: &crate::task::Thread,
+        buf: &mut [u8],
+    ) -> LinuxResult<usize> {
+        if buf.len() < SIGNALFD_SIGINFO_SIZE {
+            return Err(LinuxError::EINVAL);
+        }
+        let max_records = buf.len() / SIGNALFD_SIGINFO_SIZE;
+        let mut written = 0usize;
+        while written / SIGNALFD_SIGINFO_SIZE < max_records {
+            if let Some((sig, info)) = thread.dequeue_waitset_signal(self.mask()) {
+                let raw = info.unwrap_or_else(|| minimal_siginfo(sig));
+                let end = written + SIGNALFD_SIGINFO_SIZE;
+                buf[written..end].copy_from_slice(&signalfd_info_bytes(raw));
+                written = end;
+                continue;
+            }
+            break;
+        }
+        if written != 0 {
+            Ok(written)
+        } else {
+            Err(LinuxError::EAGAIN)
+        }
+    }
+
+    pub fn poll_for_thread(&self, thread: &crate::task::Thread) -> LinuxResult<PollState> {
+        Ok(PollState {
+            readable: self.is_readable(thread),
+            writable: false,
+        })
+    }
+
     fn wait_for_signal(&self, thread: &Arc<crate::task::Thread>) {
         let wait_queues = [thread.signal_wait_queue(), &self.mask_wait_queue];
         let _ = axtask::WaitQueue::wait_multiple_timeout_until(&wait_queues, None, || {
             self.is_readable(thread.as_ref()) || thread.has_pending_signal()
         });
+    }
+
+    pub fn wait_ready_for_thread(
+        &self,
+        thread: &Arc<crate::task::Thread>,
+        events: i16,
+        deadline: Option<Duration>,
+    ) -> LinuxResult<bool> {
+        if (events & POLLIN as i16) == 0 {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        self.wait_for_ready(thread, deadline)
     }
 
     fn wait_for_ready(
@@ -227,10 +273,7 @@ impl FdObject for SignalFdObject {
 
     fn poll(&self) -> LinuxResult<PollState> {
         let thread = crate::task::current_thread()?;
-        Ok(PollState {
-            readable: self.is_readable(thread.as_ref()),
-            writable: false,
-        })
+        self.poll_for_thread(thread.as_ref())
     }
 
     fn wait_ready(&self, events: i16, deadline: Option<Duration>) -> LinuxResult<bool> {
@@ -267,6 +310,20 @@ impl FdObject for SignalFdObject {
         }
 
         let thread = crate::task::current_thread()?;
+        self.register_poll_for_thread(&thread, cx, events, registrations)
+    }
+
+    fn register_poll_for_thread(
+        self: Arc<Self>,
+        thread: &Arc<crate::task::Thread>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut alloc::vec::Vec<PollRegistration>,
+    ) -> LinuxResult {
+        if !events.contains(axpoll::IoEvents::IN) {
+            return Ok(());
+        }
+
         let signal_registration = thread.signal_wait_queue().register_owned_waker(cx.waker());
         let signal_owner = thread.clone();
         registrations.push(PollRegistration::new(move || {

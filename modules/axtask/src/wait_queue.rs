@@ -499,13 +499,15 @@ impl WaitQueue {
             let mut rq = crate::run_queue::current_run_queue::<NoPreemptIrqSave>();
             #[cfg(feature = "bpf-trace")]
             let trace_sequence = curr.next_block_sequence();
-            curr.set_state(crate::task::TaskState::Blocked);
+            // Dekker-pair with `notify_one`/`notify_all`/`notify_task`: publish `Blocked`
+            // (`SeqCst`) before reading `in_wait_queue` (`SeqCst`).
+            curr.set_state_seqcst(crate::task::TaskState::Blocked);
 
             // A notifier may have consumed an entry while the task was still
             // Running. Restore Running locally if it won that race; if it
             // already changed Blocked to Ready, reschedule to consume the
             // queued wakeup normally.
-            let consumed_while_running = !curr.in_wait_queue()
+            let consumed_while_running = !curr.in_wait_queue_seqcst()
                 && curr.transition_state(
                     crate::task::TaskState::Blocked,
                     crate::task::TaskState::Running,
@@ -562,12 +564,17 @@ impl WaitQueue {
         let mut target = None;
         let mut consumed_running = false;
         while let Some(task) = wq.pop_front() {
-            match task.state() {
+            // Dekker-pair with `wait_multiple_timeout_until`: claim and clear
+            // `in_wait_queue` (`SeqCst`) before reading `task.state_seqcst()`.
+            if !task.consume_wait_queue_entry() {
+                continue;
+            }
+            match task.state_seqcst() {
                 crate::task::TaskState::Blocked => {
                     target = Some(task);
                     break;
                 }
-                crate::task::TaskState::Running if task.consume_wait_queue_entry() => {
+                crate::task::TaskState::Running => {
                     // `wait_multiple_timeout_until` enrolls the current task
                     // before changing it to Blocked. Consuming that Running
                     // entry is the one notification; do not drain later
@@ -575,11 +582,7 @@ impl WaitQueue {
                     consumed_running = true;
                     break;
                 }
-                _ => {
-                    // A timeout or a notification through another queue can
-                    // leave a stale entry behind until the waiter cleans up.
-                    task.set_in_wait_queue(false);
-                }
+                _ => {}
             }
         }
         drop(wq);
@@ -631,10 +634,11 @@ impl WaitQueue {
         if !tasks.is_empty() {
             let _guard = NoPreemptIrqSave::new();
             for task in tasks {
-                if task.state() == crate::task::TaskState::Blocked {
+                // Dekker-pair with `wait_multiple_timeout_until`: publish `in_wait_queue = false`
+                // (`SeqCst`) before reading `task.state_seqcst()`.
+                task.set_in_wait_queue_seqcst(false);
+                if task.state_seqcst() == crate::task::TaskState::Blocked {
                     unblock_one_task_locked(task, resched, context);
-                } else {
-                    task.set_in_wait_queue(false);
                 }
             }
         }
@@ -676,7 +680,11 @@ impl WaitQueue {
         };
 
         if let Some(task) = task {
-            unblock_one_task(task, resched, context);
+            let _guard = NoPreemptIrqSave::new();
+            task.set_in_wait_queue_seqcst(false);
+            if task.state_seqcst() == crate::task::TaskState::Blocked {
+                unblock_one_task_locked(task, resched, context);
+            }
             true
         } else {
             false
@@ -826,7 +834,7 @@ fn unblock_one_task(task: AxTaskRef, resched: bool, context: WakeContext) {
 
 fn unblock_one_task_locked(task: AxTaskRef, resched: bool, context: WakeContext) {
     // Mark task as not in wait queue.
-    task.set_in_wait_queue(false);
+    task.set_in_wait_queue_seqcst(false);
     // Select run queue by the CPU set of the task.
     // Use `NoOp` kernel guard here because the function is called with holding the
     // lock of wait queue, or an explicit `NoPreemptIrqSave` guard.

@@ -71,6 +71,133 @@ impl FileObject {
         self.inner.supports_file_io()
     }
 
+    pub fn is_seekable(&self) -> bool {
+        !self
+            .inner
+            .location()
+            .flags()
+            .contains(axfs_ng_vfs::NodeFlags::STREAM)
+    }
+
+    pub fn is_direct_regular_file(&self) -> bool {
+        self.inner.is_direct_regular_file()
+    }
+
+    pub fn is_blocking_node(&self) -> bool {
+        self.inner.is_blocking_node()
+    }
+
+    pub fn is_append_open(&self) -> bool {
+        self.inner.flags().contains(AxFileFlags::APPEND)
+    }
+
+    pub fn try_begin_read_io(&self, offset: Option<u64>) -> Option<LinuxResult<axfs::FileIo<'_>>> {
+        self.inner
+            .try_begin_read_io(offset)
+            .map(|r| r.map_err(LinuxError::from))
+    }
+
+    pub fn reserve_position_ticket(&self) -> Option<axfs::FilePositionTicket> {
+        self.inner.reserve_position_ticket()
+    }
+
+    pub async fn begin_read_io_async(&self, offset: Option<u64>) -> LinuxResult<axfs::FileIo<'_>> {
+        self.inner
+            .begin_read_io(offset)
+            .await
+            .map_err(LinuxError::from)
+    }
+
+    pub async fn begin_read_io_with_ticket(
+        &self,
+        ticket: Option<axfs::FilePositionTicket>,
+        offset: Option<u64>,
+    ) -> LinuxResult<axfs::FileIo<'_>> {
+        self.inner
+            .begin_read_io_with_ticket(ticket, offset)
+            .await
+            .map_err(LinuxError::from)
+    }
+
+    pub async fn begin_write_io_async(
+        &self,
+        offset: Option<u64>,
+        force_append: bool,
+    ) -> LinuxResult<axfs::FileIo<'_>> {
+        self.inner
+            .begin_write_io_with_append(offset, force_append)
+            .await
+            .map_err(LinuxError::from)
+    }
+
+    pub async fn begin_write_io_with_ticket(
+        &self,
+        ticket: Option<axfs::FilePositionTicket>,
+        offset: Option<u64>,
+        force_append: bool,
+    ) -> LinuxResult<axfs::FileIo<'_>> {
+        self.inner
+            .begin_write_io_with_ticket(ticket, offset, force_append)
+            .await
+            .map_err(LinuxError::from)
+    }
+
+    pub async fn block_size_async(&self) -> u64 {
+        self.inner.block_size_async().await
+    }
+
+    pub async fn sync_async(&self, data_only: bool) -> LinuxResult<()> {
+        self.inner.sync(data_only).await.map_err(LinuxError::from)
+    }
+
+    pub async fn sync_range_async(
+        &self,
+        offset: u64,
+        len: u64,
+        wait_before: bool,
+        write: bool,
+        wait_after: bool,
+    ) -> LinuxResult<()> {
+        self.inner
+            .sync_range(offset, len, wait_before, write, wait_after)
+            .await
+            .map_err(LinuxError::from)
+    }
+
+    pub async fn flush_pending_timestamps_async(&self) {
+        let _ = self.inner.flush_pending_timestamps().await;
+    }
+
+    pub async fn read_async<W: axio::Write + axio::IoBufMut>(&self, dst: W) -> LinuxResult<usize> {
+        self.inner.read(dst).await.map_err(LinuxError::from)
+    }
+
+    pub async fn read_at_async<W: axio::Write + axio::IoBufMut>(
+        &self,
+        dst: W,
+        offset: u64,
+    ) -> LinuxResult<usize> {
+        self.inner
+            .read_at(dst, offset)
+            .await
+            .map_err(LinuxError::from)
+    }
+
+    pub async fn write_async<R: axio::Read + axio::IoBuf>(&self, src: R) -> LinuxResult<usize> {
+        self.inner.write(src).await.map_err(LinuxError::from)
+    }
+
+    pub async fn write_at_async<R: axio::Read + axio::IoBuf>(
+        &self,
+        src: R,
+        offset: u64,
+    ) -> LinuxResult<usize> {
+        self.inner
+            .write_at(src, offset)
+            .await
+            .map_err(LinuxError::from)
+    }
+
     pub fn begin_read_io(&self, offset: Option<u64>) -> LinuxResult<FileObjectIo<'_>> {
         let operation = match self.inner.try_begin_read_io(offset) {
             Some(result) => result?,

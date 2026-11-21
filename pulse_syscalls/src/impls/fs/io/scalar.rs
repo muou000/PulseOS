@@ -9,6 +9,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         if get_fd_entry(fd).is_ok_and(|entry| {
             entry.object.as_any().is::<EventFdObject>()
                 || entry.object.as_any().is::<SignalFdObject>()
+                || entry.object.as_any().is::<TimerFdObject>()
         }) {
             return -LinuxError::EINVAL.code() as isize;
         }
@@ -97,6 +98,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         if get_fd_entry(fd).is_ok_and(|entry| {
             entry.object.as_any().is::<EventFdObject>()
                 || entry.object.as_any().is::<SignalFdObject>()
+                || entry.object.as_any().is::<TimerFdObject>()
         }) {
             return -LinuxError::EINVAL.code() as isize;
         }

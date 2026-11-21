@@ -316,6 +316,73 @@ impl EventFdObject {
         }
     }
 
+    fn read_inner(&self, buf: &mut [u8], force_nonblocking: bool) -> LinuxResult<usize> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(LinuxError::EINVAL);
+        }
+
+        loop {
+            let counter = self.counter.load(Ordering::Acquire);
+            if counter == 0 {
+                if force_nonblocking || self.nonblocking.load(Ordering::Acquire) {
+                    return Err(LinuxError::EAGAIN);
+                }
+                self.read_wait_queue.wait_until(|| {
+                    self.counter.load(Ordering::Acquire) > 0 || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
+                continue;
+            }
+
+            let value = if self.semaphore { 1 } else { counter };
+            if self
+                .counter
+                .compare_exchange_weak(
+                    counter,
+                    counter - value,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                buf[..core::mem::size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
+                self.writable_sequence.fetch_add(1, Ordering::Release);
+                if !self.write_wait_queue.is_empty() {
+                    self.write_wait_queue.notify_all(true);
+                }
+                return Ok(core::mem::size_of::<u64>());
+            }
+        }
+    }
+
+    fn write_inner(&self, buf: &[u8], force_nonblocking: bool) -> LinuxResult<usize> {
+        if buf.len() != core::mem::size_of::<u64>() {
+            return Err(LinuxError::EINVAL);
+        }
+        let value = u64::from_ne_bytes(buf.try_into().unwrap());
+        if value == u64::MAX {
+            return Err(LinuxError::EINVAL);
+        }
+
+        loop {
+            if self.try_add_counter(value)? {
+                return Ok(core::mem::size_of::<u64>());
+            }
+            if force_nonblocking || self.nonblocking.load(Ordering::Acquire) {
+                return Err(LinuxError::EAGAIN);
+            }
+            self.write_wait_queue.wait_until(|| {
+                Self::can_write(self.counter.load(Ordering::Acquire), value)
+                    || Self::current_has_pending_signal()
+            });
+            if Self::current_has_pending_signal() {
+                return Err(LinuxError::EINTR);
+            }
+        }
+    }
+
     /// Signals an eventfd without blocking, returning `Err(EAGAIN)` if the
     /// counter would saturate or `Err(EINVAL)` for `u64::MAX`.
     pub fn signal_nonblocking(&self, value: u64) -> LinuxResult<()> {
@@ -324,6 +391,14 @@ impl EventFdObject {
         } else {
             Err(LinuxError::EAGAIN)
         }
+    }
+
+    pub fn try_read_nonblocking(&self, buf: &mut [u8]) -> LinuxResult<usize> {
+        self.read_inner(buf, true)
+    }
+
+    pub fn try_write_nonblocking(&self, buf: &[u8]) -> LinuxResult<usize> {
+        self.write_inner(buf, true)
     }
 
     #[inline]
@@ -378,70 +453,11 @@ impl FdObject for EventFdObject {
     }
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
-        if buf.len() < core::mem::size_of::<u64>() {
-            return Err(LinuxError::EINVAL);
-        }
-
-        loop {
-            let counter = self.counter.load(Ordering::Acquire);
-            if counter == 0 {
-                if self.nonblocking.load(Ordering::Acquire) {
-                    return Err(LinuxError::EAGAIN);
-                }
-                self.read_wait_queue.wait_until(|| {
-                    self.counter.load(Ordering::Acquire) > 0 || Self::current_has_pending_signal()
-                });
-                if Self::current_has_pending_signal() {
-                    return Err(LinuxError::EINTR);
-                }
-                continue;
-            }
-
-            let value = if self.semaphore { 1 } else { counter };
-            if self
-                .counter
-                .compare_exchange_weak(
-                    counter,
-                    counter - value,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                buf[..core::mem::size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
-                self.writable_sequence.fetch_add(1, Ordering::Release);
-                if !self.write_wait_queue.is_empty() {
-                    self.write_wait_queue.notify_all(true);
-                }
-                return Ok(core::mem::size_of::<u64>());
-            }
-        }
+        self.read_inner(buf, false)
     }
 
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
-        if buf.len() != core::mem::size_of::<u64>() {
-            return Err(LinuxError::EINVAL);
-        }
-        let value = u64::from_ne_bytes(buf.try_into().unwrap());
-        if value == u64::MAX {
-            return Err(LinuxError::EINVAL);
-        }
-
-        loop {
-            if self.try_add_counter(value)? {
-                return Ok(core::mem::size_of::<u64>());
-            }
-            if self.nonblocking.load(Ordering::Acquire) {
-                return Err(LinuxError::EAGAIN);
-            }
-            self.write_wait_queue.wait_until(|| {
-                Self::can_write(self.counter.load(Ordering::Acquire), value)
-                    || Self::current_has_pending_signal()
-            });
-            if Self::current_has_pending_signal() {
-                return Err(LinuxError::EINTR);
-            }
-        }
+        self.write_inner(buf, false)
     }
 
     fn stat(&self) -> LinuxResult<stat> {

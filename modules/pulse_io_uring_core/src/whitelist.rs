@@ -4,9 +4,11 @@ use axerrno::LinuxError;
 use linux_raw_sys::io_uring::{io_uring_op, io_uring_probe, io_uring_probe_op};
 use pulse_user_abi::io_uring::{
     IORING_ASYNC_CANCEL_ALL, IORING_ASYNC_CANCEL_ANY, IORING_ASYNC_CANCEL_FD,
-    IORING_ASYNC_CANCEL_FD_FIXED, IORING_TIMEOUT_ABS, IORING_TIMEOUT_BOOTTIME,
-    IORING_TIMEOUT_CLOCK_MASK, IORING_TIMEOUT_ETIME_SUCCESS, IORING_TIMEOUT_LINK,
-    IORING_TIMEOUT_REALTIME, IORING_TIMEOUT_UPDATE, IOSQE_FIXED_FILE, IoUringSqe,
+    IORING_ASYNC_CANCEL_FD_FIXED, IORING_FSYNC_DATASYNC, IORING_TIMEOUT_ABS,
+    IORING_TIMEOUT_BOOTTIME, IORING_TIMEOUT_CLOCK_MASK, IORING_TIMEOUT_ETIME_SUCCESS,
+    IORING_TIMEOUT_LINK, IORING_TIMEOUT_REALTIME, IORING_TIMEOUT_UPDATE, IOSQE_FIXED_FILE,
+    IoUringSqe, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC,
+    SYNC_FILE_RANGE_WAIT_AFTER, SYNC_FILE_RANGE_WAIT_BEFORE, SYNC_FILE_RANGE_WRITE,
 };
 
 /// Linux v6.12 `IORING_OP_LAST` boundary (`0..=57`).
@@ -238,6 +240,52 @@ pub fn validate_link_timeout_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     Ok(())
 }
 
+const ALLOWED_RW_FLAGS_V1: u32 = RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
+
+/// Resolved file offset semantics for `READ` / `WRITE` / `READV` / `WRITEV` / `*_FIXED`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RwOffset {
+    CurrentPosition,
+    Positional(u64),
+}
+
+#[inline]
+pub fn validate_rw_flags(op_flags: u32) -> Result<(), LinuxError> {
+    if (op_flags & RWF_HIPRI) != 0 {
+        return Err(LinuxError::EOPNOTSUPP);
+    }
+    if (op_flags & !(ALLOWED_RW_FLAGS_V1 | RWF_HIPRI)) != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Resolves Linux tri-state `sqe.off` semantics against seekability and transfer length.
+pub fn resolve_rw_offset(
+    raw_off: u64,
+    requested_len: usize,
+    is_seekable: bool,
+) -> Result<RwOffset, LinuxError> {
+    if raw_off == u64::MAX {
+        return Ok(RwOffset::CurrentPosition);
+    }
+    if raw_off > i64::MAX as u64 {
+        return Err(LinuxError::EINVAL);
+    }
+    if !is_seekable {
+        return if raw_off == 0 {
+            Ok(RwOffset::CurrentPosition)
+        } else {
+            Err(LinuxError::ESPIPE)
+        };
+    }
+    raw_off
+        .checked_add(requested_len as u64)
+        .filter(|&end| end <= i64::MAX as u64)
+        .ok_or(LinuxError::EINVAL)?;
+    Ok(RwOffset::Positional(raw_off))
+}
+
 #[inline]
 fn validate_common_zero_fields(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     if sqe.ioprio != 0 || sqe.personality != 0 || sqe.splice_fd_in != 0 {
@@ -246,7 +294,25 @@ fn validate_common_zero_fields(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     Ok(())
 }
 
-/// Validates common prep invariants for basic read/write/poll/accept helper ops.
+/// Validates prep invariants for `IORING_OP_READ` / `WRITE` / `READV` / `WRITEV`.
+pub fn validate_rw_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    let op = sqe.opcode;
+    if op != io_uring_op::IORING_OP_READ as u8
+        && op != io_uring_op::IORING_OP_WRITE as u8
+        && op != io_uring_op::IORING_OP_READV as u8
+        && op != io_uring_op::IORING_OP_WRITEV as u8
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.buf_index != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_rw_flags(sqe.op_flags)
+}
+
+/// Validates common prep invariants for poll/accept helper ops.
 pub fn validate_rw_or_poll_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     validate_sqe_v1(sqe)?;
     validate_common_zero_fields(sqe)?;
@@ -264,7 +330,56 @@ pub fn validate_rw_fixed_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     {
         return Err(LinuxError::EINVAL);
     }
-    validate_common_zero_fields(sqe)
+    validate_common_zero_fields(sqe)?;
+    validate_rw_flags(sqe.op_flags)
+}
+
+/// Validates prep invariants for `IORING_OP_FSYNC` (opcode 3).
+pub fn validate_fsync_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_FSYNC as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.addr != 0 || sqe.buf_index != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if (sqe.op_flags & !IORING_FSYNC_DATASYNC) != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.off > i64::MAX as u64 {
+        return Err(LinuxError::EINVAL);
+    }
+    sqe.off
+        .checked_add(sqe.len as u64)
+        .filter(|&end| end <= i64::MAX as u64)
+        .ok_or(LinuxError::EINVAL)?;
+    Ok(())
+}
+
+/// Validates prep invariants for `IORING_OP_SYNC_FILE_RANGE` (opcode 8).
+pub fn validate_sync_file_range_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_SYNC_FILE_RANGE as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.addr != 0 || sqe.buf_index != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    const ALLOWED_SYNC_RANGE_FLAGS: u32 =
+        SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER;
+    if (sqe.op_flags & !ALLOWED_SYNC_RANGE_FLAGS) != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.off > i64::MAX as u64 {
+        return Err(LinuxError::EINVAL);
+    }
+    sqe.off
+        .checked_add(sqe.len as u64)
+        .filter(|&end| end <= i64::MAX as u64)
+        .ok_or(LinuxError::EINVAL)?;
+    Ok(())
 }
 
 /// Validates prep invariants for `IORING_OP_FILES_UPDATE`.
@@ -531,5 +646,115 @@ mod tests {
         files_upd.flags = 0;
         files_upd.op_flags = 1;
         assert_eq!(validate_files_update_sqe(&files_upd), Err(LinuxError::EINVAL));
+    }
+
+    #[test]
+    fn rw_offset_resolution_covers_tristate_overflow_and_stream_espipe() {
+        // u64::MAX selects current file position for both seekable and stream FDs.
+        assert_eq!(
+            resolve_rw_offset(u64::MAX, 4096, true),
+            Ok(RwOffset::CurrentPosition)
+        );
+        assert_eq!(
+            resolve_rw_offset(u64::MAX, 4096, false),
+            Ok(RwOffset::CurrentPosition)
+        );
+
+        // Seekable positive offsets validate overflow past i64::MAX.
+        assert_eq!(resolve_rw_offset(0, 4096, true), Ok(RwOffset::Positional(0)));
+        assert_eq!(
+            resolve_rw_offset(i64::MAX as u64, 0, true),
+            Ok(RwOffset::Positional(i64::MAX as u64))
+        );
+        assert_eq!(
+            resolve_rw_offset(i64::MAX as u64, 1, true),
+            Err(LinuxError::EINVAL)
+        );
+
+        // Negative offsets other than u64::MAX fail with -EINVAL regardless of seekability.
+        assert_eq!(
+            resolve_rw_offset((i64::MAX as u64) + 1, 1, true),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            resolve_rw_offset(u64::MAX - 1, 1, false),
+            Err(LinuxError::EINVAL)
+        );
+
+        // Stream FDs permit 0 and u64::MAX, returning -ESPIPE for positive explicit offsets.
+        assert_eq!(
+            resolve_rw_offset(0, 64, false),
+            Ok(RwOffset::CurrentPosition)
+        );
+        assert_eq!(
+            resolve_rw_offset(1, 64, false),
+            Err(LinuxError::ESPIPE)
+        );
+        assert_eq!(
+            resolve_rw_offset(4096, 0, false),
+            Err(LinuxError::ESPIPE)
+        );
+    }
+
+    #[test]
+    fn rw_fsync_and_sync_file_range_validators_enforce_flags_and_ranges() {
+        // RW & RW_FIXED flags.
+        for op in [
+            io_uring_op::IORING_OP_READ as u8,
+            io_uring_op::IORING_OP_WRITE as u8,
+            io_uring_op::IORING_OP_READV as u8,
+            io_uring_op::IORING_OP_WRITEV as u8,
+        ] {
+            let mut sqe = empty_sqe(op);
+            sqe.op_flags = RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
+            assert_eq!(validate_rw_sqe(&sqe), Ok(()));
+
+            sqe.op_flags = RWF_HIPRI;
+            assert_eq!(validate_rw_sqe(&sqe), Err(LinuxError::EOPNOTSUPP));
+
+            sqe.op_flags = 1 << 30;
+            assert_eq!(validate_rw_sqe(&sqe), Err(LinuxError::EINVAL));
+        }
+
+        let mut rw_fixed = empty_sqe(io_uring_op::IORING_OP_WRITE_FIXED as u8);
+        rw_fixed.op_flags = RWF_APPEND | RWF_DSYNC;
+        assert_eq!(validate_rw_fixed_sqe(&rw_fixed), Ok(()));
+        rw_fixed.op_flags = RWF_HIPRI;
+        assert_eq!(validate_rw_fixed_sqe(&rw_fixed), Err(LinuxError::EOPNOTSUPP));
+        rw_fixed.op_flags = 1 << 29;
+        assert_eq!(validate_rw_fixed_sqe(&rw_fixed), Err(LinuxError::EINVAL));
+
+        // FSYNC validation.
+        let mut fsync = empty_sqe(io_uring_op::IORING_OP_FSYNC as u8);
+        assert_eq!(validate_fsync_sqe(&fsync), Ok(()));
+        fsync.op_flags = IORING_FSYNC_DATASYNC;
+        fsync.off = 4096;
+        fsync.len = 4096;
+        assert_eq!(validate_fsync_sqe(&fsync), Ok(()));
+
+        let mut bad_fsync = empty_sqe(io_uring_op::IORING_OP_FSYNC as u8);
+        bad_fsync.op_flags = 2;
+        assert_eq!(validate_fsync_sqe(&bad_fsync), Err(LinuxError::EINVAL));
+        bad_fsync.op_flags = 0;
+        bad_fsync.addr = 0x1000;
+        assert_eq!(validate_fsync_sqe(&bad_fsync), Err(LinuxError::EINVAL));
+        bad_fsync.addr = 0;
+        bad_fsync.off = i64::MAX as u64;
+        bad_fsync.len = 1;
+        assert_eq!(validate_fsync_sqe(&bad_fsync), Err(LinuxError::EINVAL));
+
+        // SYNC_FILE_RANGE validation.
+        let mut sfr = empty_sqe(io_uring_op::IORING_OP_SYNC_FILE_RANGE as u8);
+        assert_eq!(validate_sync_file_range_sqe(&sfr), Ok(()));
+        sfr.op_flags = SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER;
+        sfr.off = 512;
+        sfr.len = 4096;
+        assert_eq!(validate_sync_file_range_sqe(&sfr), Ok(()));
+
+        sfr.op_flags = 1 << 3;
+        assert_eq!(validate_sync_file_range_sqe(&sfr), Err(LinuxError::EINVAL));
+        sfr.op_flags = 0;
+        sfr.off = (i64::MAX as u64) + 1;
+        assert_eq!(validate_sync_file_range_sqe(&sfr), Err(LinuxError::EINVAL));
     }
 }

@@ -2,7 +2,7 @@ use core::time::Duration;
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{POLLIN, POLLOUT, timespec};
-pub(crate) use pulse_io_uring_core::resources::UserIoSegment;
+pub(crate) use pulse_io_uring_core::resources::{UserIoSegment, validate_direct_io};
 
 pub(crate) fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
     let len = usize::try_from(iov_len).map_err(|_| LinuxError::EINVAL)?;
@@ -39,22 +39,6 @@ pub(crate) fn validate_user_io_segments(
             .ok_or(LinuxError::EINVAL)?;
     }
     Ok(total)
-}
-
-pub(crate) fn validate_direct_io(
-    segments: &[UserIoSegment],
-    offset: u64,
-    block_size: usize,
-) -> Result<(), LinuxError> {
-    if block_size == 0 || !(offset as usize).is_multiple_of(block_size) {
-        return Err(LinuxError::EINVAL);
-    }
-    for segment in segments {
-        if !segment.addr.is_multiple_of(block_size) || !segment.len.is_multiple_of(block_size) {
-            return Err(LinuxError::EINVAL);
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn requested_poll_revents(events: i16, readable: bool, writable: bool) -> i16 {

@@ -250,6 +250,11 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
         Sysno::timer_gettime => impls::sys_timer_gettime(args[0], args[1]),
         Sysno::timer_getoverrun => impls::sys_timer_getoverrun(args[0]),
         Sysno::timer_delete => impls::sys_timer_delete(args[0]),
+        Sysno::timerfd_create => impls::sys_timerfd_create(args[0] as i32, args[1] as u32),
+        Sysno::timerfd_settime => {
+            impls::sys_timerfd_settime(args[0], args[1] as u32, args[2], args[3])
+        }
+        Sysno::timerfd_gettime => impls::sys_timerfd_gettime(args[0], args[1]),
         Sysno::nanosleep => impls::sys_nanosleep(args[0], args[1]),
         Sysno::clock_nanosleep => {
             impls::sys_clock_nanosleep(args[0] as i32, args[1], args[2], args[3])

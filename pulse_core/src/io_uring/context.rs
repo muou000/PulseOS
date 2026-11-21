@@ -8,7 +8,7 @@ use axfs::FsContext;
 use pulse_user_abi::{FromUserAbi, IntoUserAbi};
 
 use crate::fd_table::{FdEntry, FdObject};
-use crate::task::{Credentials, Process, current_process, uaccess};
+use crate::task::{Credentials, Process, Thread, current_process, current_thread, uaccess};
 
 /// Process, credential, and filesystem snapshot owned by an async `io_uring` request.
 ///
@@ -18,6 +18,7 @@ use crate::task::{Credentials, Process, current_process, uaccess};
 #[derive(Clone)]
 pub struct AsyncExecContext {
     pub process: Arc<Process>,
+    pub thread: Option<Arc<Thread>>,
     pub credentials: Arc<Credentials>,
     pub fs_context: FsContext,
 }
@@ -26,10 +27,12 @@ impl AsyncExecContext {
     /// Captures an immutable execution context from the submitting thread's process.
     pub fn capture_current() -> LinuxResult<Self> {
         let process = current_process()?;
+        let thread = current_thread().ok();
         let credentials = process.credentials.read().clone();
         let fs_context = process.fs_context_handle().lock().clone();
         Ok(Self {
             process,
+            thread,
             credentials,
             fs_context,
         })

@@ -683,6 +683,26 @@ fn synthetic_console_tty_stat() -> stat {
 
 pub struct StdinObject;
 
+impl StdinObject {
+    pub fn try_read_nonblocking(&self, buf: &mut [u8]) -> LinuxResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let termios_data = *TTY_TERMIOS.lock();
+        let (len, eof) = take_tty_input(buf);
+        if len > 0 || eof {
+            return Ok(len);
+        }
+        if (termios_data.c_lflag & ICANON) == 0
+            && termios_data.c_cc[VMIN as usize] == 0
+            && termios_data.c_cc[VTIME as usize] == 0
+        {
+            return Ok(0);
+        }
+        Err(LinuxError::EAGAIN)
+    }
+}
+
 impl FdObject for StdinObject {
     fn as_any(&self) -> &dyn Any {
         self
