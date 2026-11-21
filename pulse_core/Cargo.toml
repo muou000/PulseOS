@@ -23,9 +23,10 @@ axerrno.workspace = true
 axio.workspace = true
 axnet.workspace = true
 pulse_bpf_schema = { workspace = true }
+pulse_io_uring_core.workspace = true
 pulse_user_abi.workspace = true
 
-linux-raw-sys = { workspace = true, features = ["elf_uapi"] }
+linux-raw-sys = { workspace = true, features = ["elf_uapi", "io_uring"] }
 linkme.workspace = true
 kernel-elf-parser.workspace = true
 xmas-elf.workspace = true

@@ -18,7 +18,8 @@ file-io-test = ["axfs/file-io-test"]
 
 [dependencies]
 axerrno.workspace = true
-linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy"] }
+pulse_io_uring_core.workspace = true
+linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy", "io_uring"] }
 pulse_bpf_schema = { workspace = true }
 pulse_user_abi.workspace = true
 spin.workspace = true

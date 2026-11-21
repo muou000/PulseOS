@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use axerrno::{AxError, AxResult, LinuxError};
 
 pub mod fs;
+pub mod io_uring;
 pub mod net;
 mod readiness;
 mod sequential;
@@ -572,6 +573,7 @@ macro_rules! impl_user_abi_fixed_array {
 
 impl_user_abi_fixed_array!(i32, 2);
 impl_user_abi_fixed_array!(u32, 2);
+impl_user_abi_fixed_array!(u32, 3);
 impl_user_abi_fixed_array!(i64, 2);
 impl_user_abi_fixed_array!(u64, 2);
 impl_user_abi_fixed_array!(usize, 2);

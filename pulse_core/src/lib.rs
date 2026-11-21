@@ -7,6 +7,7 @@ pub mod config;
 pub mod cpu_dma_latency;
 pub mod fd_table;
 pub mod flock;
+pub mod io_uring;
 pub mod record_lock;
 pub mod ipc;
 pub mod mm;
