@@ -22,8 +22,8 @@ use hashbrown::HashMap;
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 pub use process::{
-    ChildWaitResult, CloneParams, ForkParams, MAX_POSIX_TIMER_COUNT, Process, WaitidStatusType,
-    run_futex_guest_checks,
+    ChildWaitResult, CloneParams, Credentials, ForkParams, MAX_POSIX_TIMER_COUNT, Process,
+    WaitidStatusType, run_futex_guest_checks,
 };
 pub use process_registry::{
     PROCESS_REGISTRY_SHARDS, ShardedProcessRegistry, process_shard_index,

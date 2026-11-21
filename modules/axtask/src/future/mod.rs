@@ -13,10 +13,11 @@ use kspin::SpinNoIrq;
 use crate::current_may_uninit;
 use crate::{AxTaskRef, AxTaskWeak, WaitContext, WaitReason, WakeContext, WakeSource, current};
 
+mod executor;
 mod poll;
 mod time;
 
-pub use self::{poll::*, time::*};
+pub use self::{executor::*, poll::*, time::*};
 
 /// A waker that wakes up the associated task.
 pub struct AxWaker {

@@ -663,6 +663,189 @@ impl PipeObject {
             .unwrap_or(false)
     }
 
+    pub fn try_read_nonblocking(&self, buf: &mut [u8]) -> LinuxResult<usize> {
+        self.read_inner(buf, true)
+    }
+
+    pub fn try_write_nonblocking(&self, buf: &[u8]) -> LinuxResult<usize> {
+        self.write_inner(buf, true)
+    }
+
+    fn read_inner(&self, buf: &mut [u8], force_nonblocking: bool) -> LinuxResult<usize> {
+        if !self.readable {
+            return Err(LinuxError::EPERM);
+        }
+        let mut read_size = 0usize;
+        while read_size < buf.len() {
+            let mut pages_to_copy = alloc::vec::Vec::new();
+            let mut partial_copy = None;
+            {
+                let mut zc = self.shared.zc_pages.lock();
+                let mut remaining = buf.len() - read_size;
+                while remaining > 0 {
+                    let Some(page) = zc.front_mut() else {
+                        break;
+                    };
+                    if page.len <= remaining {
+                        let p = zc.pop_front().unwrap();
+                        remaining -= p.len;
+                        pages_to_copy.push(p);
+                    } else {
+                        let chunk = remaining;
+                        let src_paddr = page.paddr;
+                        let src_offset = page.offset;
+                        page.offset += chunk;
+                        page.len -= chunk;
+                        partial_copy = Some((src_paddr, src_offset, chunk));
+                        break;
+                    }
+                }
+            }
+
+            for page in &pages_to_copy {
+                let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_kvaddr.as_ptr(),
+                        buf[read_size..].as_mut_ptr(),
+                        page.len,
+                    );
+                }
+                read_size += page.len;
+            }
+
+            if let Some((paddr, offset, len)) = partial_copy {
+                let src_kvaddr = axhal::mem::phys_to_virt(paddr) + offset;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_kvaddr.as_ptr(),
+                        buf[read_size..].as_mut_ptr(),
+                        len,
+                    );
+                }
+                read_size += len;
+            }
+
+            if !pages_to_copy.is_empty() {
+                let paddrs: alloc::vec::Vec<PhysAddr> =
+                    pages_to_copy.into_iter().map(|p| p.paddr).collect();
+                dealloc_physical_frames(&paddrs);
+                if !self.shared.write_wait_queue.is_empty() {
+                    self.shared.write_wait_queue.notify_all(false);
+                }
+            }
+
+            if read_size == buf.len() {
+                break;
+            }
+
+            let mut ring_buffer = self.shared.buffer.lock();
+            let available = ring_buffer.available_read();
+            if available == 0 {
+                if read_size > 0 {
+                    drop(ring_buffer);
+                    if !self.shared.write_wait_queue.is_empty() {
+                        self.shared.write_wait_queue.notify_all(true);
+                    }
+                    return Ok(read_size);
+                }
+                if self.write_end_closed() {
+                    return Ok(read_size);
+                }
+                if force_nonblocking || self.nonblocking.load(Ordering::Acquire) {
+                    return Err(LinuxError::EAGAIN);
+                }
+                drop(ring_buffer);
+                self.shared.read_wait_queue.wait_until(|| {
+                    !self.shared.zc_pages.lock().is_empty()
+                        || self.shared.buffer.lock().available_read() > 0
+                        || self.write_end_closed()
+                        || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return Err(LinuxError::EINTR);
+                }
+                continue;
+            }
+
+            let chunk_limit = core::cmp::min(available, buf.len() - read_size);
+            let read = ring_buffer.read_into(&mut buf[read_size..read_size + chunk_limit]);
+            debug_assert_eq!(read, chunk_limit);
+            read_size += read;
+
+            drop(ring_buffer);
+        }
+
+        if read_size > 0 && !self.shared.write_wait_queue.is_empty() {
+            self.shared.write_wait_queue.notify_all(true);
+        }
+        Ok(read_size)
+    }
+
+    fn write_inner(&self, buf: &[u8], force_nonblocking: bool) -> LinuxResult<usize> {
+        if !self.writable() {
+            return Err(LinuxError::EPERM);
+        }
+        let mut write_size = 0usize;
+        while write_size < buf.len() {
+            if self.read_end_closed() {
+                return if write_size > 0 {
+                    Ok(write_size)
+                } else {
+                    Err(LinuxError::EPIPE)
+                };
+            }
+            let zc = self.shared.zc_pages.lock();
+            let mut ring_buffer = self.shared.buffer.lock();
+            let available = pipe_available_write_bytes(
+                ring_buffer.capacity(),
+                ring_buffer.available_read(),
+                zero_copy_bytes(&zc),
+            );
+            if available == 0 {
+                let nonblocking = force_nonblocking || self.nonblocking.load(Ordering::Acquire);
+                drop(ring_buffer);
+                drop(zc);
+                if write_size > 0 && !self.shared.read_wait_queue.is_empty() {
+                    self.shared.read_wait_queue.notify_all(true);
+                }
+                if nonblocking {
+                    return if write_size > 0 {
+                        Ok(write_size)
+                    } else {
+                        Err(LinuxError::EAGAIN)
+                    };
+                }
+                self.shared.write_wait_queue.wait_until(|| {
+                    self.available_pipe_write() > 0
+                        || self.read_end_closed()
+                        || Self::current_has_pending_signal()
+                });
+                if Self::current_has_pending_signal() {
+                    return if write_size > 0 {
+                        Ok(write_size)
+                    } else {
+                        Err(LinuxError::EINTR)
+                    };
+                }
+                continue;
+            }
+
+            let chunk_limit = core::cmp::min(available, buf.len() - write_size);
+            let written = ring_buffer.write_from(&buf[write_size..write_size + chunk_limit]);
+            debug_assert_eq!(written, chunk_limit);
+            write_size += written;
+
+            drop(ring_buffer);
+            drop(zc);
+        }
+
+        if write_size > 0 && !self.shared.read_wait_queue.is_empty() {
+            self.shared.read_wait_queue.notify_all(true);
+        }
+        Ok(write_size)
+    }
+
     pub fn write_zerocopy(&self, writer_vaddr: usize, count: usize) -> LinuxResult<usize> {
         if !self.writable() {
             return Err(LinuxError::EPERM);
@@ -989,204 +1172,11 @@ impl FdObject for PipeObject {
     }
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
-        if !self.readable {
-            return Err(LinuxError::EPERM);
-        }
-        let mut read_size = 0usize;
-        while read_size < buf.len() {
-            let mut pages_to_copy = alloc::vec::Vec::new();
-            let mut partial_copy = None;
-            {
-                let mut zc = self.shared.zc_pages.lock();
-                let mut remaining = buf.len() - read_size;
-                while remaining > 0 {
-                    let Some(page) = zc.front_mut() else {
-                        break;
-                    };
-                    if page.len <= remaining {
-                        let p = zc.pop_front().unwrap();
-                        remaining -= p.len;
-                        pages_to_copy.push(p);
-                    } else {
-                        let chunk = remaining;
-                        let src_paddr = page.paddr;
-                        let src_offset = page.offset;
-                        page.offset += chunk;
-                        page.len -= chunk;
-                        partial_copy = Some((src_paddr, src_offset, chunk));
-                        break;
-                    }
-                }
-            }
-
-            for page in &pages_to_copy {
-                let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src_kvaddr.as_ptr(),
-                        buf[read_size..].as_mut_ptr(),
-                        page.len,
-                    );
-                }
-                read_size += page.len;
-            }
-
-            if let Some((paddr, offset, len)) = partial_copy {
-                let src_kvaddr = axhal::mem::phys_to_virt(paddr) + offset;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src_kvaddr.as_ptr(),
-                        buf[read_size..].as_mut_ptr(),
-                        len,
-                    );
-                }
-                read_size += len;
-            }
-
-            if !pages_to_copy.is_empty() {
-                let paddrs: alloc::vec::Vec<PhysAddr> =
-                    pages_to_copy.into_iter().map(|p| p.paddr).collect();
-                dealloc_physical_frames(&paddrs);
-                if !self.shared.write_wait_queue.is_empty() {
-                    self.shared.write_wait_queue.notify_all(false);
-                }
-            }
-
-            if read_size == buf.len() {
-                break;
-            }
-
-            let mut ring_buffer = self.shared.buffer.lock();
-            let available = ring_buffer.available_read();
-            if available == 0 {
-                if read_size > 0 {
-                    drop(ring_buffer);
-                    if !self.shared.write_wait_queue.is_empty() {
-                        self.shared.write_wait_queue.notify_all(true);
-                    }
-                    return Ok(read_size);
-                }
-                if self.write_end_closed() {
-                    return Ok(read_size);
-                }
-                if self.nonblocking.load(Ordering::Acquire) {
-                    return Err(LinuxError::EAGAIN);
-                }
-                axlog::debug!(
-                    "pipe read wait: tid={} shared={:p} write_closed={} nonblocking={} \
-                     read_size={} want={}",
-                    axtask::current().id().as_u64(),
-                    Arc::as_ptr(&self.shared),
-                    self.write_end_closed(),
-                    self.nonblocking.load(Ordering::Acquire),
-                    read_size,
-                    buf.len()
-                );
-                drop(ring_buffer);
-                self.shared.read_wait_queue.wait_until(|| {
-                    !self.shared.zc_pages.lock().is_empty()
-                        || self.shared.buffer.lock().available_read() > 0
-                        || self.write_end_closed()
-                        || Self::current_has_pending_signal()
-                });
-                if Self::current_has_pending_signal() {
-                    return Err(LinuxError::EINTR);
-                }
-                continue;
-            }
-
-            let chunk_limit = core::cmp::min(available, buf.len() - read_size);
-            let read = ring_buffer.read_into(&mut buf[read_size..read_size + chunk_limit]);
-            debug_assert_eq!(read, chunk_limit);
-            read_size += read;
-
-            drop(ring_buffer);
-        }
-
-        if read_size > 0 {
-            if !self.shared.write_wait_queue.is_empty() {
-                self.shared.write_wait_queue.notify_all(true);
-            }
-        }
-        Ok(read_size)
+        self.read_inner(buf, false)
     }
 
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
-        if !self.writable() {
-            return Err(LinuxError::EPERM);
-        }
-        let mut write_size = 0usize;
-        while write_size < buf.len() {
-            if self.read_end_closed() {
-                return if write_size > 0 {
-                    Ok(write_size)
-                } else {
-                    Err(LinuxError::EPIPE)
-                };
-            }
-            let zc = self.shared.zc_pages.lock();
-            let mut ring_buffer = self.shared.buffer.lock();
-            let available = pipe_available_write_bytes(
-                ring_buffer.capacity(),
-                ring_buffer.available_read(),
-                zero_copy_bytes(&zc),
-            );
-            if available == 0 {
-                let nonblocking = self.nonblocking.load(Ordering::Acquire);
-                drop(ring_buffer);
-                drop(zc);
-                if write_size > 0 {
-                    if !self.shared.read_wait_queue.is_empty() {
-                        self.shared.read_wait_queue.notify_all(true);
-                    }
-                }
-                if nonblocking {
-                    return if write_size > 0 {
-                        Ok(write_size)
-                    } else {
-                        Err(LinuxError::EAGAIN)
-                    };
-                }
-                axlog::debug!(
-                    "pipe write wait: tid={} shared={:p} read_closed={} nonblocking={} \
-                     write_size={} want={}",
-                    axtask::current().id().as_u64(),
-                    Arc::as_ptr(&self.shared),
-                    self.read_end_closed(),
-                    self.nonblocking.load(Ordering::Acquire),
-                    write_size,
-                    buf.len()
-                );
-                self.shared.write_wait_queue.wait_until(|| {
-                    self.available_pipe_write() > 0
-                        || self.read_end_closed()
-                        || Self::current_has_pending_signal()
-                });
-                if Self::current_has_pending_signal() {
-                    return if write_size > 0 {
-                        Ok(write_size)
-                    } else {
-                        Err(LinuxError::EINTR)
-                    };
-                }
-                continue;
-            }
-
-            let chunk_limit = core::cmp::min(available, buf.len() - write_size);
-            let written = ring_buffer.write_from(&buf[write_size..write_size + chunk_limit]);
-            debug_assert_eq!(written, chunk_limit);
-            write_size += written;
-
-            drop(ring_buffer);
-            drop(zc);
-        }
-
-        if write_size > 0 {
-            if !self.shared.read_wait_queue.is_empty() {
-                self.shared.read_wait_queue.notify_all(true);
-            }
-        }
-        Ok(write_size)
+        self.write_inner(buf, false)
     }
 
     fn stat(&self) -> LinuxResult<stat> {

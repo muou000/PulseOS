@@ -351,3 +351,215 @@ fn test_wait_future_refreshes_and_cancels_waker() {
     assert!(!queue.notify_one(false));
     assert_eq!(cancelled.0.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn test_kernel_executor_inline_and_dedup_wake() {
+    use core::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, Waker},
+    };
+    use std::sync::Mutex as StdMutex;
+
+    use crate::future::KernelExecutor;
+
+    struct SharedState {
+        polls: usize,
+        ready: bool,
+        waker: Option<Waker>,
+        dropped: bool,
+    }
+
+    struct TestFuture(Arc<StdMutex<SharedState>>);
+
+    impl Future for TestFuture {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            let mut g = self.0.lock().unwrap();
+            g.polls += 1;
+            g.waker = Some(cx.waker().clone());
+            if g.ready { Poll::Ready(()) } else { Poll::Pending }
+        }
+    }
+
+    impl Drop for TestFuture {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().dropped = true;
+        }
+    }
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    let exec = KernelExecutor::with_background_drivers(false);
+
+    // 1. Inline completion on first poll.
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = done.clone();
+    let h_imm = exec.spawn_and_poll_once(async move {
+        done_clone.store(true, Ordering::Release);
+    });
+    assert!(done.load(Ordering::Acquire));
+    assert!(h_imm.is_done());
+    assert_eq!(exec.pending_count(), 0);
+    assert_eq!(exec.ready_len(), 0);
+
+    // 2. Pending then multi-wake deduplication.
+    let state = Arc::new(StdMutex::new(SharedState {
+        polls: 0,
+        ready: false,
+        waker: None,
+        dropped: false,
+    }));
+    let h_pending = exec.spawn_and_poll_once(TestFuture(state.clone()));
+    assert_eq!(state.lock().unwrap().polls, 1);
+    assert_eq!(exec.ready_len(), 0);
+    assert_eq!(exec.pending_count(), 1);
+
+    let waker = state.lock().unwrap().waker.clone().unwrap();
+    waker.wake_by_ref();
+    waker.wake_by_ref();
+    waker.wake();
+    // Duplicate wakeups while already queued must enqueue only once.
+    assert_eq!(exec.ready_len(), 1);
+
+    assert_eq!(exec.drive_ready(8), 1);
+    assert_eq!(state.lock().unwrap().polls, 2);
+    assert_eq!(exec.ready_len(), 0);
+    assert!(!h_pending.is_done());
+
+    // Mark ready and wake again.
+    state.lock().unwrap().ready = true;
+    state.lock().unwrap().waker.as_ref().unwrap().wake_by_ref();
+    assert_eq!(exec.drive_ready(8), 1);
+    assert_eq!(state.lock().unwrap().polls, 3);
+    assert!(state.lock().unwrap().dropped);
+    assert!(h_pending.is_done());
+    assert_eq!(exec.pending_count(), 0);
+}
+
+#[test]
+fn test_kernel_executor_wake_during_poll_and_cancel_safety() {
+    use core::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use std::sync::{Barrier, Mutex as StdMutex};
+
+    use crate::future::{CancelHandle, KernelExecutor};
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(axtask::init_scheduler);
+
+    let exec = Arc::new(KernelExecutor::with_background_drivers(false));
+
+    // A. Wake during poll must transition POLLING -> POLLING_NOTIFIED and enqueue.
+    let stage = Arc::new(AtomicUsize::new(0));
+    let stage_clone = stage.clone();
+    let _h_self_wake = exec.spawn_and_poll_once(core::future::poll_fn(move |cx| {
+        let cur = stage_clone.fetch_add(1, Ordering::AcqRel);
+        if cur == 0 {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    }));
+    assert_eq!(stage.load(Ordering::Acquire), 1);
+    assert_eq!(exec.ready_len(), 1);
+    assert_eq!(exec.drive_ready(4), 1);
+    assert_eq!(stage.load(Ordering::Acquire), 2);
+    assert_eq!(exec.pending_count(), 0);
+
+    // B. Cancel while POLLING must wait until poll returns and drop once outside poll.
+    struct BlockingPollFuture {
+        in_poll: Arc<Barrier>,
+        allow_return: Arc<Barrier>,
+        dropped: Arc<AtomicBool>,
+        poll_active: Arc<AtomicBool>,
+    }
+
+    impl Future for BlockingPollFuture {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            self.poll_active.store(true, Ordering::Release);
+            self.in_poll.wait();
+            self.allow_return.wait();
+            self.poll_active.store(false, Ordering::Release);
+            Poll::Pending
+        }
+    }
+
+    impl Drop for BlockingPollFuture {
+        fn drop(&mut self) {
+            assert!(
+                !self.poll_active.load(Ordering::Acquire),
+                "future dropped concurrently while poll() was active!"
+            );
+            assert!(
+                !self.dropped.swap(true, Ordering::AcqRel),
+                "future dropped more than once!"
+            );
+        }
+    }
+
+    let in_poll = Arc::new(Barrier::new(2));
+    let allow_return = Arc::new(Barrier::new(2));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let poll_active = Arc::new(AtomicBool::new(false));
+
+    // Queue via WaitQueue-like external wake so we drive it from a worker OS thread.
+    let holder: Arc<StdMutex<Option<CancelHandle>>> = Arc::new(StdMutex::new(None));
+    let fut = BlockingPollFuture {
+        in_poll: in_poll.clone(),
+        allow_return: allow_return.clone(),
+        dropped: dropped.clone(),
+        poll_active: poll_active.clone(),
+    };
+
+    // Wrap so first poll triggers BlockingPollFuture only on second poll.
+    let triggered = Arc::new(AtomicBool::new(false));
+    let triggered_poll = triggered.clone();
+    let stored_waker = Arc::new(StdMutex::new(None));
+    let stored_waker_poll = stored_waker.clone();
+    let mut inner_fut = Some(fut);
+    let handle = exec.spawn_and_poll_once(core::future::poll_fn(move |cx| {
+        if !triggered_poll.load(Ordering::Acquire) {
+            *stored_waker_poll.lock().unwrap() = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        // Poll the inner BlockingPollFuture in-place.
+        if let Some(ref mut f) = inner_fut {
+            // SAFETY: moved into boxed trait object, never relocated again.
+            unsafe { Pin::new_unchecked(f) }.poll(cx)
+        } else {
+            Poll::Ready(())
+        }
+    }));
+    *holder.lock().unwrap() = Some(handle.clone());
+
+    triggered.store(true, Ordering::Release);
+    stored_waker.lock().unwrap().take().unwrap().wake();
+    assert_eq!(exec.ready_len(), 1);
+
+    let exec_bg = exec.clone();
+    let poller = std::thread::spawn(move || {
+        assert_eq!(exec_bg.drive_ready(1), 1);
+    });
+
+    in_poll.wait();
+    // Cancel while BlockingPollFuture::poll is actively executing on `poller`.
+    handle.cancel();
+    assert!(handle.is_cancelled());
+    assert!(!dropped.load(Ordering::Acquire));
+
+    allow_return.wait();
+    poller.join().unwrap();
+
+    assert!(dropped.load(Ordering::Acquire));
+    assert!(handle.is_done());
+    assert_eq!(exec.pending_count(), 0);
+}

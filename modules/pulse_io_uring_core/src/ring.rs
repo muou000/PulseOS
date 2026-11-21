@@ -270,6 +270,11 @@ impl SubmitRingState {
         self.kernel_sq_dropped
     }
 
+    #[inline]
+    pub const fn is_submit_all(&self) -> bool {
+        self.submit_all
+    }
+
     /// Consumes up to `to_submit` SQEs using kernel-private `kernel_sq_head`.
     ///
     /// The callback receives one snapshot `IoUringSqe` and returns `Ok(())` on success
