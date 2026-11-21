@@ -26,6 +26,34 @@ _Avoid_: global dma registry, monolithic buffer map
 用于 Page Cache 批量脏页写回的高阶连续物理页缓冲池。写回批次完成后将高阶连续页组归还池中供后续批次直接复用，避免每次写回批次重复向伙伴系统申请和释放高阶连续页。
 _Avoid_: static bounce buffer, buddy churn cache
 
+**内核多 Future 执行器**:
+内核中并发驱动多个原生异步请求状态机（而非为每个请求分配独立有栈内核任务）的通用调度机制，支持提交/等待期协同推进与后台有界驱动两种推进模式。
+_Avoid_: io-wq thread pool, per-ring async runtime, single-task block_on
+
+**异步执行上下文快照**:
+在异步 I/O 请求提交时捕获的不可变进程、凭证与文件系统根目录/当前目录视图，使脱离原提交线程执行的内核异步工作线程保持与提交者一致的权限与路径语义。
+_Avoid_: current_process fallback, implicit task credentials
+
+**Linux `io_uring` 兼容层级**:
+PulseOS 对 Linux `io_uring` 用户态接口、特性位与错误语义的明确支持边界。层级内的能力保持可观察的 Linux 行为；层级外的 flags、register 操作与 opcode 必须以稳定、确定性的错误码拒绝，不得静默降级或假成功。
+_Avoid_: full Linux io_uring compatibility, tool-specific io_uring profile
+
+**`io_uring` 共享环双区映射**:
+内核与用户态通过 `rings` 与 `sqes` 两组共享物理页框及 Acquire/Release 索引协议交换提交与完成事件的映射模型；内核在私有状态维持权威头尾并仅以单次易失快照读取 SQE，从而将共享页中的用户并发篡改隔离在协议边界之外。
+_Avoid_: direct user ring reference, trusted shared ring header
+
+**`io_uring` 预注册资源表**:
+绑定在单个 `io_uring` 实例上、与进程当前页表及文件描述符表生命周期解耦的预钉住物理页缓冲表（Fixed Buffers）与固定描述符表（Fixed Files）。预钉住缓冲在注册期完成权限校验、写破私有拷贝、物理页框引用获取与锁页配额记账；固定描述符持有独立的对象引用并拒绝环对象自引用；在途请求通过独立槽位引用保活底层资源，使资源注销或槽位更新无需阻塞在途 I/O。
+_Avoid_: raw user iovec cache, fd index alias table
+
+**`io_uring` 请求完成归属与链式栅栏**:
+单个 `io_uring` 请求从提交排队、异步执行到通过唯一完成令牌产出单条 CQE 的生命周期契约。链式请求按前驱成功且完整传输的条件串行推进，前驱失败或短读写将级联取消后续普通 `IO_LINK` 链节（`-ECANCELED`）；`IO_DRAIN` 栅栏在所有先序在途请求完成前阻止该栅栏及其后续请求启动。
+_Avoid_: duplicate CQE emission, cross-batch link stitching, synchronous drain wait
+
+**每调用非阻塞就绪重试状态机**:
+针对 Socket、Pipe 与 EventFd 等流式或消息描述符，通过不篡改描述符共享 `O_NONBLOCK` 标志的无副作用单次非阻塞尝试，配合 `FdObject::register_poll` 挂接对象专属等待队列及注册后二次重检以闭合唤醒竞态的无栈异步执行模型。
+_Avoid_: TemporaryNonblocking flag mutation, global NET_WAIT_QUEUE polling
+
 ### Memory and process lifecycle
 
 **映射页生命周期**:

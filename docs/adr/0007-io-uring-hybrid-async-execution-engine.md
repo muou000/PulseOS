@@ -1,0 +1,23 @@
+---
+status: accepted
+---
+
+# Drive io_uring with a three-path hybrid engine over a shared axtask multi-Future executor
+
+PulseOS `io_uring` uses a three-path execution model: an inline non-blocking submission fast path, a shared dual-mode **内核多 Future 执行器** built in `modules/axtask` for native `Future`/`Waker` I/O (reusing the existing end-to-end `axfs` -> `VirtIoBlockFuture` pipeline, `FdObject::register_poll`, and `TimerFuture`), and a globally bounded on-demand kernel worker pool with per-ring round-robin quotas and **异步执行上下文快照** for `IOSQE_ASYNC` and blocking fallbacks. The `io_uring` request state machine and concurrency coordination live in a standalone, host-testable `no_std` core module `modules/pulse_io_uring_core` (paired with the production kernel adapter in `pulse_core/src/io_uring/`), rather than duplicating Future scheduling between `axtask` and `pulse_core`.
+
+## Considered Options
+
+- **Pure `FAST_POLL` + `io-wq` worker thread pool:** rejected because sustaining `fio` high `iodepth` would require dozens of stack-backed kernel threads and scheduler switches, leaving PulseOS's existing zero-stack-switch `axfs` -> `VirtIoBlockFuture` async stack unused.
+- **One `axtask::spawn_async` task per SQE:** rejected because per-request kernel task allocation, scheduling, and per-CPU GC teardown overhead undermine batched submission gains.
+- **Per-ring executor kept private inside `pulse_core` (or one dedicated thread per ring):** rejected because a general multi-Future executor in `modules/axtask` can serve future kernel subsystems as well, and per-ring threads scale poorly for workloads creating many short-lived rings.
+- **Allowing synchronous user page faults inside native executor `poll()`:** rejected because `Process::try_fault_in_user_range` may synchronously `block_on` file-backed faults, stalling unrelated in-flight Futures sharing the same executor driver thread.
+
+## Consequences
+
+- **Dual-mode liveness:** `modules/axtask`'s executor polls newly submitted native Futures once inline (immediately queuing hardware requests such as VirtIO block descriptors), allows callers waiting on completions to pump ready Futures cooperatively, and maintains a lazily spawned, CPU-bounded shared background driver pool (`1..=min(cpu_count, 4)`) so `min_complete == 0` submissions and `epoll_wait(ring_fd)` never deadlock.
+- **Non-blocking `poll` discipline:** Futures hosted on the shared `axtask` executor must not call synchronous `block_on`; requests carrying `IOSQE_ASYNC`, non-fixed transfers exceeding the submission-time pinning window that require mid-I/O `try_fault_in_user_range`, or blocking-only descriptors route to the bounded worker pool instead.
+- **Three-layer lock hierarchy and drop safety:** IRQ-safe `SpinNoIrq` sections are restricted to CQ/overflow publication, ready-queue handoff, and wakeup notification; `Future::poll`, external `FdObject` calls, and dropping the last `Arc<FileObject>` (whose `File::drop` may call `block_on` for deferred timestamp publication) must always occur outside `SpinNoIrq` and IRQ context, obeying `ring_submit_lock (sleepable)` -> `Process` -> `FdObject/axfs/axnet` -> `ring_completion_ready_lock (SpinNoIrq)` -> `WaitQueue (SpinNoIrq)`.
+- **Module extension boundaries:** `modules/axmm` remains unchanged (preserving ADR-0001 and ADR-0004); `modules/axfs` remains non-breaking (exposing existing async entry points through `pulse_core::FileObject`); `modules/axnet` / `pulse_core::net` receive only two targeted additions—side-effect-free per-call non-blocking try-ops (replacing racy `TemporaryNonblocking` mutation) and per-socket `register_poll` over existing `axpoll::Pollable` queues (eliminating global `NET_WAIT_QUEUE` thundering herd).
+- **Special FD & credential isolation:** Workers execute exclusively against the captured **异步执行上下文快照** (`Arc<Process>`, `Arc<Credentials>`, cloned `axfs::FsContext`) and never fall back to `current_process()`; `EpollObject` and `SignalFdObject` must not be dispatched raw onto pure kernel worker threads where they fail with `ESRCH`.
+- **Two-tier verification:** Concurrency state machines are host-tested via `cargo test -p axtask --features "test multitask"` and `cargo test -p pulse_io_uring_core`; end-to-end dual-architecture SMP behavior and overlap gains are verified on RV64 and LA64 QEMU with LTP `io_uring01`–`io_uring04`, `liburing-2.9`, and `fio-3.39 --ioengine=io_uring`.

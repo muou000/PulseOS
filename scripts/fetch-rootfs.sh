@@ -10,7 +10,7 @@ mkdir -p "${BASE_DIR}"
 
 REPO="muou000/PulseOS"
 BASE_TAG="rootfs-base-20260929"
-TESTS_TAG="rootfs-tests-20261116"
+TESTS_TAG="rootfs-tests-20261120"
 BASE_URL="https://github.com/${REPO}/releases/download/${BASE_TAG}"
 TESTS_URL="https://github.com/${REPO}/releases/download/${TESTS_TAG}"
 ALPINE_BASE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/riscv64"
@@ -25,7 +25,7 @@ Usage:
 
 Options:
   --tests          Fetch Ubuntu/Loongnix rootfs tarballs bundled with lmbench,
-                   ltp, sysbench, and unixbench (default).
+                   ltp, sysbench, unixbench, fio, and liburing-tests (default).
   --base           Fetch minimal base rootfs tarballs without bundled tests.
   --arch ARCH      Target architecture to fetch: all (default), riscv64, loongarch64.
   -h, --help       Show this help message.
@@ -94,12 +94,12 @@ fetch_one() {
 if [[ "${VARIANT}" == "tests" ]]; then
     if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "riscv64" ]]; then
         fetch_one "rootfs-tests-riscv64.tar.xz" "rootfs-tests-riscv64.tar.xz" \
-            "05cdd5de30cecc798f24b5c4890e9306674dd2aa3571accd11cdb2bd98d10953" \
+            "1a95dc30d246a71e6d8a79d52d75e4942c6a958687ca289c7067ead258066285" \
             "${TESTS_URL}"
     fi
     if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "loongarch64" ]]; then
         fetch_one "rootfs-tests-loongarch64.tar.xz" "rootfs-tests-loongarch64.tar.xz" \
-            "1fb1eb96c63dd6b4936a05782024f2c5f6a03572973071096de3bdb783bbdfc2" \
+            "e530f99e806cea640df12c482b63128af3131c304cdfd0d5053e661e2efbac1e" \
             "${TESTS_URL}"
     fi
 else

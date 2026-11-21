@@ -30,8 +30,8 @@
 
 ## 运行测试方式
 
-- **测试镜像**：优先使用包含预装测试套件的测试 rootfs 镜像（通过 `./scripts/fetch-rootfs.sh` 与 `./scripts/build_img.sh all`，或 `make img ARCH=riscv64` / `make img ARCH=loongarch64` 生成 `disk.img` / `disk-la.img`）。镜像内已包含 `lmbench`（`/opt/lmbench/bin` 及 `/bin/{bw_pipe,lat_pipe,lat_syscall}`）、`LTP`（`/opt/ltp`）、`sysbench`（`/usr/bin/sysbench`）和 `UnixBench`（`/opt/unixbench`）。
-- **测试选型**：验证功能与性能指标时，优先选用上述预装的第三方标准测试套件（`UnixBench`、`lmbench`、`LTP`、`sysbench`）；仅当第三方套件中没有能够针对性展示当前优化点或功能行为的用例时，才编写自定义测试。
+- **测试镜像**：优先使用包含预装测试套件的测试 rootfs 镜像（通过 `./scripts/fetch-rootfs.sh` 与 `./scripts/build_img.sh all`，或 `make img ARCH=riscv64` / `make img ARCH=loongarch64` 生成 `disk.img` / `disk-la.img`）。镜像内已包含 `lmbench`（`/opt/lmbench/bin` 及 `/bin/{bw_pipe,lat_pipe,lat_syscall}`）、`LTP`（`/opt/ltp`）、`sysbench`（`/usr/bin/sysbench`）、`UnixBench`（`/opt/unixbench`）、`fio`（`/usr/bin/fio`）和 `liburing` 核心测试子集（`/opt/io_uring/liburing-tests`）。
+- **测试选型**：验证功能与性能指标时，优先选用上述预装的第三方标准测试套件（`UnixBench`、`lmbench`、`LTP`、`sysbench`、`fio`、`liburing`）；仅当第三方套件中没有能够针对性展示当前优化点或功能行为的用例时，才编写自定义测试。
 
 统一使用以下命令进行qemu测试，而不是`make run`或`make la`:
 
