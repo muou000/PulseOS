@@ -5,12 +5,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{
-    future::poll_fn,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use core::{future::poll_fn, task::Poll, time::Duration};
 
 use axerrno::{LinuxError, LinuxResult};
 use axhal::time::{monotonic_time, wall_time};
@@ -33,7 +28,9 @@ use super::{
     context::AsyncExecContext,
     worker_pool::global_worker_pool,
 };
-use crate::fd_table::{FdEntry, FdFlags, FdObject, PipeObject, PollRegistration};
+use crate::fd_table::{
+    EpollObject, FdEntry, FdFlags, FdObject, PipeObject, PollRegistration, SignalFdObject,
+};
 use crate::net::{Socket, SocketInner};
 
 const UIO_MAXIOV: u32 = 1024;
@@ -67,7 +64,7 @@ pub enum PreparedOpSpec {
     TimeoutRemove {
         target_user_data: u64,
         op_flags: u32,
-        new_deadline: Option<Duration>,
+        new_duration: Option<Duration>,
     },
     AsyncCancel {
         target_user_data: u64,
@@ -244,11 +241,8 @@ fn prepare_sqe_inner(
         }
         op if op == io_uring_op::IORING_OP_TIMEOUT_REMOVE as u8 => {
             validate_timeout_remove_sqe(sqe)?;
-            let new_deadline = if (sqe.op_flags & IORING_TIMEOUT_UPDATE) != 0 {
-                let dur = copy_timeout_spec(ctx, sqe.off as usize)?;
-                let clock = TimeoutClock::from_op_flags(sqe.op_flags);
-                let abs = (sqe.op_flags & pulse_user_abi::io_uring::IORING_TIMEOUT_ABS) != 0;
-                Some(compute_monotonic_deadline(clock, abs, dur))
+            let new_duration = if (sqe.op_flags & IORING_TIMEOUT_UPDATE) != 0 {
+                Some(copy_timeout_spec(ctx, sqe.off as usize)?)
             } else {
                 None
             };
@@ -257,7 +251,7 @@ fn prepare_sqe_inner(
                 PreparedOpSpec::TimeoutRemove {
                     target_user_data: sqe.addr,
                     op_flags: sqe.op_flags,
-                    new_deadline,
+                    new_duration,
                 },
             ))
         }
@@ -321,7 +315,7 @@ fn prepare_sqe_inner(
                 return Err(LinuxError::EINVAL);
             }
             let entry = ctx.get_fd_entry(sqe.fd)?;
-            let mask = (sqe.op_flags & 0xffff) as u32;
+            let mask = sqe.op_flags;
             let mut events = IoEvents::ALWAYS_POLL;
             if mask & POLLIN != 0 {
                 events |= IoEvents::IN;
@@ -408,33 +402,50 @@ pub fn execute_rw_request(
     offset: u64,
     force_async: bool,
 ) {
-    if entry.object.as_any().is::<PipeObject>() || entry.object.as_any().is::<Socket>() {
-        spawn_pollable_rw(state, ctx, req_id, entry, is_write, segments, offset);
+    // Special FDs depend on `current_process()` / `current_thread()`, so keep them
+    // inline on the submitting thread rather than dispatching raw onto workers (ADR-0007).
+    if entry.object.as_any().is::<EpollObject>() || entry.object.as_any().is::<SignalFdObject>() {
+        let res = run_sync_rw(ctx, &entry.object, is_write, &segments, offset);
+        state.complete_request(req_id, res, 0, false);
         return;
     }
 
     if force_async {
-        let Some(guard) = state.try_enter_inflight_owned() else {
+        spawn_worker_rw(state, ctx, req_id, entry, is_write, segments, offset);
+        return;
+    }
+
+    if entry.object.as_any().is::<PipeObject>() {
+        // Non-zero explicit file offsets on stream FDs fail with `-ESPIPE`.
+        if offset != 0 && offset != u64::MAX {
+            state.complete_request(req_id, -LinuxError::ESPIPE.code(), 0, false);
             return;
-        };
-        let state_wk = Arc::clone(state);
-        let ctx_wk = ctx.clone();
-        global_worker_pool().submit(state.ring_id(), req_id, move || {
-            let _guard: OwnedInflightGuard = guard;
-            if !state_wk.is_request_active(req_id) {
-                return;
-            }
-            let res = run_sync_rw(&ctx_wk, &entry.object, is_write, &segments, offset);
-            state_wk.complete_request(req_id, res, 0, &ctx_wk, true);
-        });
+        }
+        let total_len: usize = segments.iter().map(|s| s.len).sum();
+        if total_len == 0 {
+            state.complete_request(req_id, 0, 0, false);
+            return;
+        }
+        if total_len <= RW_CHUNK_CAP {
+            execute_pipe_rw(state, ctx, req_id, entry, is_write, segments, total_len);
+        } else {
+            spawn_worker_rw(state, ctx, req_id, entry, is_write, segments, offset);
+        }
+        return;
+    }
+
+    if entry.object.as_any().is::<Socket>() {
+        // Per-call non-blocking `Socket` try-ops arrive in #239; route blocking socket R/W
+        // to the bounded worker pool so `KernelExecutor::poll` never blocks (ADR-0007).
+        spawn_worker_rw(state, ctx, req_id, entry, is_write, segments, offset);
         return;
     }
 
     let res = run_sync_rw(ctx, &entry.object, is_write, &segments, offset);
-    state.complete_request(req_id, res, 0, ctx, false);
+    state.complete_request(req_id, res, 0, false);
 }
 
-fn spawn_pollable_rw(
+fn spawn_worker_rw(
     state: &Arc<IoUringState>,
     ctx: &AsyncExecContext,
     req_id: RequestId,
@@ -443,14 +454,119 @@ fn spawn_pollable_rw(
     segments: Vec<UserSegment>,
     offset: u64,
 ) {
-    // Non-zero explicit file offsets on stream FDs fail with `-ESPIPE`.
-    if offset != 0 && offset != u64::MAX {
-        state.complete_request(req_id, -LinuxError::ESPIPE.code(), 0, ctx, false);
+    let Some(guard) = state.try_enter_inflight_owned() else {
         return;
+    };
+    let state_wk = Arc::clone(state);
+    let ctx_wk = ctx.clone();
+    global_worker_pool().submit(state.ring_id(), req_id, move || {
+        let _guard: OwnedInflightGuard = guard;
+        if !state_wk.is_request_active(req_id) {
+            return;
+        }
+        let res = run_sync_rw(&ctx_wk, &entry.object, is_write, &segments, offset);
+        state_wk.complete_request(req_id, res, 0, true);
+    });
+}
+
+fn read_segments(ctx: &AsyncExecContext, segments: &[UserSegment], dst: &mut [u8]) -> LinuxResult<()> {
+    let mut off = 0usize;
+    for seg in segments {
+        if seg.len > 0 {
+            ctx.read_bytes(seg.addr, &mut dst[off..off + seg.len])?;
+            off += seg.len;
+        }
     }
-    if segments.iter().all(|s| s.len == 0) {
-        state.complete_request(req_id, 0, 0, ctx, false);
-        return;
+    Ok(())
+}
+
+fn write_segments(ctx: &AsyncExecContext, segments: &[UserSegment], src: &[u8]) -> LinuxResult<()> {
+    let mut off = 0usize;
+    for seg in segments {
+        if seg.len == 0 || off >= src.len() {
+            continue;
+        }
+        let n = seg.len.min(src.len() - off);
+        ctx.write_bytes(seg.addr, &src[off..off + n])?;
+        off += n;
+    }
+    Ok(())
+}
+
+fn execute_pipe_rw(
+    state: &Arc<IoUringState>,
+    ctx: &AsyncExecContext,
+    req_id: RequestId,
+    entry: FdEntry,
+    is_write: bool,
+    mut segments: Vec<UserSegment>,
+    total_len: usize,
+) {
+    let nonblocking_fd = entry.flags.contains(FdFlags::NONBLOCK)
+        || entry.object.nonblocking_state().unwrap_or(false);
+    let mut kbuf = vec![0u8; total_len];
+    let pipe = entry
+        .object
+        .as_any()
+        .downcast_ref::<PipeObject>()
+        .expect("PipeObject");
+
+    if is_write {
+        if let Err(err) = read_segments(ctx, &segments, &mut kbuf) {
+            state.complete_request(req_id, -err.code(), 0, false);
+            return;
+        }
+        match pipe.try_write_nonblocking(&kbuf) {
+            Ok(n) => {
+                state.complete_request(req_id, n as i32, 0, false);
+                return;
+            }
+            Err(LinuxError::EAGAIN) if nonblocking_fd => {
+                state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
+                return;
+            }
+            Err(LinuxError::EAGAIN) => {}
+            Err(err) => {
+                state.complete_request(req_id, -err.code(), 0, false);
+                return;
+            }
+        }
+    } else {
+        for seg in &segments {
+            if seg.len > 0 {
+                if let Err(err) = ctx.process.try_fault_in_user_range(
+                    seg.addr,
+                    seg.len,
+                    axhal::paging::MappingFlags::WRITE,
+                ) {
+                    state.complete_request(req_id, -LinuxError::from(err).code(), 0, false);
+                    return;
+                }
+            }
+        }
+        match pipe.try_read_nonblocking(&mut kbuf) {
+            Ok(0) => {
+                state.complete_request(req_id, 0, 0, false);
+                return;
+            }
+            Ok(n) => {
+                let res = match write_segments(ctx, &segments, &kbuf[..n]) {
+                    Ok(()) => n as i32,
+                    Err(err) => -err.code(),
+                };
+                state.complete_request(req_id, res, 0, false);
+                return;
+            }
+            Err(LinuxError::EAGAIN) if nonblocking_fd => {
+                state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
+                return;
+            }
+            Err(LinuxError::EAGAIN) => {}
+            Err(err) => {
+                state.complete_request(req_id, -err.code(), 0, false);
+                return;
+            }
+        }
     }
 
     let Some(guard) = state.try_enter_inflight_owned() else {
@@ -458,13 +574,7 @@ fn spawn_pollable_rw(
     };
     let state_cloned = Arc::clone(state);
     let ctx_cloned = ctx.clone();
-    let nonblocking_fd = entry.flags.contains(FdFlags::NONBLOCK)
-        || entry.object.nonblocking_state().unwrap_or(false);
     let mut registrations: Vec<PollRegistration> = Vec::new();
-    let mut kbuf = vec![0u8; segments.iter().map(|s| s.len).sum::<usize>().min(RW_CHUNK_CAP)];
-    let mut seg_idx = 0usize;
-    let mut seg_off = 0usize;
-    let mut total_done = 0usize;
     let mut guard_slot = Some(guard);
 
     let handle = global_executor().spawn_and_poll_once(poll_fn(move |cx| {
@@ -473,119 +583,78 @@ fn spawn_pollable_rw(
             let _ = guard_slot.take();
             return Poll::Ready(());
         }
+        let pipe = entry
+            .object
+            .as_any()
+            .downcast_ref::<PipeObject>()
+            .expect("PipeObject");
 
-        while seg_idx < segments.len() {
-            let seg = segments[seg_idx];
-            if seg_off >= seg.len {
-                seg_idx += 1;
-                seg_off = 0;
-                continue;
-            }
-            let chunk_len = (seg.len - seg_off).min(kbuf.len());
-            let user_addr = seg.addr + seg_off;
-
+        loop {
             if is_write {
-                if let Err(err) = ctx_cloned.read_bytes(user_addr, &mut kbuf[..chunk_len]) {
-                    let res = if total_done > 0 { total_done as i32 } else { -err.code() };
-                    state_cloned.complete_request(req_id, res, 0, &ctx_cloned, true);
-                    let _ = guard_slot.take();
-                    return Poll::Ready(());
-                }
-                let attempt = try_write_pollable(&entry.object, &kbuf[..chunk_len]);
-                match attempt {
+                match pipe.try_write_nonblocking(&kbuf) {
                     Ok(n) => {
-                        total_done += n;
-                        seg_off += n;
-                        if n < chunk_len {
-                            break;
-                        }
+                        state_cloned.complete_request(req_id, n as i32, 0, true);
+                        let _ = guard_slot.take();
+                        return Poll::Ready(());
                     }
-                    Err(LinuxError::EAGAIN) if total_done == 0 => {
-                        if nonblocking_fd {
-                            state_cloned.complete_request(
-                                req_id,
-                                -LinuxError::EAGAIN.code(),
-                                0,
-                                &ctx_cloned,
-                                true,
-                            );
-                            let _ = guard_slot.take();
-                            return Poll::Ready(());
-                        }
+                    Err(LinuxError::EAGAIN) => {
                         if let Err(e) = Arc::clone(&entry.object).register_poll(
                             cx,
                             IoEvents::OUT | IoEvents::ERR | IoEvents::HUP,
                             &mut registrations,
                         ) {
-                            state_cloned.complete_request(req_id, -e.code(), 0, &ctx_cloned, true);
+                            state_cloned.complete_request(req_id, -e.code(), 0, true);
                             let _ = guard_slot.take();
                             return Poll::Ready(());
                         }
-                        // Close wakeup race after registering waker.
                         if entry.object.poll().is_ok_and(|p| p.writable) {
                             registrations.clear();
                             continue;
                         }
                         return Poll::Pending;
                     }
-                    Err(LinuxError::EAGAIN) => break,
                     Err(err) => {
-                        let res = if total_done > 0 { total_done as i32 } else { -err.code() };
-                        state_cloned.complete_request(req_id, res, 0, &ctx_cloned, true);
+                        state_cloned.complete_request(req_id, -err.code(), 0, true);
                         let _ = guard_slot.take();
                         return Poll::Ready(());
                     }
                 }
             } else {
-                // Before consuming bytes destructively from a pipe/socket, verify request is
-                // still active and claimable once ready.
-                if let Err(err) =
-                    ctx_cloned
-                        .process
-                        .try_fault_in_user_range(user_addr, chunk_len, axhal::paging::MappingFlags::WRITE)
-                {
-                    let res = if total_done > 0 {
-                        total_done as i32
-                    } else {
-                        -LinuxError::from(err).code()
-                    };
-                    state_cloned.complete_request(req_id, res, 0, &ctx_cloned, true);
-                    let _ = guard_slot.take();
-                    return Poll::Ready(());
-                }
-                match try_read_pollable(&entry.object, &mut kbuf[..chunk_len]) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Err(err) = ctx_cloned.write_bytes(user_addr, &kbuf[..n]) {
-                            let res = if total_done > 0 { total_done as i32 } else { -err.code() };
-                            state_cloned.complete_request(req_id, res, 0, &ctx_cloned, true);
-                            let _ = guard_slot.take();
-                            return Poll::Ready(());
-                        }
-                        total_done += n;
-                        seg_off += n;
-                        if n < chunk_len {
-                            break;
-                        }
+                match pipe.try_read_nonblocking(&mut kbuf) {
+                    Ok(0) => {
+                        state_cloned.complete_request(req_id, 0, 0, true);
+                        let _ = guard_slot.take();
+                        return Poll::Ready(());
                     }
-                    Err(LinuxError::EAGAIN) if total_done == 0 => {
-                        if nonblocking_fd {
-                            state_cloned.complete_request(
-                                req_id,
-                                -LinuxError::EAGAIN.code(),
-                                0,
-                                &ctx_cloned,
-                                true,
-                            );
+                    Ok(n) => {
+                        if !state_cloned.try_begin_completing_request(req_id) {
                             let _ = guard_slot.take();
                             return Poll::Ready(());
                         }
+                        let Some(wk_guard) = guard_slot.take() else {
+                            return Poll::Ready(());
+                        };
+                        let state_wk = Arc::clone(&state_cloned);
+                        let ctx_wk = ctx_cloned.clone();
+                        let data = core::mem::take(&mut kbuf);
+                        let segs = core::mem::take(&mut segments);
+                        global_worker_pool().submit(state_cloned.ring_id(), req_id, move || {
+                            let _guard: OwnedInflightGuard = wk_guard;
+                            let res = match write_segments(&ctx_wk, &segs, &data[..n]) {
+                                Ok(()) => n as i32,
+                                Err(err) => -err.code(),
+                            };
+                            state_wk.finish_completing_request(req_id, res, 0, true);
+                        });
+                        return Poll::Ready(());
+                    }
+                    Err(LinuxError::EAGAIN) => {
                         if let Err(e) = Arc::clone(&entry.object).register_poll(
                             cx,
                             IoEvents::IN | IoEvents::RDHUP | IoEvents::ERR | IoEvents::HUP,
                             &mut registrations,
                         ) {
-                            state_cloned.complete_request(req_id, -e.code(), 0, &ctx_cloned, true);
+                            state_cloned.complete_request(req_id, -e.code(), 0, true);
                             let _ = guard_slot.take();
                             return Poll::Ready(());
                         }
@@ -595,43 +664,17 @@ fn spawn_pollable_rw(
                         }
                         return Poll::Pending;
                     }
-                    Err(LinuxError::EAGAIN) => break,
                     Err(err) => {
-                        let res = if total_done > 0 { total_done as i32 } else { -err.code() };
-                        state_cloned.complete_request(req_id, res, 0, &ctx_cloned, true);
+                        state_cloned.complete_request(req_id, -err.code(), 0, true);
                         let _ = guard_slot.take();
                         return Poll::Ready(());
                     }
                 }
             }
         }
-
-        state_cloned.complete_request(req_id, total_done as i32, 0, &ctx_cloned, true);
-        let _ = guard_slot.take();
-        Poll::Ready(())
     }));
 
     state.install_cancel_handle_or_cancel(req_id, handle);
-}
-
-fn try_read_pollable(obj: &Arc<dyn FdObject>, buf: &mut [u8]) -> LinuxResult<usize> {
-    if let Some(pipe) = obj.as_any().downcast_ref::<PipeObject>() {
-        return pipe.try_read_nonblocking(buf);
-    }
-    if !obj.poll()?.readable {
-        return Err(LinuxError::EAGAIN);
-    }
-    obj.read(buf)
-}
-
-fn try_write_pollable(obj: &Arc<dyn FdObject>, buf: &[u8]) -> LinuxResult<usize> {
-    if let Some(pipe) = obj.as_any().downcast_ref::<PipeObject>() {
-        return pipe.try_write_nonblocking(buf);
-    }
-    if !obj.poll()?.writable {
-        return Err(LinuxError::EAGAIN);
-    }
-    obj.write(buf)
 }
 
 fn run_sync_rw(
@@ -719,7 +762,6 @@ fn run_sync_rw(
 
 pub fn spawn_poll_add_future(
     state: &Arc<IoUringState>,
-    ctx: &AsyncExecContext,
     req_id: RequestId,
     target: PollTarget,
     mask: u32,
@@ -729,7 +771,6 @@ pub fn spawn_poll_add_future(
         return;
     };
     let state_cloned = Arc::clone(state);
-    let ctx_cloned = ctx.clone();
     let mut registrations: Vec<PollRegistration> = Vec::new();
     let mut guard_slot = Some(guard);
 
@@ -741,7 +782,7 @@ pub fn spawn_poll_add_future(
         }
 
         if let Some(revents) = eval_poll_target(&target, mask) {
-            state_cloned.complete_request(req_id, revents as i32, 0, &ctx_cloned, true);
+            state_cloned.complete_request(req_id, revents as i32, 0, true);
             let _ = guard_slot.take();
             return Poll::Ready(());
         }
@@ -749,7 +790,7 @@ pub fn spawn_poll_add_future(
         match &target {
             PollTarget::Fd(obj) => {
                 if let Err(err) = Arc::clone(obj).register_poll(cx, events, &mut registrations) {
-                    state_cloned.complete_request(req_id, -err.code(), 0, &ctx_cloned, true);
+                    state_cloned.complete_request(req_id, -err.code(), 0, true);
                     let _ = guard_slot.take();
                     return Poll::Ready(());
                 }
@@ -764,7 +805,7 @@ pub fn spawn_poll_add_future(
                         }
                     }));
                 } else {
-                    state_cloned.complete_request(req_id, POLLNVAL as i32, 0, &ctx_cloned, true);
+                    state_cloned.complete_request(req_id, POLLNVAL as i32, 0, true);
                     let _ = guard_slot.take();
                     return Poll::Ready(());
                 }
@@ -774,7 +815,7 @@ pub fn spawn_poll_add_future(
         // Re-check after registering waker so edge transitions never get lost.
         if let Some(revents) = eval_poll_target(&target, mask) {
             registrations.clear();
-            state_cloned.complete_request(req_id, revents as i32, 0, &ctx_cloned, true);
+            state_cloned.complete_request(req_id, revents as i32, 0, true);
             let _ = guard_slot.take();
             return Poll::Ready(());
         }
@@ -849,7 +890,7 @@ pub fn spawn_accept_future(
         }
 
         let Some(sock) = entry.object.as_any().downcast_ref::<Socket>() else {
-            state_cloned.complete_request(req_id, -LinuxError::ENOTSOCK.code(), 0, &ctx_cloned, true);
+            state_cloned.complete_request(req_id, -LinuxError::ENOTSOCK.code(), 0, true);
             let _ = guard_slot.take();
             return Poll::Ready(());
         };
@@ -861,7 +902,7 @@ pub fn spawn_accept_future(
                 IoEvents::IN | IoEvents::ERR | IoEvents::HUP,
                 &mut registrations,
             ) {
-                state_cloned.complete_request(req_id, -err.code(), 0, &ctx_cloned, true);
+                state_cloned.complete_request(req_id, -err.code(), 0, true);
                 let _ = guard_slot.take();
                 return Poll::Ready(());
             }
@@ -871,49 +912,61 @@ pub fn spawn_accept_future(
             registrations.clear();
         }
 
-        // Claim `Completing` ownership before popping an accepted connection from LISTEN_TABLE.
+        // Claim `Completing` ownership before popping an accepted connection from LISTEN_TABLE,
+        // and execute blocking accept + user sockaddr copy on Path 3 so `poll()` never blocks.
         if !state_cloned.try_begin_completing_request(req_id) {
             let _ = guard_slot.take();
             return Poll::Ready(());
         }
-
-        let res = match &sock.inner {
-            SocketInner::Tcp(tcp) => match tcp.accept().map_err(|e| LinuxError::from(e.canonicalize())) {
-                Ok(new_tcp) => {
-                    let remote_addr = new_tcp.peer_addr().ok();
-                    let new_sock = Socket::new(
-                        sock.domain.load(core::sync::atomic::Ordering::Acquire),
-                        SocketInner::Tcp(new_tcp),
-                    );
-                    if (accept_flags & O_NONBLOCK) != 0 {
-                        new_sock.set_nonblocking_inner(true);
-                    }
-                    let mut new_fd_flags = FdFlags::empty();
-                    if (accept_flags & O_CLOEXEC) != 0 {
-                        new_fd_flags.insert(FdFlags::CLOEXEC);
-                    }
-                    if (accept_flags & O_NONBLOCK) != 0 {
-                        new_fd_flags.insert(FdFlags::NONBLOCK);
-                    }
-                    match ctx_cloned.insert_fd_entry(FdEntry::new(Arc::new(new_sock), new_fd_flags)) {
-                        Ok(new_fd) => {
-                            if addr != 0 && addrlen_ptr != 0 {
-                                if let Some(remote) = remote_addr {
-                                    write_peer_sockaddr(&ctx_cloned, remote, addr, addrlen_ptr);
-                                }
-                            }
-                            new_fd as i32
-                        }
-                        Err(err) => -err.code(),
-                    }
-                }
-                Err(err) => -err.code(),
-            },
-            _ => -LinuxError::EOPNOTSUPP.code(),
+        let Some(wk_guard) = guard_slot.take() else {
+            return Poll::Ready(());
         };
-
-        state_cloned.finish_completing_request(req_id, res, 0, &ctx_cloned, true);
-        let _ = guard_slot.take();
+        let state_wk = Arc::clone(&state_cloned);
+        let ctx_wk = ctx_cloned.clone();
+        let entry_wk = entry.clone();
+        global_worker_pool().submit(state_cloned.ring_id(), req_id, move || {
+            let _guard: OwnedInflightGuard = wk_guard;
+            let sock = entry_wk
+                .object
+                .as_any()
+                .downcast_ref::<Socket>()
+                .expect("Socket");
+            let res = match &sock.inner {
+                SocketInner::Tcp(tcp) => match tcp.accept().map_err(|e| LinuxError::from(e.canonicalize())) {
+                    Ok(new_tcp) => {
+                        let remote_addr = new_tcp.peer_addr().ok();
+                        let new_sock = Socket::new(
+                            sock.domain.load(core::sync::atomic::Ordering::Acquire),
+                            SocketInner::Tcp(new_tcp),
+                        );
+                        if (accept_flags & O_NONBLOCK) != 0 {
+                            new_sock.set_nonblocking_inner(true);
+                        }
+                        let mut new_fd_flags = FdFlags::empty();
+                        if (accept_flags & O_CLOEXEC) != 0 {
+                            new_fd_flags.insert(FdFlags::CLOEXEC);
+                        }
+                        if (accept_flags & O_NONBLOCK) != 0 {
+                            new_fd_flags.insert(FdFlags::NONBLOCK);
+                        }
+                        match ctx_wk.insert_fd_entry(FdEntry::new(Arc::new(new_sock), new_fd_flags)) {
+                            Ok(new_fd) => {
+                                if addr != 0 && addrlen_ptr != 0 {
+                                    if let Some(remote) = remote_addr {
+                                        write_peer_sockaddr(&ctx_wk, remote, addr, addrlen_ptr);
+                                    }
+                                }
+                                new_fd as i32
+                            }
+                            Err(err) => -err.code(),
+                        }
+                    }
+                    Err(err) => -err.code(),
+                },
+                _ => -LinuxError::EOPNOTSUPP.code(),
+            };
+            state_wk.finish_completing_request(req_id, res, 0, true);
+        });
         Poll::Ready(())
     }));
 
@@ -952,6 +1005,3 @@ fn write_peer_sockaddr(
     }
     let _ = ctx.write_value(addrlen_ptr, &needed);
 }
-
-// Unused Pin/Context silence guard if not referenced directly in signatures.
-const _: Option<fn(Pin<&mut ()>, &mut Context<'_>)> = None;

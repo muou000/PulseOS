@@ -47,8 +47,8 @@ use pulse_user_abi::io_uring::{
 
 use self::context::AsyncExecContext;
 use self::ops::{
-    PreparedOpSpec, execute_rw_request, prepare_sqe, spawn_accept_future, spawn_poll_add_future,
-    spawn_timer_future,
+    PreparedOpSpec, compute_monotonic_deadline, execute_rw_request, prepare_sqe,
+    spawn_accept_future, spawn_poll_add_future, spawn_timer_future,
 };
 use self::worker_pool::{alloc_ring_pool_id, global_worker_pool};
 use crate::fd_table::{EventFdObject, FdEntry, FdObject, PollEventSequence, PollRegistration};
@@ -78,7 +78,6 @@ struct RingInner {
 /// `shared` so they stay valid throughout `IoUringState` teardown.
 pub struct IoUringState {
     ring_id: u64,
-    self_weak: Weak<IoUringState>,
     shared: SharedRingMemory,
     rings_frame: Arc<SharedFrame>,
     sqes_frame: Arc<SharedFrame>,
@@ -151,9 +150,8 @@ impl IoUringState {
         let submit_all = (layout.flags & linux_raw_sys::io_uring::IORING_SETUP_SUBMIT_ALL) != 0;
         let ring_id = alloc_ring_pool_id();
 
-        let state = Arc::new_cyclic(|weak| Self {
+        let state = Arc::new(Self {
             ring_id,
-            self_weak: weak.clone(),
             shared,
             rings_frame,
             sqes_frame,
@@ -300,6 +298,19 @@ impl IoUringState {
         outcome
     }
 
+    fn post_cqes_and_notify(&self, cqes: &[IoUringCqe], from_async: bool) {
+        if cqes.is_empty() {
+            return;
+        }
+        {
+            let mut inner = self.inner.lock();
+            for cqe in cqes {
+                let _ = inner.cq.post_cqe(&self.shared, *cqe);
+            }
+        }
+        self.notify_cqe_consumers(cqes.len(), from_async);
+    }
+
     /// Publishes CQEs and cancellation side-effects outside `SpinNoIrq`, returning
     /// the newly activated `start_requests` to execute next.
     fn publish_effects(&self, effects: OrchestratorEffects, from_async: bool) -> Vec<RequestId> {
@@ -307,7 +318,6 @@ impl IoUringState {
             cqes,
             start_requests,
             cancel_requests,
-            reschedule_timeouts: _,
         } = effects;
 
         let (cqe_count, cancelled_handles, dropped_specs) = {
@@ -413,27 +423,59 @@ impl IoUringState {
             PreparedOpSpec::TimeoutRemove {
                 target_user_data,
                 op_flags,
-                new_deadline,
+                new_duration,
             } => {
                 if (op_flags & IORING_TIMEOUT_UPDATE) != 0 {
-                    let (res, old_handle, update_info) = {
+                    let mut spawn_args = None;
+                    let (res, old_handle) = {
                         let mut inner = self.inner.lock();
                         let (res, info) = inner.orch.timeout_update(target_user_data, op_flags);
-                        let old_h = info
-                            .as_ref()
-                            .and_then(|(tid, _, _, _)| inner.cancel_handles.remove(tid));
-                        (res, old_h, info)
+                        let old_h = if let Some((tid, new_gen, clock, abs, phase)) = info {
+                            let deadline = new_duration
+                                .map(|dur| compute_monotonic_deadline(clock, abs, dur));
+                            match phase {
+                                RequestPhase::Queued => {
+                                    if let (Some((spec, _)), Some(dl)) =
+                                        (inner.specs.get_mut(&tid), deadline)
+                                    {
+                                        match spec {
+                                            PreparedOpSpec::Timeout {
+                                                generation,
+                                                deadline: d,
+                                            }
+                                            | PreparedOpSpec::LinkTimeout {
+                                                generation,
+                                                deadline: d,
+                                            } => {
+                                                *generation = new_gen;
+                                                *d = dl;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    None
+                                }
+                                RequestPhase::Running => {
+                                    if let Some(dl) = deadline {
+                                        let is_lt = (op_flags
+                                            & pulse_user_abi::io_uring::IORING_TIMEOUT_LINK)
+                                            != 0;
+                                        spawn_args = Some((tid, new_gen, dl, is_lt));
+                                    }
+                                    inner.cancel_handles.remove(&tid)
+                                }
+                                RequestPhase::Completing | RequestPhase::Completed => None,
+                            }
+                        } else {
+                            None
+                        };
+                        (res, old_h)
                     };
                     if let Some(h) = old_handle {
                         h.cancel();
                     }
-                    if res == 0 {
-                        if let Some((target_id, new_gen, _, _)) = update_info {
-                            if let Some(deadline) = new_deadline {
-                                let is_lt = (op_flags & pulse_user_abi::io_uring::IORING_TIMEOUT_LINK) != 0;
-                                spawn_timer_future(self, target_id, new_gen, deadline, is_lt);
-                            }
-                        }
+                    if let Some((target_id, new_gen, deadline, is_lt)) = spawn_args {
+                        spawn_timer_future(self, target_id, new_gen, deadline, is_lt);
                     }
                     if let Some(eff) = self.claim_completion_for_sync(req_id, res, false) {
                         pending_starts.extend(eff);
@@ -458,7 +500,7 @@ impl IoUringState {
                     let mut inner = self.inner.lock();
                     inner
                         .orch
-                        .async_cancel(target_user_data, target_fd, cancel_flags)
+                        .async_cancel(Some(req_id), target_user_data, target_fd, cancel_flags)
                 };
                 pending_starts.extend(self.publish_effects(eff, false));
                 if let Some(more) = self.claim_completion_for_sync(req_id, res, false) {
@@ -485,7 +527,7 @@ impl IoUringState {
                 mask,
                 events,
             } => {
-                spawn_poll_add_future(self, ctx, req_id, target, mask, events);
+                spawn_poll_add_future(self, req_id, target, mask, events);
             }
             PreparedOpSpec::Accept {
                 entry,
@@ -521,7 +563,6 @@ impl IoUringState {
         req_id: RequestId,
         res: i32,
         cqe_flags: u32,
-        _ctx: &AsyncExecContext,
         from_async: bool,
     ) {
         let (old_h, old_spec, eff) = {
@@ -543,7 +584,6 @@ impl IoUringState {
         req_id: RequestId,
         res: i32,
         cqe_flags: u32,
-        _ctx: &AsyncExecContext,
         from_async: bool,
     ) {
         let (old_h, old_spec, eff) = {
@@ -644,6 +684,7 @@ impl IoUringState {
         }
 
         let mut sq = self.submit_lock.lock();
+        let submit_all = sq.is_submit_all();
         let mut open_chain: Vec<(PreparedRequest, PreparedOpSpec)> = Vec::new();
         let mut chain_broken_by_prep = false;
         let mut last_was_link_timeout = false;
@@ -665,7 +706,7 @@ impl IoUringState {
                     return Ok(());
                 }
                 chain_broken_by_prep = false;
-                stopped_on_error = true;
+                stopped_on_error = !submit_all;
                 return Err(());
             }
 
@@ -697,13 +738,7 @@ impl IoUringState {
                             res: -err.code(),
                             flags: 0,
                         });
-                        {
-                            let mut inner = self.inner.lock();
-                            for cqe in &cqes {
-                                let _ = inner.cq.post_cqe(&self.shared, *cqe);
-                            }
-                        }
-                        self.notify_cqe_consumers(cqes.len(), false);
+                        self.post_cqes_and_notify(&cqes, false);
                         drop(specs_to_drop);
                     } else {
                         self.complete_cqe(
@@ -720,7 +755,7 @@ impl IoUringState {
                         chain_broken_by_prep = true;
                         Ok(())
                     } else {
-                        stopped_on_error = true;
+                        stopped_on_error = !submit_all;
                         Err(())
                     }
                 }
@@ -783,13 +818,7 @@ impl IoUringState {
                         flags: 0,
                     });
                 }
-                {
-                    let mut inner = self.inner.lock();
-                    for cqe in &cqes {
-                        let _ = inner.cq.post_cqe(&self.shared, *cqe);
-                    }
-                }
-                self.notify_cqe_consumers(cqes.len(), false);
+                self.post_cqes_and_notify(&cqes, false);
             }
         }
     }

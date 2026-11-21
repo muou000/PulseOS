@@ -19,7 +19,6 @@ pub type RequestId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestPhase {
-    Created,
     Queued,
     Running,
     Completing,
@@ -125,8 +124,15 @@ pub struct OrchestratorEffects {
     pub start_requests: Vec<RequestId>,
     /// Running/queued requests whose underlying timer/future/worker handle must be cancelled.
     pub cancel_requests: Vec<RequestId>,
-    /// `(request_id, new_generation)` for updated active timers whose deadline changed.
-    pub reschedule_timeouts: Vec<(RequestId, u64)>,
+}
+
+impl OrchestratorEffects {
+    /// Appends all CQEs, starts, and cancellations from `other` into `self`.
+    pub fn merge(&mut self, other: Self) {
+        self.cqes.extend(other.cqes);
+        self.start_requests.extend(other.start_requests);
+        self.cancel_requests.extend(other.cancel_requests);
+    }
 }
 
 /// Prepared per-SQE metadata passed into batch assembly after prep validation.
@@ -252,10 +258,6 @@ impl RequestOrchestrator {
     #[inline]
     pub fn request_phase(&self, id: RequestId) -> Option<RequestPhase> {
         self.requests.get(&id).map(|r| r.phase)
-    }
-
-    pub fn active_request_ids(&self) -> Vec<RequestId> {
-        self.requests.keys().copied().collect()
     }
 
     fn alloc_id_and_seq(&mut self) -> (RequestId, u64) {
@@ -391,8 +393,10 @@ impl RequestOrchestrator {
                 };
                 if let Some(pred) = self.requests.get_mut(&pred_id) {
                     pred.attached_link_timeout = Some(cur_id);
-                    pred.has_link = lt_link;
-                    pred.has_hardlink = lt_hardlink;
+                    let has_successor = lt_link || lt_hardlink;
+                    let combined_hardlink = has_successor && (pred.has_hardlink || lt_hardlink);
+                    pred.has_hardlink = combined_hardlink;
+                    pred.has_link = has_successor && !combined_hardlink;
                 }
             } else {
                 if let Some(prev) = prev_exec_id {
@@ -447,6 +451,10 @@ impl RequestOrchestrator {
                 }
             }
         }
+        self.check_timeout_count_triggers(effects);
+        effects
+            .start_requests
+            .retain(|started| self.requests.contains_key(started));
     }
 
     fn release_drain_waiters(&mut self, effects: &mut OrchestratorEffects) {
@@ -491,7 +499,7 @@ impl RequestOrchestrator {
                 req.claimed = true;
                 true
             }
-            RequestPhase::Created | RequestPhase::Completing | RequestPhase::Completed => false,
+            RequestPhase::Completing | RequestPhase::Completed => false,
         }
     }
 
@@ -524,7 +532,7 @@ impl RequestOrchestrator {
         if req.claimed
             || matches!(
                 req.phase,
-                RequestPhase::Completing | RequestPhase::Completed | RequestPhase::Created
+                RequestPhase::Completing | RequestPhase::Completed
             )
         {
             return None;
@@ -537,6 +545,32 @@ impl RequestOrchestrator {
         self.release_drain_waiters(&mut effects);
         self.check_timeout_count_triggers(&mut effects);
         Some(effects)
+    }
+
+    fn cancel_attached_link_timeout(
+        &mut self,
+        lt_id: RequestId,
+        effects: &mut OrchestratorEffects,
+    ) {
+        if let Some(lt_entry) = self.requests.get_mut(&lt_id) {
+            if !lt_entry.claimed {
+                lt_entry.claimed = true;
+                lt_entry.phase = RequestPhase::Completed;
+                let lt_removed = self.requests.remove(&lt_id).unwrap();
+                self.incomplete_seqs
+                    .remove(&(lt_removed.submit_seq, lt_removed.id));
+                effects.cancel_requests.push(lt_id);
+                self.push_cqe_and_advance(
+                    IoUringCqe {
+                        user_data: lt_removed.user_data,
+                        res: -LinuxError::ECANCELED.code(),
+                        flags: 0,
+                    },
+                    false,
+                    effects,
+                );
+            }
+        }
     }
 
     fn finalize_claimed_request(
@@ -554,25 +588,7 @@ impl RequestOrchestrator {
 
         // Cancel attached LINK_TIMEOUT if predecessor completed before timer expiry.
         if let Some(lt_id) = entry.attached_link_timeout.take() {
-            if let Some(lt_entry) = self.requests.get_mut(&lt_id) {
-                if !lt_entry.claimed {
-                    lt_entry.claimed = true;
-                    lt_entry.phase = RequestPhase::Completed;
-                    let lt_removed = self.requests.remove(&lt_id).unwrap();
-                    self.incomplete_seqs
-                        .remove(&(lt_removed.submit_seq, lt_removed.id));
-                    effects.cancel_requests.push(lt_id);
-                    self.push_cqe_and_advance(
-                        IoUringCqe {
-                            user_data: lt_removed.user_data,
-                            res: -LinuxError::ECANCELED.code(),
-                            flags: 0,
-                        },
-                        false,
-                        effects,
-                    );
-                }
-            }
+            self.cancel_attached_link_timeout(lt_id, effects);
         }
 
         let is_timeout_kind = matches!(
@@ -617,24 +633,7 @@ impl RequestOrchestrator {
             effects.cancel_requests.push(id);
 
             if let Some(lt_id) = removed.attached_link_timeout {
-                if let Some(lt_req) = self.requests.get_mut(&lt_id) {
-                    if !lt_req.claimed {
-                        lt_req.claimed = true;
-                        let lt_removed = self.requests.remove(&lt_id).unwrap();
-                        self.incomplete_seqs
-                            .remove(&(lt_removed.submit_seq, lt_removed.id));
-                        effects.cancel_requests.push(lt_id);
-                        self.push_cqe_and_advance(
-                            IoUringCqe {
-                                user_data: lt_removed.user_data,
-                                res: -LinuxError::ECANCELED.code(),
-                                flags: 0,
-                            },
-                            false,
-                            effects,
-                        );
-                    }
-                }
+                self.cancel_attached_link_timeout(lt_id, effects);
             }
 
             self.push_cqe_and_advance(
@@ -673,7 +672,7 @@ impl RequestOrchestrator {
     fn check_timeout_count_triggers(&mut self, effects: &mut OrchestratorEffects) {
         loop {
             let triggered_id = self.requests.iter().find_map(|(&id, req)| {
-                if req.claimed {
+                if req.claimed || req.phase != RequestPhase::Running {
                     return None;
                 }
                 if let RequestKind::Timeout {
@@ -774,30 +773,15 @@ impl RequestOrchestrator {
             if let Some(sub_eff) =
                 self.try_claim_completion(predecessor, -LinuxError::ECANCELED.code(), 0)
             {
-                effects.cqes.extend(sub_eff.cqes);
-                effects.start_requests.extend(sub_eff.start_requests);
-                effects.cancel_requests.extend(sub_eff.cancel_requests);
-                effects
-                    .reschedule_timeouts
-                    .extend(sub_eff.reschedule_timeouts);
+                effects.merge(sub_eff);
             }
             if let Some(lt_eff) = self.try_claim_completion(lt_id, -LinuxError::ETIME.code(), 0) {
-                effects.cqes.extend(lt_eff.cqes);
-                effects.start_requests.extend(lt_eff.start_requests);
-                effects.cancel_requests.extend(lt_eff.cancel_requests);
-                effects
-                    .reschedule_timeouts
-                    .extend(lt_eff.reschedule_timeouts);
+                effects.merge(lt_eff);
             }
         } else if let Some(lt_eff) =
             self.try_claim_completion(lt_id, -LinuxError::ECANCELED.code(), 0)
         {
-            effects.cqes.extend(lt_eff.cqes);
-            effects.start_requests.extend(lt_eff.start_requests);
-            effects.cancel_requests.extend(lt_eff.cancel_requests);
-            effects
-                .reschedule_timeouts
-                .extend(lt_eff.reschedule_timeouts);
+            effects.merge(lt_eff);
         }
 
         effects
@@ -846,13 +830,13 @@ impl RequestOrchestrator {
         &mut self,
         target_user_data: u64,
         op_flags: u32,
-    ) -> (i32, Option<(RequestId, u64, TimeoutClock, bool)>) {
+    ) -> (i32, Option<(RequestId, u64, TimeoutClock, bool, RequestPhase)>) {
         let match_link = (op_flags & IORING_TIMEOUT_LINK) != 0;
         let abs = (op_flags & IORING_TIMEOUT_ABS) != 0;
         let explicit_clock = (op_flags & IORING_TIMEOUT_CLOCK_MASK) != 0;
 
         let mut saw_completing = false;
-        let mut matched: Option<(RequestId, u64, TimeoutClock)> = None;
+        let mut matched: Option<(RequestId, u64, TimeoutClock, RequestPhase)> = None;
 
         for (&id, req) in self.requests.iter() {
             if req.user_data != target_user_data {
@@ -877,11 +861,11 @@ impl RequestOrchestrator {
                 | RequestKind::LinkTimeout { generation, .. } => generation.wrapping_add(1),
                 RequestKind::Normal { .. } => 1,
             };
-            matched = Some((id, new_gen, next_clock));
+            matched = Some((id, new_gen, next_clock, req.phase));
             break;
         }
 
-        let Some((id, new_gen, next_clock)) = matched else {
+        let Some((id, new_gen, next_clock, phase)) = matched else {
             let code = if saw_completing {
                 -LinuxError::EBUSY.code()
             } else {
@@ -916,12 +900,14 @@ impl RequestOrchestrator {
             }
         }
 
-        (0, Some((id, new_gen, next_clock, abs)))
+        (0, Some((id, new_gen, next_clock, abs, phase)))
     }
 
-    /// Executes `IORING_OP_ASYNC_CANCEL` against active requests in this ring only.
+    /// Executes `IORING_OP_ASYNC_CANCEL` against active requests in this ring only,
+    /// excluding `caller_id` so the cancel request itself cannot self-cancel.
     pub fn async_cancel(
         &mut self,
+        caller_id: Option<RequestId>,
         target_user_data: u64,
         target_fd: i32,
         cancel_flags: u32,
@@ -939,6 +925,9 @@ impl RequestOrchestrator {
         let mut saw_completing = false;
 
         for (&id, req) in self.requests.iter() {
+            if caller_id == Some(id) {
+                continue;
+            }
             let is_match = if by_fd {
                 match req.kind {
                     RequestKind::Normal { fd: Some(fd), .. } => fd == target_fd,
@@ -990,10 +979,7 @@ impl RequestOrchestrator {
                 self.try_claim_completion(id, -LinuxError::ECANCELED.code(), 0)
             {
                 cancelled_count += 1;
-                combined.cqes.extend(eff.cqes);
-                combined.start_requests.extend(eff.start_requests);
-                combined.cancel_requests.extend(eff.cancel_requests);
-                combined.reschedule_timeouts.extend(eff.reschedule_timeouts);
+                combined.merge(eff);
             }
         }
 
@@ -1037,12 +1023,7 @@ impl RequestOrchestrator {
             };
             combined.cancel_requests.push(id);
             if let Some(eff) = self.try_claim_completion(id, -LinuxError::ECANCELED.code(), 0) {
-                combined.cqes.extend(eff.cqes);
-                combined.start_requests.extend(eff.start_requests);
-                combined.cancel_requests.extend(eff.cancel_requests);
-                combined
-                    .reschedule_timeouts
-                    .extend(eff.reschedule_timeouts);
+                combined.merge(eff);
             }
         }
         combined
@@ -1065,9 +1046,7 @@ impl RequestOrchestrator {
                 if let Some(eff) =
                     self.try_claim_completion(id, -LinuxError::ECANCELED.code(), 0)
                 {
-                    combined.cqes.extend(eff.cqes);
-                    combined.start_requests.extend(eff.start_requests);
-                    combined.cancel_requests.extend(eff.cancel_requests);
+                    combined.merge(eff);
                 }
             }
         }
@@ -1242,7 +1221,7 @@ mod tests {
 
         // Competing completion, cancel, or timeout claims must all lose cleanly.
         assert!(orch.try_claim_completion(id, -125, 0).is_none());
-        let (cancel_res, _) = orch.async_cancel(0x11, -1, 0);
+        let (cancel_res, _) = orch.async_cancel(None, 0x11, -1, 0);
         assert_eq!(cancel_res, -LinuxError::ENOENT.code());
         assert_eq!(orch.inflight_len(), 0);
     }
@@ -1452,7 +1431,7 @@ mod tests {
             .unwrap();
         assert!(orch.try_begin_completing(r_fd));
         assert_eq!(
-            orch.async_cancel(0, 9, IORING_ASYNC_CANCEL_FD).0,
+            orch.async_cancel(None, 0, 9, IORING_ASYNC_CANCEL_FD).0,
             -LinuxError::EALREADY.code()
         );
         let fin = orch.finish_completing(r_fd, 64, 0);
@@ -1547,5 +1526,72 @@ mod tests {
             ]
         );
         assert_eq!(orch.inflight_len(), 0);
+    }
+
+    #[test]
+    fn async_cancel_self_exclusion_queued_count_timeout_and_link_timeout_hardlink() {
+        let mut orch = RequestOrchestrator::new();
+
+        // 1. `async_cancel(caller_id, ANY)` never cancels itself.
+        let (ac_id, _) = orch.commit_chain(&mut [normal_prep(0xaa, 0, None, None)]).unwrap();
+        let (res, eff) = orch.async_cancel(Some(ac_id), 0, -1, IORING_ASYNC_CANCEL_ANY);
+        assert_eq!(res, -LinuxError::ENOENT.code());
+        assert!(eff.cqes.is_empty());
+        assert!(orch.try_claim_completion(ac_id, -LinuxError::ENOENT.code(), 0).is_some());
+
+        // 2. Queued `TIMEOUT(off=1)` in a link waits until Running, then fires immediately once activated.
+        let (nop_id, _) = orch
+            .commit_chain(&mut [
+                normal_prep(1, IOSQE_IO_LINK, None, None),
+                PreparedRequest {
+                    user_data: 2,
+                    sqe_flags: 0,
+                    owner_pid: 0,
+                    kind: RequestKind::Timeout {
+                        clock: TimeoutClock::Monotonic,
+                        abs: false,
+                        etime_success: false,
+                        target_completions: Some(orch.completion_seq() + 1),
+                        generation: 1,
+                    },
+                },
+            ])
+            .unwrap();
+        // Completing an unrelated request advances `completion_seq` to `target` while node 2 is still Queued.
+        let (other_id, _) = orch.commit_chain(&mut [normal_prep(99, 0, None, None)]).unwrap();
+        let other_done = orch.try_claim_completion(other_id, 0, 0).unwrap();
+        assert_eq!(other_done.cqes.len(), 1);
+        // Completing `nop_id` activates node 2 -> `check_timeout_count_triggers` immediately emits CQE for `2`.
+        let nop_done = orch.try_claim_completion(nop_id, 0, 0).unwrap();
+        assert!(nop_done.start_requests.is_empty());
+        assert_eq!(
+            nop_done.cqes.iter().map(|c| (c.user_data, c.res)).collect::<Vec<_>>(),
+            alloc::vec![(1, 0), (2, 0)]
+        );
+
+        // 3. Hardlink on predecessor before LinkTimeout continues to trailing node even after predecessor fails.
+        let (pred_id, eff_hl) = orch
+            .commit_chain(&mut [
+                normal_prep(10, IOSQE_IO_HARDLINK, None, None),
+                PreparedRequest {
+                    user_data: 11,
+                    sqe_flags: IOSQE_IO_LINK,
+                    owner_pid: 0,
+                    kind: RequestKind::LinkTimeout {
+                        predecessor: 0,
+                        clock: TimeoutClock::Monotonic,
+                        abs: false,
+                        generation: 1,
+                    },
+                },
+                normal_prep(12, 0, None, None),
+            ])
+            .unwrap();
+        assert_eq!(eff_hl.start_requests.len(), 2);
+        let done_pred = orch.try_claim_completion(pred_id, -LinuxError::EIO.code(), 0).unwrap();
+        assert_eq!(done_pred.start_requests.len(), 1);
+        let trail_id = done_pred.start_requests[0];
+        let done_trail = orch.try_claim_completion(trail_id, 0, 0).unwrap();
+        assert_eq!((done_trail.cqes[0].user_data, done_trail.cqes[0].res), (12, 0));
     }
 }

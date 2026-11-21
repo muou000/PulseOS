@@ -212,13 +212,24 @@ pub(crate) fn sys_io_uring_enter(
                     },
                 );
                 axtask::future::drive_ready(32);
-                if res.is_err() && cq_ready < effective_min {
-                    let (ready_after, _) = state.check_cq_ready_and_ebadr(false);
-                    cq_ready = ready_after;
-                    if cq_ready < effective_min && timeout_dur.is_some() {
-                        wait_err = Some(LinuxError::ETIME);
-                        break;
-                    }
+                let (ready_after, _) = state.check_cq_ready_and_ebadr(false);
+                cq_ready = ready_after;
+                if cq_ready >= effective_min
+                    || state.timeout_expiries() != initial_timeout_expiries
+                {
+                    break;
+                }
+                if state.is_dying() {
+                    wait_err = Some(LinuxError::EBADF);
+                    break;
+                }
+                if current_have_signals() {
+                    wait_err = Some(LinuxError::EINTR);
+                    break;
+                }
+                if matches!(res, Err(true)) && cq_ready < effective_min && timeout_dur.is_some() {
+                    wait_err = Some(LinuxError::ETIME);
+                    break;
                 }
             }
         }
