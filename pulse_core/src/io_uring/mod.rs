@@ -1,11 +1,11 @@
 //! Core kernel `io_uring` instance state (`IoUringState`) and file descriptor (`IoUringObject`).
 //!
 //! # Lock ordering (ADR-0007)
-//! `submit_lock` (sleepable) -> `Process` / `FdObject` / `axfs` / `axnet` ->
-//! `inner` (`SpinNoIrq`: `CompletionRingState` + `RequestOrchestrator`) ->
+//! `submit_lock` -> `register_lock` (sleepable) -> `Process` / `FdObject` / `axfs` / `axnet` ->
+//! `inner` / `fixed_buffers` / `fixed_files` (`SpinNoIrq`) ->
 //! `eventfd` (`SpinNoIrq`) -> `WaitQueue`.
-//! Never invoke `Future::poll`, drop futures/FDs/processes, or notify `eventfd`/`WaitQueue`
-//! while holding `inner`.
+//! Never invoke `Future::poll`, pin user pages, drop futures/FDs/processes/fixed-buffer tables,
+//! or notify `eventfd`/`WaitQueue` while holding `SpinNoIrq`.
 
 pub mod context;
 mod ops;
@@ -38,6 +38,10 @@ use pulse_io_uring_core::capacity::validate_and_compute_ring_geometry;
 use pulse_io_uring_core::orchestrator::{
     OrchestratorEffects, PreparedRequest, RequestId, RequestKind, RequestOrchestrator, RequestPhase,
 };
+use pulse_io_uring_core::resources::{
+    FixedBufferRegistry, FixedBufferSlot, FixedBufferTable, FixedFileRegistry, UserIoSegment,
+    validate_fixed_buffer_specs,
+};
 use pulse_io_uring_core::ring::{
     CompletionRingState, PostCqeOutcome, SharedRingMemory, SubmitRingState,
 };
@@ -51,7 +55,9 @@ use self::ops::{
     spawn_accept_future, spawn_poll_add_future, spawn_timer_future,
 };
 use self::worker_pool::{alloc_ring_pool_id, global_worker_pool};
-use crate::fd_table::{EventFdObject, FdEntry, FdObject, PollEventSequence, PollRegistration};
+use crate::fd_table::{EventFdObject, FdEntry, FdFlags, FdObject, PollEventSequence, PollRegistration};
+use crate::mm::{FixedBufferIo, FixedBufferPages, pin_fixed_buffer_pages};
+use crate::task::Process;
 
 struct RegisteredEventFd {
     fd_object: Arc<dyn FdObject>,
@@ -82,7 +88,10 @@ pub struct IoUringState {
     rings_frame: Arc<SharedFrame>,
     sqes_frame: Arc<SharedFrame>,
     submit_lock: Mutex<SubmitRingState>,
+    register_lock: Mutex<()>,
     inner: SpinNoIrq<RingInner>,
+    fixed_buffers: SpinNoIrq<(FixedBufferRegistry<FixedBufferPages>, Option<Weak<Process>>)>,
+    fixed_files: SpinNoIrq<FixedFileRegistry<FdEntry>>,
     eventfd: SpinNoIrq<Option<RegisteredEventFd>>,
     dying: AtomicBool,
     inflight_count: AtomicUsize,
@@ -156,12 +165,15 @@ impl IoUringState {
             rings_frame,
             sqes_frame,
             submit_lock: Mutex::new(SubmitRingState::new(layout.sq_entries, submit_all)),
+            register_lock: Mutex::new(()),
             inner: SpinNoIrq::new(RingInner {
                 cq: CompletionRingState::new(layout.cq_entries),
                 orch: RequestOrchestrator::new(),
                 specs: BTreeMap::new(),
                 cancel_handles: BTreeMap::new(),
             }),
+            fixed_buffers: SpinNoIrq::new((FixedBufferRegistry::new(), None)),
+            fixed_files: SpinNoIrq::new(FixedFileRegistry::new()),
             eventfd: SpinNoIrq::new(None),
             dying: AtomicBool::new(false),
             inflight_count: AtomicUsize::new(0),
@@ -513,8 +525,8 @@ impl IoUringState {
                 offset,
                 force_async,
             } => match outcome {
-                Ok((entry, segments)) => {
-                    execute_rw_request(self, ctx, req_id, entry, is_write, segments, offset, force_async);
+                Ok((entry, buffer)) => {
+                    execute_rw_request(self, ctx, req_id, entry, is_write, buffer, offset, force_async);
                 }
                 Err(err) => {
                     if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
@@ -522,6 +534,30 @@ impl IoUringState {
                     }
                 }
             },
+            PreparedOpSpec::FilesUpdate {
+                outcome,
+                force_async,
+            } => {
+                if force_async {
+                    if let Some(guard) = self.try_enter_inflight_owned() {
+                        let state_wk = Arc::clone(self);
+                        let ctx_wk = ctx.clone();
+                        global_worker_pool().submit(self.ring_id(), req_id, move || {
+                            let _guard = guard;
+                            if !state_wk.is_request_active(req_id) {
+                                return;
+                            }
+                            let res = state_wk.execute_files_update(&ctx_wk.process, outcome);
+                            state_wk.complete_request(req_id, res, 0, true);
+                        });
+                    }
+                } else {
+                    let res = self.execute_files_update(&ctx.process, outcome);
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, res, false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            }
             PreparedOpSpec::PollAdd {
                 target,
                 mask,
@@ -533,9 +569,19 @@ impl IoUringState {
                 entry,
                 addr,
                 addrlen_ptr,
+                initial_addrlen,
                 accept_flags,
             } => {
-                spawn_accept_future(self, ctx, req_id, entry, addr, addrlen_ptr, accept_flags);
+                spawn_accept_future(
+                    self,
+                    ctx,
+                    req_id,
+                    entry,
+                    addr,
+                    addrlen_ptr,
+                    initial_addrlen,
+                    accept_flags,
+                );
             }
         }
     }
@@ -712,6 +758,7 @@ impl IoUringState {
 
             let cur_cqe_seq = self.inner.lock().orch.completion_seq();
             match prepare_sqe(
+                self,
                 sqe,
                 exec_ctx,
                 cur_cqe_seq,
@@ -845,6 +892,203 @@ impl IoUringState {
         }
         Ok(())
     }
+
+    pub fn check_can_register_buffers(&self, nr_args: usize) -> LinuxResult<()> {
+        self.fixed_buffers.lock().0.check_can_register(nr_args)
+    }
+
+    pub fn register_buffers(
+        &self,
+        process: &Arc<Process>,
+        specs: &[UserIoSegment],
+    ) -> LinuxResult<()> {
+        let _reg_guard = self.register_lock.lock();
+        self.fixed_buffers.lock().0.check_can_register(specs.len())?;
+
+        let plan =
+            validate_fixed_buffer_specs(specs, |addr, len| process.is_user_range(addr, len))?;
+        process
+            .memlock_try_charge_pinned(plan.charged_bytes, process.is_root_user())
+            .map_err(|_| LinuxError::ENOMEM)?;
+
+        let mut slots = Vec::with_capacity(specs.len());
+        for spec in specs {
+            if spec.len == 0 {
+                slots.push(Arc::new(FixedBufferSlot::empty(spec.addr)));
+                continue;
+            }
+            match pin_fixed_buffer_pages(process, spec.addr, spec.len) {
+                Ok((Some(pages), writable)) => {
+                    slots.push(Arc::new(FixedBufferSlot::with_pages(
+                        spec.addr,
+                        spec.len,
+                        writable,
+                        pages,
+                    )));
+                }
+                Ok((None, _)) => slots.push(Arc::new(FixedBufferSlot::empty(spec.addr))),
+                Err(err) => {
+                    drop(slots);
+                    process.memlock_uncharge_pinned(plan.charged_bytes);
+                    return Err(err);
+                }
+            }
+        }
+
+        let table = FixedBufferTable::new(slots, plan.charged_bytes);
+        let install_res = {
+            let mut guard = self.fixed_buffers.lock();
+            match guard.0.install(table) {
+                Ok(()) => {
+                    guard.1 = Some(Arc::downgrade(process));
+                    Ok(())
+                }
+                Err((err, rejected_table)) => Err((err, rejected_table)),
+            }
+        };
+        if let Err((err, rejected_table)) = install_res {
+            process.memlock_uncharge_pinned(rejected_table.charged_bytes());
+            drop(rejected_table);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    pub fn unregister_buffers(&self, arg: usize, nr_args: u32) -> LinuxResult<()> {
+        let _reg_guard = self.register_lock.lock();
+        let (old_table, owner_weak) = {
+            let mut guard = self.fixed_buffers.lock();
+            let old_table = guard.0.unregister(arg, nr_args)?;
+            let owner_weak = guard.1.take();
+            (old_table, owner_weak)
+        };
+        if let Some(proc) = owner_weak.and_then(|w| w.upgrade()) {
+            proc.memlock_uncharge_pinned(old_table.charged_bytes());
+        }
+        drop(old_table);
+        Ok(())
+    }
+
+    pub fn resolve_fixed_buffer(
+        &self,
+        buf_index: u16,
+        addr: u64,
+        len: u32,
+        require_write: bool,
+    ) -> LinuxResult<FixedBufferIo> {
+        let slice = self
+            .fixed_buffers
+            .lock()
+            .0
+            .resolve_slice(buf_index, addr, len, require_write)?;
+        Ok(FixedBufferIo::new(slice))
+    }
+
+    pub fn check_can_register_files(&self, nr_args: usize) -> LinuxResult<()> {
+        self.fixed_files.lock().check_can_register(nr_args)
+    }
+
+    pub fn register_files(&self, process: &Process, raw_fds: &[i32]) -> LinuxResult<()> {
+        let _reg_guard = self.register_lock.lock();
+        self.fixed_files.lock().check_can_register(raw_fds.len())?;
+
+        let mut slots = Vec::with_capacity(raw_fds.len());
+        for &fd in raw_fds {
+            match FixedFileRegistry::resolve_slot_fd(fd, &mut |u| {
+                resolve_process_fd_for_fixed(process, u)
+            }) {
+                Ok(slot) => slots.push(slot),
+                Err(err) => {
+                    drop(slots);
+                    return Err(err);
+                }
+            }
+        }
+
+        let install_res = { self.fixed_files.lock().install(slots) };
+        if let Err((err, rejected)) = install_res {
+            drop(rejected);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    pub fn unregister_files(&self, arg: usize, nr_args: u32) -> LinuxResult<()> {
+        let _reg_guard = self.register_lock.lock();
+        let old_slots = { self.fixed_files.lock().unregister(arg, nr_args)? };
+        drop(old_slots);
+        Ok(())
+    }
+
+    pub fn validate_files_update(
+        &self,
+        offset: u32,
+        nr_args: u32,
+        resv: u32,
+    ) -> LinuxResult<usize> {
+        self.fixed_files.lock().validate_update(offset, nr_args, resv)
+    }
+
+    pub fn update_fixed_files(
+        &self,
+        process: &Process,
+        offset: u32,
+        raw_fds: &[i32],
+        resv: u32,
+    ) -> LinuxResult<usize> {
+        let _reg_guard = self.register_lock.lock();
+        let start = self
+            .fixed_files
+            .lock()
+            .validate_update(offset, raw_fds.len() as u32, resv)?;
+
+        let mut resolved = Vec::with_capacity(raw_fds.len());
+        let mut first_err = None;
+        for &fd in raw_fds {
+            match FixedFileRegistry::resolve_slot_fd(fd, &mut |u| {
+                resolve_process_fd_for_fixed(process, u)
+            }) {
+                Ok(slot) => resolved.push(slot),
+                Err(err) => {
+                    first_err = Some(err);
+                    break;
+                }
+            }
+        }
+
+        let (res, replaced) = {
+            self.fixed_files
+                .lock()
+                .apply_resolved_update(start, resolved, first_err)
+        };
+        drop(replaced);
+        res
+    }
+
+    pub fn get_fixed_fd_entry(&self, index: u32) -> LinuxResult<FdEntry> {
+        self.fixed_files.lock().get_cloned(index)
+    }
+
+    fn execute_files_update(
+        &self,
+        process: &Process,
+        outcome: LinuxResult<(u32, Vec<i32>)>,
+    ) -> i32 {
+        match outcome.and_then(|(offset, fds)| self.update_fixed_files(process, offset, &fds, 0)) {
+            Ok(done) => done as i32,
+            Err(err) => -err.code(),
+        }
+    }
+}
+
+fn resolve_process_fd_for_fixed(process: &Process, fd: usize) -> LinuxResult<FdEntry> {
+    let entry = process.get_fd_entry(fd)?;
+    if entry.object.as_any().is::<IoUringObject>() {
+        return Err(LinuxError::EBADF);
+    }
+    let mut flags = entry.flags;
+    flags.remove(FdFlags::CLOEXEC);
+    Ok(FdEntry::new(entry.object, flags))
 }
 
 /// File descriptor wrapper around `Arc<IoUringState>`.
@@ -911,8 +1155,20 @@ impl Drop for IoUringObject {
             .teardown_wait_queue
             .wait_until(|| self.state.inflight_count.load(Ordering::Acquire) == 0);
 
-        // Step 4: Take under SpinNoIrq, then drop `Arc<dyn FdObject>` outside SpinNoIrq.
+        // Step 4: Take under SpinNoIrq, then uncharge & drop resources outside SpinNoIrq.
         let ev = { self.state.eventfd.lock().take() };
+        let old_files = { self.state.fixed_files.lock().take_for_drop() };
+        let (old_buffers, old_buf_owner) = {
+            let mut guard = self.state.fixed_buffers.lock();
+            (guard.0.take_for_drop(), guard.1.take())
+        };
+        if let Some(table) = old_buffers {
+            if let Some(proc) = old_buf_owner.and_then(|w| w.upgrade()) {
+                proc.memlock_uncharge_pinned(table.charged_bytes());
+            }
+            drop(table);
+        }
+        drop(old_files);
         drop(ev);
         // Step 5: Shared frames are released when `self.state` (`Arc<IoUringState>`) drops.
     }
@@ -1038,4 +1294,157 @@ pub fn cancel_requests_for_process(owner_pid: u64) {
             ring.cancel_requests_for_owner(owner_pid);
         }
     }
+}
+
+/// Boot-time in-kernel invariant checks for `PinnedUserBuffers`, `FixedBufferRegistry`,
+/// physical frame refcount balance, `memlock` pinned-bytes accounting, and `FixedFileRegistry`.
+#[cfg(feature = "guest-checks")]
+pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
+    use memory_addr::VirtAddr;
+
+    axlog::ax_println!("[IO_URING_RSRC_GUEST] Starting fixed resources & frame refcount checks...");
+
+    let process = crate::task::current_process()?;
+    let aspace_handle = process.aspace_handle();
+    let test_va = 0x2200_0000usize;
+    let total_pages = 3usize;
+    let map_size = total_pages * PAGE_SIZE_4K;
+
+    {
+        let mut aspace = aspace_handle.write();
+        aspace
+            .map_alloc(
+                VirtAddr::from(test_va),
+                map_size,
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                true,
+            )
+            .map_err(LinuxError::from)?;
+    }
+
+    let mut page_frames = Vec::with_capacity(total_pages);
+    let mut baseline_refs = Vec::with_capacity(total_pages);
+    {
+        let aspace = aspace_handle.read();
+        for idx in 0..total_pages {
+            let vaddr = VirtAddr::from(test_va + idx * PAGE_SIZE_4K);
+            let paddr = aspace
+                .pin_user_frame(vaddr, MappingFlags::READ | MappingFlags::WRITE)
+                .map_err(LinuxError::from)?;
+            // `pin_user_frame` bumped ref by 1; measure baseline just before releasing this probe pin.
+            let after_probe = axalloc::frame_table()
+                .try_get_ref(paddr)
+                .expect("test page in frame_table");
+            crate::mm::release_pinned_user_frame(paddr);
+            page_frames.push(paddr);
+            baseline_refs.push(after_probe - 1);
+        }
+    }
+
+    // 1. Single-window PinnedUserBuffers balance check across write + read.
+    let segs = [UserIoSegment::new(test_va, map_size)];
+    let mut cursor = crate::mm::UserBufferCursor::default();
+    let mut write_win =
+        crate::mm::PinnedUserBuffers::pin_with_process(&process, &segs, &mut cursor, true)?;
+    assert_eq!(write_win.len(), map_size);
+    for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
+        let cur = axalloc::frame_table().try_get_ref(*paddr).unwrap();
+        assert_eq!(cur, base + 1, "write window should pin page once");
+    }
+    let pattern = alloc::vec![0x5Au8; map_size];
+    write_win.copy_to_user_exact(&pattern)?;
+    drop(write_win);
+    for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
+        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base);
+    }
+
+    let mut read_cursor = crate::mm::UserBufferCursor::default();
+    let mut read_win =
+        crate::mm::PinnedUserBuffers::pin_with_process(&process, &segs, &mut read_cursor, false)?;
+    let mut read_back = alloc::vec![0u8; map_size];
+    read_win.copy_from_user_exact(&mut read_back)?;
+    assert!(read_back.iter().all(|&b| b == 0x5A));
+    drop(read_win);
+    for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
+        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base);
+    }
+    axlog::ax_println!("[IO_URING_RSRC_GUEST] PinnedUserBuffers balance & direct copy: PASS");
+
+    // 2. FixedBufferRegistry registration + inflight keep-alive across unregister_buffers + memlock.
+    let mut params: io_uring_params = unsafe { core::mem::zeroed() };
+    let ring = Arc::new(IoUringObject::new(8, &mut params)?);
+    let state = ring.state();
+
+    let baseline_pinned = process.memlock_pinned_bytes();
+    state.register_buffers(
+        &process,
+        &[
+            UserIoSegment::new(0, 0),
+            UserIoSegment::new(test_va, map_size),
+        ],
+    )?;
+    assert_eq!(
+        process.memlock_pinned_bytes(),
+        baseline_pinned + map_size,
+        "memlock pinned_bytes charged"
+    );
+    for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
+        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base + 1);
+    }
+
+    let mut fixed_io = state.resolve_fixed_buffer(1, test_va as u64, map_size as u32, true)?;
+    let pattern2 = alloc::vec![0xA5u8; map_size];
+    fixed_io.copy_to_user_exact(&pattern2)?;
+    let mut fixed_read = state.resolve_fixed_buffer(1, test_va as u64, map_size as u32, false)?;
+    let mut read_back2 = alloc::vec![0u8; map_size];
+    fixed_read.copy_from_user_exact(&mut read_back2)?;
+    assert!(read_back2.iter().all(|&b| b == 0xA5));
+    drop(fixed_read);
+
+    state.unregister_buffers(0, 0)?;
+    assert_eq!(
+        process.memlock_pinned_bytes(),
+        baseline_pinned,
+        "memlock uncharged on unregister"
+    );
+    // Inflight `fixed_io` still keeps frames pinned after unregister.
+    for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
+        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base + 1);
+    }
+    drop(fixed_io);
+    for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
+        assert_eq!(
+            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            base,
+            "frames balanced after last inflight fixed buffer drop"
+        );
+    }
+    axlog::ax_println!("[IO_URING_RSRC_GUEST] FixedBufferRegistry pin/inflight/memlock accounting: PASS");
+
+    // 3. FixedFileRegistry sparse slots, partial update `done`, and ring self-reference rejection.
+    let (r_end, w_end) = crate::fd_table::PipeObject::new_pair();
+    let r_fd = process.insert_fd_entry(FdEntry::new(Arc::new(r_end), FdFlags::empty()))?;
+    let w_fd = process.insert_fd_entry(FdEntry::new(Arc::new(w_end), FdFlags::empty()))?;
+    let ring_fd = process.insert_fd_entry(FdEntry::new(Arc::clone(&ring) as Arc<dyn FdObject>, FdFlags::empty()))?;
+    assert_eq!(
+        state.register_files(&process, &[ring_fd as i32]).err(),
+        Some(LinuxError::EBADF)
+    );
+    state.register_files(&process, &[r_fd as i32, -1, -1])?;
+    assert!(state.get_fixed_fd_entry(0).is_ok());
+    assert_eq!(state.get_fixed_fd_entry(1).err(), Some(LinuxError::EBADF));
+    let done = state.update_fixed_files(&process, 1, &[w_fd as i32, -2], 0)?;
+    assert_eq!(done, 1);
+    assert!(state.get_fixed_fd_entry(1).is_ok());
+    state.unregister_files(0, 0)?;
+    axlog::ax_println!("[IO_URING_RSRC_GUEST] FixedFileRegistry sparse slots & partial update: PASS");
+
+    let _ = process.remove_fd_entry(ring_fd);
+    let _ = process.remove_fd_entry(w_fd);
+    let _ = process.remove_fd_entry(r_fd);
+    drop(ring);
+    let _ = aspace_handle.unmap(VirtAddr::from(test_va), map_size);
+
+    axlog::ax_println!("[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS");
+    Ok(())
 }

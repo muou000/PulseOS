@@ -2104,6 +2104,7 @@ dependencies = [
  "axtask",
  "bitflags 2.11.1",
  "hashbrown 0.16.1",
+ "heapless 0.9.3",
  "kernel-elf-parser",
  "kernel_guard",
  "kspin",

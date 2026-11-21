@@ -102,6 +102,7 @@ pub struct FutexWaitv {
 pub struct MemlockState {
     ranges: Vec<MemlockRange>,
     locked_bytes: usize,
+    pinned_bytes: usize,
     soft_limit: u64,
     hard_limit: u64,
     mlock_future: bool,
@@ -112,6 +113,7 @@ impl MemlockState {
         Self {
             ranges: Vec::new(),
             locked_bytes: 0,
+            pinned_bytes: 0,
             soft_limit: DEFAULT_MEMLOCK_LIMIT_BYTES,
             hard_limit: DEFAULT_MEMLOCK_LIMIT_BYTES,
             mlock_future: false,
@@ -122,10 +124,27 @@ impl MemlockState {
         Self {
             ranges: Vec::new(),
             locked_bytes: 0,
+            pinned_bytes: 0,
             soft_limit,
             hard_limit,
             mlock_future: false,
         }
+    }
+
+    pub(super) fn check_additional_within_limit(
+        &self,
+        additional: usize,
+        privileged: bool,
+    ) -> AxResult<()> {
+        if !privileged && self.soft_limit != u64::MAX {
+            let new_total = (self.locked_bytes as u128)
+                .saturating_add(self.pinned_bytes as u128)
+                .saturating_add(additional as u128);
+            if new_total > self.soft_limit as u128 {
+                return Err(AxError::NoMemory);
+            }
+        }
+        Ok(())
     }
 }
 

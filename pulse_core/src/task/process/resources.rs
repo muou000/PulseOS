@@ -219,6 +219,10 @@ impl Process {
         self.resources.lock().memlock_state.locked_bytes
     }
 
+    pub fn memlock_pinned_bytes(&self) -> usize {
+        self.resources.lock().memlock_state.pinned_bytes
+    }
+
     pub fn memlock_future_enabled(&self) -> bool {
         self.resources.lock().memlock_state.mlock_future
     }
@@ -242,16 +246,34 @@ impl Process {
         if additional == 0 {
             return Ok(());
         }
-        if !privileged && res.memlock_state.soft_limit != u64::MAX {
-            let new_total =
-                (res.memlock_state.locked_bytes as u128).saturating_add(additional as u128);
-            if new_total > res.memlock_state.soft_limit as u128 {
-                return Err(AxError::NoMemory);
-            }
-        }
+        res.memlock_state
+            .check_additional_within_limit(additional, privileged)?;
         Self::memlock_insert_range(&mut res.memlock_state.ranges, start, end)?;
         res.memlock_state.locked_bytes = res.memlock_state.locked_bytes.saturating_add(additional);
         Ok(())
+    }
+
+    pub fn memlock_try_charge_pinned(&self, bytes: usize, privileged: bool) -> AxResult<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let mut res = self.resources.lock();
+        res.memlock_state
+            .check_additional_within_limit(bytes, privileged)?;
+        res.memlock_state.pinned_bytes = res
+            .memlock_state
+            .pinned_bytes
+            .checked_add(bytes)
+            .ok_or(AxError::NoMemory)?;
+        Ok(())
+    }
+
+    pub fn memlock_uncharge_pinned(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let mut res = self.resources.lock();
+        res.memlock_state.pinned_bytes = res.memlock_state.pinned_bytes.saturating_sub(bytes);
     }
 
     pub fn memlock_unlock_range(&self, start: usize, len: usize) -> AxResult<()> {
