@@ -9,7 +9,24 @@ use linux_raw_sys::io_uring::{
     io_uring_getevents_arg, io_uring_params, io_uring_probe, io_uring_probe_op,
     io_uring_rsrc_update, io_uring_sqe, io_uring_sqe__bindgen_ty_1, io_uring_sqe__bindgen_ty_2,
     io_uring_sqe__bindgen_ty_3, io_uring_sqe__bindgen_ty_4, io_uring_sqe__bindgen_ty_5,
-    io_uring_sqe__bindgen_ty_6,
+    io_uring_sqe__bindgen_ty_6, io_uring_sqe_flags_bit,
+};
+
+pub const IOSQE_FIXED_FILE: u8 = 1 << (io_uring_sqe_flags_bit::IOSQE_FIXED_FILE_BIT as u8);
+pub const IOSQE_IO_DRAIN: u8 = 1 << (io_uring_sqe_flags_bit::IOSQE_IO_DRAIN_BIT as u8);
+pub const IOSQE_IO_LINK: u8 = 1 << (io_uring_sqe_flags_bit::IOSQE_IO_LINK_BIT as u8);
+pub const IOSQE_IO_HARDLINK: u8 = 1 << (io_uring_sqe_flags_bit::IOSQE_IO_HARDLINK_BIT as u8);
+pub const IOSQE_ASYNC: u8 = 1 << (io_uring_sqe_flags_bit::IOSQE_ASYNC_BIT as u8);
+pub const IOSQE_BUFFER_SELECT: u8 = 1 << (io_uring_sqe_flags_bit::IOSQE_BUFFER_SELECT_BIT as u8);
+pub const IOSQE_CQE_SKIP_SUCCESS: u8 =
+    1 << (io_uring_sqe_flags_bit::IOSQE_CQE_SKIP_SUCCESS_BIT as u8);
+
+pub use linux_raw_sys::io_uring::{
+    IORING_ASYNC_CANCEL_ALL, IORING_ASYNC_CANCEL_ANY, IORING_ASYNC_CANCEL_FD,
+    IORING_ASYNC_CANCEL_FD_FIXED, IORING_LINK_TIMEOUT_UPDATE as IORING_TIMEOUT_LINK,
+    IORING_TIMEOUT_ABS, IORING_TIMEOUT_BOOTTIME, IORING_TIMEOUT_CLOCK_MASK,
+    IORING_TIMEOUT_ETIME_SUCCESS, IORING_TIMEOUT_MULTISHOT, IORING_TIMEOUT_REALTIME,
+    IORING_TIMEOUT_UPDATE, IORING_TIMEOUT_UPDATE_MASK,
 };
 
 use crate::{

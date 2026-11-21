@@ -2,7 +2,12 @@
 
 use axerrno::LinuxError;
 use linux_raw_sys::io_uring::{io_uring_op, io_uring_probe, io_uring_probe_op};
-use pulse_user_abi::io_uring::IoUringSqe;
+use pulse_user_abi::io_uring::{
+    IORING_ASYNC_CANCEL_ALL, IORING_ASYNC_CANCEL_ANY, IORING_ASYNC_CANCEL_FD,
+    IORING_ASYNC_CANCEL_FD_FIXED, IORING_TIMEOUT_ABS, IORING_TIMEOUT_BOOTTIME,
+    IORING_TIMEOUT_CLOCK_MASK, IORING_TIMEOUT_ETIME_SUCCESS, IORING_TIMEOUT_LINK,
+    IORING_TIMEOUT_REALTIME, IORING_TIMEOUT_UPDATE, IOSQE_FIXED_FILE, IoUringSqe,
+};
 
 /// Linux v6.12 `IORING_OP_LAST` boundary (`0..=57`).
 pub const IORING_OP_LAST_V1: u8 = 58;
@@ -86,13 +91,11 @@ pub fn validate_sqe_v1(sqe: &IoUringSqe) -> Result<(), LinuxError> {
 }
 
 pub fn validate_nop_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
-    use linux_raw_sys::io_uring::io_uring_sqe_flags_bit;
-
     validate_sqe_v1(sqe)?;
     if sqe.opcode != linux_raw_sys::io_uring::io_uring_op::IORING_OP_NOP as u8 {
         return Err(LinuxError::EINVAL);
     }
-    if sqe.flags & (1 << io_uring_sqe_flags_bit::IOSQE_FIXED_FILE_BIT as u8) != 0 {
+    if sqe.flags & IOSQE_FIXED_FILE != 0 {
         return Err(LinuxError::EBADF);
     }
     if sqe.op_flags != 0
@@ -101,6 +104,142 @@ pub fn validate_nop_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
         || sqe.splice_fd_in != 0
         || sqe.personality != 0
     {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_TIMEOUT` (opcode 11) SQE.
+pub fn validate_timeout_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_TIMEOUT as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.flags & IOSQE_FIXED_FILE != 0 {
+        return Err(LinuxError::EBADF);
+    }
+    if sqe.ioprio != 0
+        || sqe.buf_index != 0
+        || sqe.personality != 0
+        || sqe.splice_fd_in != 0
+        || sqe.len != 1
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    const ALLOWED_TIMEOUT_FLAGS: u32 = IORING_TIMEOUT_ABS
+        | IORING_TIMEOUT_BOOTTIME
+        | IORING_TIMEOUT_REALTIME
+        | IORING_TIMEOUT_ETIME_SUCCESS;
+    if sqe.op_flags & !ALLOWED_TIMEOUT_FLAGS != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if (sqe.op_flags & IORING_TIMEOUT_CLOCK_MASK) == IORING_TIMEOUT_CLOCK_MASK {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_TIMEOUT_REMOVE` (opcode 12) SQE (both remove and `IORING_TIMEOUT_UPDATE`).
+pub fn validate_timeout_remove_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_TIMEOUT_REMOVE as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.flags & IOSQE_FIXED_FILE != 0 {
+        return Err(LinuxError::EBADF);
+    }
+    if sqe.ioprio != 0
+        || sqe.buf_index != 0
+        || sqe.len != 0
+        || sqe.personality != 0
+        || sqe.splice_fd_in != 0
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    if (sqe.op_flags & IORING_TIMEOUT_UPDATE) != 0 {
+        const ALLOWED_UPDATE_FLAGS: u32 = IORING_TIMEOUT_UPDATE
+            | IORING_TIMEOUT_ABS
+            | IORING_TIMEOUT_LINK
+            | IORING_TIMEOUT_BOOTTIME
+            | IORING_TIMEOUT_REALTIME;
+        if sqe.op_flags & !ALLOWED_UPDATE_FLAGS != 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        if (sqe.op_flags & IORING_TIMEOUT_CLOCK_MASK) == IORING_TIMEOUT_CLOCK_MASK {
+            return Err(LinuxError::EINVAL);
+        }
+    } else if sqe.op_flags != 0 || sqe.off != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_ASYNC_CANCEL` (opcode 14) SQE.
+pub fn validate_async_cancel_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_ASYNC_CANCEL as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.ioprio != 0
+        || sqe.off != 0
+        || sqe.len != 0
+        || sqe.buf_index != 0
+        || sqe.personality != 0
+        || sqe.splice_fd_in != 0
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    const ALLOWED_CANCEL_FLAGS: u32 = IORING_ASYNC_CANCEL_ALL
+        | IORING_ASYNC_CANCEL_FD
+        | IORING_ASYNC_CANCEL_ANY
+        | IORING_ASYNC_CANCEL_FD_FIXED;
+    if sqe.op_flags & !ALLOWED_CANCEL_FLAGS != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if (sqe.op_flags & IORING_ASYNC_CANCEL_FD_FIXED) != 0
+        && (sqe.op_flags & IORING_ASYNC_CANCEL_FD) == 0
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_LINK_TIMEOUT` (opcode 15) SQE.
+pub fn validate_link_timeout_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_LINK_TIMEOUT as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.flags & IOSQE_FIXED_FILE != 0 {
+        return Err(LinuxError::EBADF);
+    }
+    if sqe.ioprio != 0
+        || sqe.off != 0
+        || sqe.len != 1
+        || sqe.buf_index != 0
+        || sqe.personality != 0
+        || sqe.splice_fd_in != 0
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    const ALLOWED_LINK_TIMEOUT_FLAGS: u32 =
+        IORING_TIMEOUT_ABS | IORING_TIMEOUT_BOOTTIME | IORING_TIMEOUT_REALTIME;
+    if sqe.op_flags & !ALLOWED_LINK_TIMEOUT_FLAGS != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if (sqe.op_flags & IORING_TIMEOUT_CLOCK_MASK) == IORING_TIMEOUT_CLOCK_MASK {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates common prep invariants for basic read/write/poll/accept helper ops.
+pub fn validate_rw_or_poll_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.flags & IOSQE_FIXED_FILE != 0 {
+        return Err(LinuxError::EBADF);
+    }
+    if sqe.ioprio != 0 || sqe.buf_index != 0 || sqe.personality != 0 || sqe.splice_fd_in != 0 {
         return Err(LinuxError::EINVAL);
     }
     Ok(())
@@ -296,5 +435,41 @@ mod tests {
             populate_probe(&mut dirty_header, 10),
             Err(LinuxError::EINVAL)
         ));
+    }
+
+    #[test]
+    fn timeout_cancel_and_link_timeout_validators_match_linux_contract() {
+        let mut to = empty_sqe(io_uring_op::IORING_OP_TIMEOUT as u8);
+        to.len = 1;
+        to.op_flags = IORING_TIMEOUT_ABS | IORING_TIMEOUT_ETIME_SUCCESS;
+        assert_eq!(validate_timeout_sqe(&to), Ok(()));
+
+        // Conflicting clocks or unsupported multishot -> -EINVAL.
+        to.op_flags = IORING_TIMEOUT_BOOTTIME | IORING_TIMEOUT_REALTIME;
+        assert_eq!(validate_timeout_sqe(&to), Err(LinuxError::EINVAL));
+        to.op_flags = pulse_user_abi::io_uring::IORING_TIMEOUT_MULTISHOT;
+        assert_eq!(validate_timeout_sqe(&to), Err(LinuxError::EINVAL));
+
+        // Remove vs Update flags.
+        let mut rem = empty_sqe(io_uring_op::IORING_OP_TIMEOUT_REMOVE as u8);
+        assert_eq!(validate_timeout_remove_sqe(&rem), Ok(()));
+        rem.op_flags = IORING_TIMEOUT_ABS; // ABS without UPDATE
+        assert_eq!(validate_timeout_remove_sqe(&rem), Err(LinuxError::EINVAL));
+        rem.op_flags = IORING_TIMEOUT_UPDATE | IORING_TIMEOUT_LINK | IORING_TIMEOUT_ABS;
+        assert_eq!(validate_timeout_remove_sqe(&rem), Ok(()));
+
+        // Link timeout.
+        let mut lt = empty_sqe(io_uring_op::IORING_OP_LINK_TIMEOUT as u8);
+        lt.len = 1;
+        assert_eq!(validate_link_timeout_sqe(&lt), Ok(()));
+        lt.ioprio = 89;
+        assert_eq!(validate_link_timeout_sqe(&lt), Err(LinuxError::EINVAL));
+
+        // Async cancel.
+        let mut cancel = empty_sqe(io_uring_op::IORING_OP_ASYNC_CANCEL as u8);
+        cancel.op_flags = IORING_ASYNC_CANCEL_FD | IORING_ASYNC_CANCEL_ALL;
+        assert_eq!(validate_async_cancel_sqe(&cancel), Ok(()));
+        cancel.op_flags = IORING_ASYNC_CANCEL_FD_FIXED; // missing FD flag
+        assert_eq!(validate_async_cancel_sqe(&cancel), Err(LinuxError::EINVAL));
     }
 }

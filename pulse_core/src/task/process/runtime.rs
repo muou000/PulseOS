@@ -186,6 +186,7 @@ impl Process {
             crate::ipc::sem::exit_sem_undos(self.pid() as i32, undos);
         }
 
+        crate::io_uring::cancel_requests_for_process(self.pid());
         self.close_all_files();
         self.futex_table.clear();
         self.memlock_unlock_all();

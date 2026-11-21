@@ -409,6 +409,7 @@ impl Process {
         };
         self.release_posix_locks_for_entries(&cloexec_entries);
         drop(cloexec_entries);
+        crate::io_uring::cancel_requests_for_process(self.pid());
         self.stack_top.store(load_info.user_sp, Ordering::Release);
         self.entry.store(load_info.entry, Ordering::Release);
         self.set_signal_trampoline(load_info.signal_trampoline);

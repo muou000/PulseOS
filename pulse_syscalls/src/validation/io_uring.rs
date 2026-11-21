@@ -70,20 +70,20 @@ pub(crate) fn validate_kernel_timespec(ts: &__kernel_timespec) -> Result<Duratio
 pub(crate) fn decide_enter_return(
     submitted: u32,
     cq_ready: u32,
-    min_complete: u32,
+    _min_complete: u32,
     wait_err: Option<LinuxError>,
     pending_ebadr: bool,
 ) -> Result<usize, LinuxError> {
     if submitted > 0 {
         return Ok(submitted as usize);
     }
-    if min_complete > 0 && cq_ready >= min_complete {
+    if cq_ready > 0 {
         return Ok(0);
     }
     if let Some(err) = wait_err {
         return Err(err);
     }
-    if cq_ready == 0 && pending_ebadr {
+    if pending_ebadr {
         return Err(LinuxError::EBADR);
     }
     Ok(0)
@@ -193,8 +193,13 @@ mod tests {
             decide_enter_return(0, 1, 1, Some(LinuxError::EINTR), true),
             Ok(0)
         );
+        // Even if cq_ready < min_complete, any available CQE wins over wait_err (ADR-0002 / #231).
         assert_eq!(
             decide_enter_return(0, 1, 2, Some(LinuxError::ETIME), false),
+            Ok(0)
+        );
+        assert_eq!(
+            decide_enter_return(0, 0, 2, Some(LinuxError::ETIME), false),
             Err(LinuxError::ETIME)
         );
         assert_eq!(decide_enter_return(0, 1, 0, None, true), Ok(0));

@@ -10,6 +10,7 @@ use linux_raw_sys::io_uring::{
 };
 use pulse_core::fd_table::{FdEntry, FdFlags};
 use pulse_core::io_uring::IoUringObject;
+use pulse_core::io_uring::context::AsyncExecContext;
 use pulse_core::task::{SignalMaskGuard, current_have_signals, current_thread};
 use pulse_io_uring_core::whitelist::{populate_probe, validate_register_op_v1};
 
@@ -123,9 +124,15 @@ pub(crate) fn sys_io_uring_enter(
         None => None,
     };
 
-    let submitted = state.submit_sqes(to_submit);
+    let exec_ctx = match AsyncExecContext::capture_current() {
+        Ok(ctx) => ctx,
+        Err(e) => return -e.code() as isize,
+    };
 
-    if (flags & IORING_ENTER_GETEVENTS) == 0 {
+    let (submitted, stopped_on_inline_error) = state.submit_sqes(to_submit, &exec_ctx);
+    axtask::future::drive_ready(64);
+
+    if (flags & IORING_ENTER_GETEVENTS) == 0 || stopped_on_inline_error {
         return submitted as isize;
     }
 
@@ -136,6 +143,7 @@ pub(crate) fn sys_io_uring_enter(
     let _mask_guard = SignalMaskGuard::install(Arc::clone(&thread), temporary_mask);
 
     let effective_min = min_complete.min(state.cq_entries());
+    let initial_timeout_expiries = state.timeout_expiries();
     let (mut cq_ready, _) = state.check_cq_ready_and_ebadr(false);
     let mut pending_ebadr = false;
     let mut wait_err = None;
@@ -155,10 +163,13 @@ pub(crate) fn sys_io_uring_enter(
             let deadline = timeout_dur.map(|d| axhal::time::monotonic_time().saturating_add(d));
             let wait_queues = [&state.cq_wait_queue, thread.signal_wait_queue()];
             loop {
+                axtask::future::drive_ready(32);
                 let (ready_now, _) = state.check_cq_ready_and_ebadr(false);
                 cq_ready = ready_now;
 
-                if cq_ready >= effective_min {
+                if cq_ready >= effective_min
+                    || state.timeout_expiries() != initial_timeout_expiries
+                {
                     break;
                 }
                 if submitted == 0 && cq_ready == 0 {
@@ -193,11 +204,14 @@ pub(crate) fn sys_io_uring_enter(
                     &wait_queues,
                     remain,
                     || {
+                        let _ = axtask::future::drive_ready(16);
                         state.is_dying()
                             || current_have_signals()
+                            || state.timeout_expiries() != initial_timeout_expiries
                             || state.check_cq_ready_and_ebadr(false).0 >= effective_min
                     },
                 );
+                axtask::future::drive_ready(32);
                 if res.is_err() && cq_ready < effective_min {
                     let (ready_after, _) = state.check_cq_ready_and_ebadr(false);
                     cq_ready = ready_after;
@@ -208,6 +222,15 @@ pub(crate) fn sys_io_uring_enter(
                 }
             }
         }
+    }
+
+    // Re-check ready futures and overflow FIFO once more before final decision so any
+    // last-moment CQE wins cleanly over `-EINTR` / `-ETIME` (ADR-0002 / #231).
+    axtask::future::drive_ready(32);
+    let (final_ready, final_ebadr) = state.check_cq_ready_and_ebadr(submitted == 0 && wait_err.is_none());
+    cq_ready = final_ready;
+    if final_ebadr {
+        pending_ebadr = true;
     }
 
     match decide_enter_return(submitted, cq_ready, effective_min, wait_err, pending_ebadr) {
