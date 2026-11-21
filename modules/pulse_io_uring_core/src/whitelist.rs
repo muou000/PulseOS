@@ -55,8 +55,13 @@ pub const fn validate_enter_flags_v1(flags: u32) -> Result<(), LinuxError> {
 pub const fn validate_register_op_v1(opcode: u32) -> Result<u32, LinuxError> {
     use linux_raw_sys::io_uring::io_uring_register_op;
     match opcode {
-        x if x == io_uring_register_op::IORING_REGISTER_EVENTFD as u32
+        x if x == io_uring_register_op::IORING_REGISTER_BUFFERS as u32
+            || x == io_uring_register_op::IORING_UNREGISTER_BUFFERS as u32
+            || x == io_uring_register_op::IORING_REGISTER_FILES as u32
+            || x == io_uring_register_op::IORING_UNREGISTER_FILES as u32
+            || x == io_uring_register_op::IORING_REGISTER_EVENTFD as u32
             || x == io_uring_register_op::IORING_UNREGISTER_EVENTFD as u32
+            || x == io_uring_register_op::IORING_REGISTER_FILES_UPDATE as u32
             || x == io_uring_register_op::IORING_REGISTER_EVENTFD_ASYNC as u32
             || x == io_uring_register_op::IORING_REGISTER_PROBE as u32 =>
         {
@@ -233,13 +238,46 @@ pub fn validate_link_timeout_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     Ok(())
 }
 
+#[inline]
+fn validate_common_zero_fields(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    if sqe.ioprio != 0 || sqe.personality != 0 || sqe.splice_fd_in != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
 /// Validates common prep invariants for basic read/write/poll/accept helper ops.
 pub fn validate_rw_or_poll_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     validate_sqe_v1(sqe)?;
+    validate_common_zero_fields(sqe)?;
+    if sqe.buf_index != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates prep invariants for `IORING_OP_READ_FIXED` / `IORING_OP_WRITE_FIXED`.
+pub fn validate_rw_fixed_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_READ_FIXED as u8
+        && sqe.opcode != io_uring_op::IORING_OP_WRITE_FIXED as u8
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)
+}
+
+/// Validates prep invariants for `IORING_OP_FILES_UPDATE`.
+pub fn validate_files_update_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_FILES_UPDATE as u8 {
+        return Err(LinuxError::EINVAL);
+    }
     if sqe.flags & IOSQE_FIXED_FILE != 0 {
         return Err(LinuxError::EBADF);
     }
-    if sqe.ioprio != 0 || sqe.buf_index != 0 || sqe.personality != 0 || sqe.splice_fd_in != 0 {
+    validate_common_zero_fields(sqe)?;
+    if sqe.buf_index != 0 || sqe.op_flags != 0 {
         return Err(LinuxError::EINVAL);
     }
     Ok(())
@@ -372,17 +410,19 @@ mod tests {
         }
 
         for op in [
+            io_uring_register_op::IORING_REGISTER_BUFFERS,
+            io_uring_register_op::IORING_UNREGISTER_BUFFERS,
+            io_uring_register_op::IORING_REGISTER_FILES,
+            io_uring_register_op::IORING_UNREGISTER_FILES,
             io_uring_register_op::IORING_REGISTER_EVENTFD,
             io_uring_register_op::IORING_UNREGISTER_EVENTFD,
+            io_uring_register_op::IORING_REGISTER_FILES_UPDATE,
             io_uring_register_op::IORING_REGISTER_EVENTFD_ASYNC,
             io_uring_register_op::IORING_REGISTER_PROBE,
         ] {
             assert!(validate_register_op_v1(op as u32).is_ok());
         }
         for op in [
-            io_uring_register_op::IORING_REGISTER_BUFFERS,
-            io_uring_register_op::IORING_REGISTER_FILES,
-            io_uring_register_op::IORING_REGISTER_FILES_UPDATE,
             io_uring_register_op::IORING_REGISTER_PERSONALITY,
             io_uring_register_op::IORING_REGISTER_LAST,
         ] {
@@ -471,5 +511,25 @@ mod tests {
         assert_eq!(validate_async_cancel_sqe(&cancel), Ok(()));
         cancel.op_flags = IORING_ASYNC_CANCEL_FD_FIXED; // missing FD flag
         assert_eq!(validate_async_cancel_sqe(&cancel), Err(LinuxError::EINVAL));
+
+        // RW/Poll with IOSQE_FIXED_FILE, READ_FIXED/WRITE_FIXED, and FILES_UPDATE.
+        let mut rw = empty_sqe(io_uring_op::IORING_OP_READ as u8);
+        rw.flags = IOSQE_FIXED_FILE;
+        assert_eq!(validate_rw_or_poll_sqe(&rw), Ok(()));
+
+        let mut rw_fixed = empty_sqe(io_uring_op::IORING_OP_READ_FIXED as u8);
+        rw_fixed.flags = IOSQE_FIXED_FILE;
+        rw_fixed.buf_index = 3;
+        assert_eq!(validate_rw_fixed_sqe(&rw_fixed), Ok(()));
+        rw_fixed.ioprio = 1;
+        assert_eq!(validate_rw_fixed_sqe(&rw_fixed), Err(LinuxError::EINVAL));
+
+        let mut files_upd = empty_sqe(io_uring_op::IORING_OP_FILES_UPDATE as u8);
+        assert_eq!(validate_files_update_sqe(&files_upd), Ok(()));
+        files_upd.flags = IOSQE_FIXED_FILE;
+        assert_eq!(validate_files_update_sqe(&files_upd), Err(LinuxError::EBADF));
+        files_upd.flags = 0;
+        files_upd.op_flags = 1;
+        assert_eq!(validate_files_update_sqe(&files_upd), Err(LinuxError::EINVAL));
     }
 }

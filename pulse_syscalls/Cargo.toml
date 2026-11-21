@@ -14,7 +14,7 @@ ext4 = ["axfs/ext4"]
 bpf-trace = ["axtask/bpf-trace", "pulse_core/bpf-trace"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 guest-checks = []
-file-io-test = ["axfs/file-io-test"]
+file-io-test = ["axfs/file-io-test", "pulse_core/file-io-test"]
 
 [dependencies]
 axerrno.workspace = true

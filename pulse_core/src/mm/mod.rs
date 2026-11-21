@@ -1,4 +1,5 @@
 mod loader;
+pub mod pinned_buffers;
 #[cfg(feature = "mapping-lifecycle-test")]
 pub mod lifecycle_checks;
 
@@ -6,6 +7,11 @@ use axerrno::AxResult;
 use axmm::AddrSpace;
 pub use loader::{
     ExecCredentials, UserAppLoadInfo, check_elf_header, load_user_app, prefault_range,
+};
+pub use pinned_buffers::{
+    FixedBufferIo, FixedBufferPages, PinnedUserBuffers, UserBufferCursor, UserIoSegment,
+    fits_single_pin_window, pin_fixed_buffer_pages, release_pinned_user_frame,
+    release_pinned_user_frames, release_pinned_user_frames_slice,
 };
 
 /// If the target architecture requires it, the kernel portion of the address

@@ -1,15 +1,14 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{mem::MaybeUninit, ptr::NonNull, time::Duration};
 
-use axalloc::{frame_table, global_allocator};
 use axerrno::LinuxError;
 use axhal::mem::phys_to_virt;
 use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
+use pulse_core::mm::{
+    PinnedUserBuffers, UserBufferCursor, release_pinned_user_frame, release_pinned_user_frames,
+};
 use pulse_core::task::uaccess;
-
-mod pinned_buffers;
-pub(crate) use pinned_buffers::{PinnedUserBuffers, UserBufferCursor};
 
 use crate::validation::user_abi::{
     read_user_array_from, read_user_iovec_array_from, read_user_value_from, write_user_slice_to,
@@ -52,51 +51,6 @@ impl Drop for PinnedUserSlice {
     fn drop(&mut self) {
         release_pinned_user_frames(&self.frames, || {});
     }
-}
-
-fn release_pinned_user_frame(frame: PhysAddr) {
-    let table = frame_table();
-    if table.contains(frame) && table.dec_ref(frame) == 0 {
-        global_allocator().dealloc_pages(phys_to_virt(frame).as_usize(), 1);
-    }
-}
-
-fn release_pinned_user_frames<const N: usize>(
-    frames: &heapless::Vec<PhysAddr, N>,
-    mut on_release: impl FnMut(),
-) {
-    let table = frame_table();
-    let mut eligible = [PhysAddr::from(0); N];
-    let mut count = 0;
-    for &frame in frames {
-        if table.contains(frame) {
-            let remaining = table.dec_ref(frame);
-            on_release();
-            if remaining == 0 {
-                eligible[count] = frame;
-                count += 1;
-            }
-        }
-    }
-    if count == 0 {
-        return;
-    }
-    eligible[..count].sort_unstable_by_key(|frame| frame.as_usize());
-    let mut runs: heapless::Vec<(usize, usize), N> = heapless::Vec::new();
-    let mut run_start = eligible[0].as_usize();
-    let mut run_len = 1;
-    for &frame in &eligible[1..count] {
-        let paddr = frame.as_usize();
-        if paddr == run_start.saturating_add(run_len * axhal::mem::PAGE_SIZE_4K) {
-            run_len += 1;
-        } else {
-            let _ = runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
-            run_start = paddr;
-            run_len = 1;
-        }
-    }
-    let _ = runs.push((phys_to_virt(PhysAddr::from(run_start)).as_usize(), run_len));
-    global_allocator().dealloc_pages_batch(&runs);
 }
 
 /// Linux PATH_MAX, including the trailing NUL in a user C string.

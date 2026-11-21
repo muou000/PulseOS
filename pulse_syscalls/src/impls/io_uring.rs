@@ -1,21 +1,26 @@
 //! Linux-compatible `io_uring_setup`, `io_uring_enter`, and `io_uring_register` syscalls.
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::time::Duration;
 
 use axerrno::LinuxError;
 use linux_raw_sys::io_uring::{
-    __kernel_timespec, IORING_ENTER_GETEVENTS, io_uring_getevents_arg, io_uring_params,
-    io_uring_probe, io_uring_register_op,
+    __kernel_timespec, IORING_ENTER_GETEVENTS, io_uring_files_update, io_uring_getevents_arg,
+    io_uring_params, io_uring_probe, io_uring_register_op,
 };
 use pulse_core::fd_table::{FdEntry, FdFlags};
 use pulse_core::io_uring::IoUringObject;
 use pulse_core::io_uring::context::AsyncExecContext;
-use pulse_core::task::{SignalMaskGuard, current_have_signals, current_thread};
+use pulse_core::mm::UserIoSegment;
+use pulse_core::task::{SignalMaskGuard, current_have_signals, current_process, current_thread};
 use pulse_io_uring_core::whitelist::{populate_probe, validate_register_op_v1};
 
 use super::fs::common::{get_fd_entry, insert_fd_entry};
-use super::utils::{read_user_value, write_user_value, write_user_value_array};
+use super::utils::{
+    read_user_iovec_array, read_user_value, read_user_value_array, write_user_value,
+    write_user_value_array,
+};
 use crate::validation::io_uring::{
     EnterArgKind, decide_enter_return, validate_enter_args, validate_getevents_arg,
     validate_kernel_timespec,
@@ -324,6 +329,88 @@ pub(crate) fn sys_io_uring_register(
             }
             match state.unregister_eventfd() {
                 Ok(()) => 0,
+                Err(e) => -e.code() as isize,
+            }
+        }
+        x if x == io_uring_register_op::IORING_REGISTER_BUFFERS as u32 => {
+            if let Err(e) = state.check_can_register_buffers(nr_args as usize) {
+                return -e.code() as isize;
+            }
+            let iovecs = match read_user_iovec_array(arg, nr_args as usize) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            let specs: Vec<UserIoSegment> = match iovecs
+                .into_iter()
+                .map(|iov| {
+                    usize::try_from(iov.iov_len)
+                        .map(|len| UserIoSegment::new(iov.iov_base as usize, len))
+                        .map_err(|_| LinuxError::EINVAL)
+                })
+                .collect()
+            {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            let process = match current_process() {
+                Ok(p) => p,
+                Err(e) => return -e.code() as isize,
+            };
+            match state.register_buffers(&process, &specs) {
+                Ok(()) => 0,
+                Err(e) => -e.code() as isize,
+            }
+        }
+        x if x == io_uring_register_op::IORING_UNREGISTER_BUFFERS as u32 => {
+            match state.unregister_buffers(arg, nr_args) {
+                Ok(()) => 0,
+                Err(e) => -e.code() as isize,
+            }
+        }
+        x if x == io_uring_register_op::IORING_REGISTER_FILES as u32 => {
+            if let Err(e) = state.check_can_register_files(nr_args as usize) {
+                return -e.code() as isize;
+            }
+            let raw_fds: Vec<i32> = match read_user_value_array(arg, nr_args as usize) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            let process = match current_process() {
+                Ok(p) => p,
+                Err(e) => return -e.code() as isize,
+            };
+            match state.register_files(&process, &raw_fds) {
+                Ok(()) => 0,
+                Err(e) => -e.code() as isize,
+            }
+        }
+        x if x == io_uring_register_op::IORING_UNREGISTER_FILES as u32 => {
+            match state.unregister_files(arg, nr_args) {
+                Ok(()) => 0,
+                Err(e) => -e.code() as isize,
+            }
+        }
+        x if x == io_uring_register_op::IORING_REGISTER_FILES_UPDATE as u32 => {
+            if nr_args == 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            let up: io_uring_files_update = match read_user_value(arg) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            if let Err(e) = state.validate_files_update(up.offset, nr_args, up.resv) {
+                return -e.code() as isize;
+            }
+            let raw_fds: Vec<i32> = match read_user_value_array(up.fds as usize, nr_args as usize) {
+                Ok(v) => v,
+                Err(e) => return -e.code() as isize,
+            };
+            let process = match current_process() {
+                Ok(p) => p,
+                Err(e) => return -e.code() as isize,
+            };
+            match state.update_fixed_files(&process, up.offset, &raw_fds, up.resv) {
+                Ok(done) => done as isize,
                 Err(e) => -e.code() as isize,
             }
         }

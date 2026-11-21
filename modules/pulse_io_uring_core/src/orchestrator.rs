@@ -11,8 +11,8 @@ use pulse_user_abi::io_uring::{
     IORING_ASYNC_CANCEL_ALL, IORING_ASYNC_CANCEL_ANY, IORING_ASYNC_CANCEL_FD,
     IORING_ASYNC_CANCEL_FD_FIXED, IORING_TIMEOUT_ABS, IORING_TIMEOUT_BOOTTIME,
     IORING_TIMEOUT_CLOCK_MASK, IORING_TIMEOUT_ETIME_SUCCESS, IORING_TIMEOUT_LINK,
-    IORING_TIMEOUT_REALTIME, IOSQE_IO_DRAIN, IOSQE_IO_HARDLINK, IOSQE_IO_LINK, IoUringCqe,
-    IoUringSqe,
+    IORING_TIMEOUT_REALTIME, IOSQE_FIXED_FILE, IOSQE_IO_DRAIN, IOSQE_IO_HARDLINK,
+    IOSQE_IO_LINK, IoUringCqe, IoUringSqe,
 };
 
 pub type RequestId = u64;
@@ -72,6 +72,7 @@ struct RequestEntry {
     user_data: u64,
     owner_pid: u64,
     in_chain: bool,
+    fixed_file: bool,
     phase: RequestPhase,
     claimed: bool,
     kind: RequestKind,
@@ -342,6 +343,7 @@ impl RequestOrchestrator {
                     user_data: item.user_data,
                     owner_pid: item.owner_pid,
                     in_chain,
+                    fixed_file: (item.sqe_flags & IOSQE_FIXED_FILE) != 0,
                     phase: RequestPhase::Queued,
                     claimed: false,
                     kind: item.kind,
@@ -917,10 +919,6 @@ impl RequestOrchestrator {
         let any = (cancel_flags & IORING_ASYNC_CANCEL_ANY) != 0;
         let fixed_fd = (cancel_flags & IORING_ASYNC_CANCEL_FD_FIXED) != 0;
 
-        if fixed_fd {
-            return (-LinuxError::ENOENT.code(), OrchestratorEffects::default());
-        }
-
         let mut matched_ids = Vec::new();
         let mut saw_completing = false;
 
@@ -929,10 +927,11 @@ impl RequestOrchestrator {
                 continue;
             }
             let is_match = if by_fd {
-                match req.kind {
-                    RequestKind::Normal { fd: Some(fd), .. } => fd == target_fd,
-                    _ => false,
-                }
+                req.fixed_file == fixed_fd
+                    && match req.kind {
+                        RequestKind::Normal { fd: Some(fd), .. } => fd == target_fd,
+                        _ => false,
+                    }
             } else if any {
                 true
             } else {
@@ -1593,5 +1592,40 @@ mod tests {
         let trail_id = done_pred.start_requests[0];
         let done_trail = orch.try_claim_completion(trail_id, 0, 0).unwrap();
         assert_eq!((done_trail.cqes[0].user_data, done_trail.cqes[0].res), (12, 0));
+    }
+
+    #[test]
+    fn async_cancel_fd_fixed_distinguishes_fixed_slots_from_raw_fds() {
+        let mut orch = RequestOrchestrator::new();
+        let (raw_id, _) = orch
+            .commit_chain(&mut [normal_prep(100, 0, Some(0), None)])
+            .unwrap();
+        let (fixed_id, _) = orch
+            .commit_chain(&mut [normal_prep(200, IOSQE_FIXED_FILE, Some(0), None)])
+            .unwrap();
+
+        // Canceling normal fd=0 leaves the fixed-file slot=0 untouched.
+        let (res_raw, eff_raw) = orch.async_cancel(None, 0, 0, IORING_ASYNC_CANCEL_FD);
+        assert_eq!(res_raw, 0);
+        assert_eq!(eff_raw.cancel_requests, alloc::vec![raw_id]);
+        assert_eq!(eff_raw.cqes[0].user_data, 100);
+        assert_eq!(eff_raw.cqes[0].res, -LinuxError::ECANCELED.code());
+
+        // Canceling normal fd=0 again now finds nothing.
+        let (res_none, _) = orch.async_cancel(None, 0, 0, IORING_ASYNC_CANCEL_FD);
+        assert_eq!(res_none, -LinuxError::ENOENT.code());
+
+        // Canceling fixed fd=0 cancels the fixed-file request.
+        let (res_fixed, eff_fixed) = orch.async_cancel(
+            None,
+            0,
+            0,
+            IORING_ASYNC_CANCEL_FD | IORING_ASYNC_CANCEL_FD_FIXED | IORING_ASYNC_CANCEL_ALL,
+        );
+        assert_eq!(res_fixed, 1);
+        assert_eq!(eff_fixed.cancel_requests, alloc::vec![fixed_id]);
+        assert_eq!(eff_fixed.cqes[0].user_data, 200);
+        assert_eq!(eff_fixed.cqes[0].res, -LinuxError::ECANCELED.code());
+        assert_eq!(orch.inflight_len(), 0);
     }
 }

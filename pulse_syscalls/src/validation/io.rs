@@ -2,6 +2,7 @@ use core::time::Duration;
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{POLLIN, POLLOUT, timespec};
+pub(crate) use pulse_io_uring_core::resources::UserIoSegment;
 
 pub(crate) fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
     let len = usize::try_from(iov_len).map_err(|_| LinuxError::EINVAL)?;
@@ -9,12 +10,6 @@ pub(crate) fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
         return Err(LinuxError::EINVAL);
     }
     Ok(len)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct UserIoSegment {
-    pub(crate) addr: usize,
-    pub(crate) len: usize,
 }
 
 /// Validates the user ranges and total byte count used by a write request.

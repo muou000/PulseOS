@@ -8,8 +8,9 @@ use axerrno::LinuxError;
 use pulse_core::fd_table::{FdObject, FileObject};
 
 use super::WriteOffset;
+use pulse_core::mm::{PinnedUserBuffers, UserBufferCursor};
+
 use crate::{
-    impls::utils::{PinnedUserBuffers, UserBufferCursor},
     validation::io::{UserIoSegment, validate_direct_io, validate_user_io_segments},
 };
 

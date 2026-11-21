@@ -74,6 +74,8 @@ fn main() {
             {
                 pulse_syscalls::run_bpf_guest_checks().expect("bpf guest checks failed");
                 pulse_core::fd_table::run_pipe_guest_checks().expect("pipe guest checks failed");
+                pulse_core::io_uring::run_io_uring_resource_guest_checks()
+                    .expect("io_uring resource guest checks failed");
             }
             pulse_core::task::run_futex_guest_checks().expect("futex guest checks failed");
             pulse_core::task::run_process_registry_guest_checks().expect("process registry guest checks failed");

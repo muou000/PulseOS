@@ -9,19 +9,24 @@ use core::{future::poll_fn, task::Poll, time::Duration};
 
 use axerrno::{LinuxError, LinuxResult};
 use axhal::time::{monotonic_time, wall_time};
+use axio::IoBuf;
 use axpoll::IoEvents;
-use axtask::future::{CancelHandle, global_executor, sleep_until};
+use axtask::future::{global_executor, sleep_until};
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, POLLRDHUP, iovec},
     io_uring::{__kernel_timespec, io_uring_op},
     net::{AF_INET, AF_INET6},
 };
 use pulse_io_uring_core::orchestrator::{PreparedRequest, RequestId, RequestKind, TimeoutClock};
+use pulse_io_uring_core::resources::MAX_FIXED_FILES;
 use pulse_io_uring_core::whitelist::{
-    validate_async_cancel_sqe, validate_link_timeout_sqe, validate_nop_sqe,
-    validate_rw_or_poll_sqe, validate_sqe_v1, validate_timeout_remove_sqe, validate_timeout_sqe,
+    validate_async_cancel_sqe, validate_files_update_sqe, validate_link_timeout_sqe,
+    validate_nop_sqe, validate_rw_fixed_sqe, validate_rw_or_poll_sqe, validate_sqe_v1,
+    validate_timeout_remove_sqe, validate_timeout_sqe,
 };
-use pulse_user_abi::io_uring::{IORING_TIMEOUT_UPDATE, IOSQE_ASYNC, IoUringSqe};
+use pulse_user_abi::io_uring::{
+    IORING_TIMEOUT_UPDATE, IOSQE_ASYNC, IOSQE_FIXED_FILE, IoUringSqe,
+};
 
 use super::{
     IoUringObject, IoUringState, OwnedInflightGuard,
@@ -31,15 +36,70 @@ use super::{
 use crate::fd_table::{
     EpollObject, FdEntry, FdFlags, FdObject, PipeObject, PollRegistration, SignalFdObject,
 };
+use crate::mm::{
+    FixedBufferIo, PinnedUserBuffers, UserBufferCursor, UserIoSegment, fits_single_pin_window,
+};
 use crate::net::{Socket, SocketInner};
 
 const UIO_MAXIOV: u32 = 1024;
 const RW_CHUNK_CAP: usize = 64 * 1024;
 
-#[derive(Clone, Copy, Debug)]
-pub struct UserSegment {
-    pub addr: usize,
-    pub len: usize,
+pub enum PreparedRwBuffer {
+    Empty,
+    SingleWindow(PinnedUserBuffers),
+    Fixed(FixedBufferIo),
+    MultiWindow {
+        segments: Vec<UserIoSegment>,
+        total_len: usize,
+    },
+}
+
+impl PreparedRwBuffer {
+    #[inline]
+    fn total_len(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::SingleWindow(win) => win.len(),
+            Self::Fixed(fixed) => fixed.len(),
+            Self::MultiWindow { total_len, .. } => *total_len,
+        }
+    }
+
+    #[inline]
+    fn remaining_bytes(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::SingleWindow(win) => win.remaining(),
+            Self::Fixed(fixed) => fixed.remaining_bytes(),
+            Self::MultiWindow { total_len, .. } => *total_len,
+        }
+    }
+
+    #[inline]
+    fn terminal_error(&self) -> Option<LinuxError> {
+        match self {
+            Self::SingleWindow(win) => win.terminal_error(),
+            _ => None,
+        }
+    }
+
+    fn copy_from_user_exact(&mut self, dst: &mut [u8]) -> LinuxResult<()> {
+        match self {
+            Self::Empty => Err(LinuxError::EFAULT),
+            Self::SingleWindow(win) => win.copy_from_user_exact(dst),
+            Self::Fixed(fixed) => fixed.copy_from_user_exact(dst),
+            Self::MultiWindow { .. } => Err(LinuxError::EFAULT),
+        }
+    }
+
+    fn copy_to_user_exact(&mut self, src: &[u8]) -> LinuxResult<()> {
+        match self {
+            Self::Empty => Err(LinuxError::EFAULT),
+            Self::SingleWindow(win) => win.copy_to_user_exact(src),
+            Self::Fixed(fixed) => fixed.copy_to_user_exact(src),
+            Self::MultiWindow { .. } => Err(LinuxError::EFAULT),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -50,7 +110,6 @@ pub enum PollTarget {
     Ring(Weak<IoUringState>),
 }
 
-#[derive(Clone)]
 pub enum PreparedOpSpec {
     Nop,
     Timeout {
@@ -72,9 +131,13 @@ pub enum PreparedOpSpec {
         cancel_flags: u32,
     },
     Rw {
-        outcome: LinuxResult<(FdEntry, Vec<UserSegment>)>,
+        outcome: LinuxResult<(FdEntry, PreparedRwBuffer)>,
         is_write: bool,
         offset: u64,
+        force_async: bool,
+    },
+    FilesUpdate {
+        outcome: LinuxResult<(u32, Vec<i32>)>,
         force_async: bool,
     },
     PollAdd {
@@ -86,6 +149,7 @@ pub enum PreparedOpSpec {
         entry: FdEntry,
         addr: usize,
         addrlen_ptr: usize,
+        initial_addrlen: Option<u32>,
         accept_flags: u32,
     },
 }
@@ -120,11 +184,43 @@ fn copy_timeout_spec(ctx: &AsyncExecContext, addr: usize) -> LinuxResult<Duratio
     Ok(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
 }
 
+fn resolve_sqe_fd_entry(
+    state: &IoUringState,
+    ctx: &AsyncExecContext,
+    sqe: &IoUringSqe,
+) -> LinuxResult<FdEntry> {
+    if (sqe.flags & IOSQE_FIXED_FILE) != 0 {
+        let index = u32::try_from(sqe.fd).map_err(|_| LinuxError::EBADF)?;
+        state.get_fixed_fd_entry(index)
+    } else {
+        ctx.get_fd_entry(sqe.fd)
+    }
+}
+
+fn open_rw_fd_entry(
+    state: &IoUringState,
+    ctx: &AsyncExecContext,
+    sqe: &IoUringSqe,
+    is_write: bool,
+) -> LinuxResult<FdEntry> {
+    let entry = resolve_sqe_fd_entry(state, ctx, sqe)?;
+    if entry.flags.contains(FdFlags::PATH) {
+        return Err(LinuxError::EBADF);
+    }
+    if is_write && !entry.object.is_write_open() {
+        return Err(LinuxError::EBADF);
+    }
+    if !is_write && !entry.object.is_read_open() {
+        return Err(LinuxError::EBADF);
+    }
+    Ok(entry)
+}
+
 fn prepare_rw_segments(
     sqe: &IoUringSqe,
     ctx: &AsyncExecContext,
     vectored: bool,
-) -> LinuxResult<(Vec<UserSegment>, usize)> {
+) -> LinuxResult<(Vec<UserIoSegment>, usize)> {
     let mut segments = Vec::new();
     let mut total = 0usize;
 
@@ -147,7 +243,7 @@ fn prepare_rw_segments(
             if total > isize::MAX as usize {
                 return Err(LinuxError::EINVAL);
             }
-            segments.push(UserSegment { addr: base, len });
+            segments.push(UserIoSegment::new(base, len));
         }
     } else {
         let len = sqe.len as usize;
@@ -157,7 +253,7 @@ fn prepare_rw_segments(
         }
         total = len;
         if len > 0 {
-            segments.push(UserSegment { addr, len });
+            segments.push(UserIoSegment::new(addr, len));
         }
     }
 
@@ -165,18 +261,26 @@ fn prepare_rw_segments(
 }
 
 pub fn prepare_sqe(
+    state: &IoUringState,
     sqe: &IoUringSqe,
     ctx: &AsyncExecContext,
     current_cqe_seq: u64,
     in_nonempty_chain: bool,
     prev_was_link_timeout: bool,
 ) -> LinuxResult<(PreparedRequest, PreparedOpSpec)> {
-    let (prep, spec) =
-        prepare_sqe_inner(sqe, ctx, current_cqe_seq, in_nonempty_chain, prev_was_link_timeout)?;
+    let (prep, spec) = prepare_sqe_inner(
+        state,
+        sqe,
+        ctx,
+        current_cqe_seq,
+        in_nonempty_chain,
+        prev_was_link_timeout,
+    )?;
     Ok((prep.with_owner_pid(ctx.process.pid()), spec))
 }
 
 fn prepare_sqe_inner(
+    state: &IoUringState,
     sqe: &IoUringSqe,
     ctx: &AsyncExecContext,
     current_cqe_seq: u64,
@@ -278,24 +382,36 @@ fn prepare_sqe_inner(
                 || op == io_uring_op::IORING_OP_WRITEV as u8;
             // Defer FD permission/mode and user-segment validation beyond chain assembly so
             // invalid linked chains cancel queued R/W operations consistently (`-ECANCELED`).
-            let outcome = (|| -> LinuxResult<(FdEntry, Vec<UserSegment>, usize)> {
-                let entry = ctx.get_fd_entry(sqe.fd)?;
-                if entry.flags.contains(FdFlags::PATH) {
-                    return Err(LinuxError::EBADF);
-                }
-                if is_write && !entry.object.is_write_open() {
-                    return Err(LinuxError::EBADF);
-                }
-                if !is_write && !entry.object.is_read_open() {
-                    return Err(LinuxError::EBADF);
-                }
+            let outcome = (|| -> LinuxResult<(FdEntry, PreparedRwBuffer, usize)> {
+                let entry = open_rw_fd_entry(state, ctx, sqe, is_write)?;
                 let (segments, total_len) = prepare_rw_segments(sqe, ctx, vectored)?;
-                Ok((entry, segments, total_len))
+                if total_len == 0 {
+                    return Ok((entry, PreparedRwBuffer::Empty, 0));
+                }
+                let pin_inline = !force_async
+                    && !entry.object.as_any().is::<Socket>()
+                    && fits_single_pin_window(&segments);
+                let buffer = if pin_inline {
+                    let mut cursor = UserBufferCursor::default();
+                    let window = PinnedUserBuffers::pin_with_process(
+                        &ctx.process,
+                        &segments,
+                        &mut cursor,
+                        !is_write,
+                    )?;
+                    PreparedRwBuffer::SingleWindow(window)
+                } else {
+                    PreparedRwBuffer::MultiWindow {
+                        segments,
+                        total_len,
+                    }
+                };
+                Ok((entry, buffer, total_len))
             })();
             let (expected, outcome) = match outcome {
-                Ok((entry, segments, total_len)) => (
+                Ok((entry, buffer, total_len)) => (
                     if total_len > 0 { Some(total_len) } else { None },
-                    Ok((entry, segments)),
+                    Ok((entry, buffer)),
                 ),
                 Err(err) => (None, Err(err)),
             };
@@ -309,12 +425,66 @@ fn prepare_sqe_inner(
                 },
             ))
         }
+        op if op == io_uring_op::IORING_OP_READ_FIXED as u8
+            || op == io_uring_op::IORING_OP_WRITE_FIXED as u8 =>
+        {
+            validate_rw_fixed_sqe(sqe)?;
+            let is_write = op == io_uring_op::IORING_OP_WRITE_FIXED as u8;
+            let outcome = (|| -> LinuxResult<(FdEntry, PreparedRwBuffer, usize)> {
+                let entry = open_rw_fd_entry(state, ctx, sqe, is_write)?;
+                let fixed_io =
+                    state.resolve_fixed_buffer(sqe.buf_index, sqe.addr, sqe.len, !is_write)?;
+                let total_len = fixed_io.len();
+                let buffer = if total_len == 0 {
+                    PreparedRwBuffer::Empty
+                } else {
+                    PreparedRwBuffer::Fixed(fixed_io)
+                };
+                Ok((entry, buffer, total_len))
+            })();
+            let (expected, outcome) = match outcome {
+                Ok((entry, buffer, total_len)) => (
+                    if total_len > 0 { Some(total_len) } else { None },
+                    Ok((entry, buffer)),
+                ),
+                Err(err) => (None, Err(err)),
+            };
+            Ok((
+                PreparedRequest::from_normal(sqe, Some(sqe.fd), expected),
+                PreparedOpSpec::Rw {
+                    outcome,
+                    is_write,
+                    offset: sqe.off,
+                    force_async,
+                },
+            ))
+        }
+        op if op == io_uring_op::IORING_OP_FILES_UPDATE as u8 => {
+            validate_files_update_sqe(sqe)?;
+            let outcome = (|| -> LinuxResult<(u32, Vec<i32>)> {
+                let offset = u32::try_from(sqe.off).map_err(|_| LinuxError::EINVAL)?;
+                let count = sqe.len as usize;
+                if count == 0 || count > MAX_FIXED_FILES {
+                    return Err(LinuxError::EINVAL);
+                }
+                state.validate_files_update(offset, sqe.len, 0)?;
+                let fds = ctx.read_array::<i32>(sqe.addr as usize, count)?;
+                Ok((offset, fds))
+            })();
+            Ok((
+                PreparedRequest::from_normal(sqe, None, None),
+                PreparedOpSpec::FilesUpdate {
+                    outcome,
+                    force_async,
+                },
+            ))
+        }
         op if op == io_uring_op::IORING_OP_POLL_ADD as u8 => {
             validate_rw_or_poll_sqe(sqe)?;
             if sqe.addr != 0 || sqe.off != 0 || sqe.len != 0 {
                 return Err(LinuxError::EINVAL);
             }
-            let entry = ctx.get_fd_entry(sqe.fd)?;
+            let entry = resolve_sqe_fd_entry(state, ctx, sqe)?;
             let mask = sqe.op_flags;
             let mut events = IoEvents::ALWAYS_POLL;
             if mask & POLLIN != 0 {
@@ -349,16 +519,24 @@ fn prepare_sqe_inner(
             if (sqe.op_flags & !allowed) != 0 {
                 return Err(LinuxError::EINVAL);
             }
-            let entry = ctx.get_fd_entry(sqe.fd)?;
+            let entry = resolve_sqe_fd_entry(state, ctx, sqe)?;
             if !entry.object.as_any().is::<Socket>() {
                 return Err(LinuxError::ENOTSOCK);
             }
+            let addr = sqe.addr as usize;
+            let addrlen_ptr = sqe.off as usize;
+            let initial_addrlen = if addr != 0 && addrlen_ptr != 0 {
+                Some(ctx.read_value::<u32>(addrlen_ptr)?)
+            } else {
+                None
+            };
             Ok((
                 PreparedRequest::from_normal(sqe, Some(sqe.fd), None),
                 PreparedOpSpec::Accept {
                     entry,
-                    addr: sqe.addr as usize,
-                    addrlen_ptr: sqe.off as usize,
+                    addr,
+                    addrlen_ptr,
+                    initial_addrlen,
                     accept_flags: sqe.op_flags,
                 },
             ))
@@ -398,20 +576,20 @@ pub fn execute_rw_request(
     req_id: RequestId,
     entry: FdEntry,
     is_write: bool,
-    segments: Vec<UserSegment>,
+    buffer: PreparedRwBuffer,
     offset: u64,
     force_async: bool,
 ) {
     // Special FDs depend on `current_process()` / `current_thread()`, so keep them
     // inline on the submitting thread rather than dispatching raw onto workers (ADR-0007).
     if entry.object.as_any().is::<EpollObject>() || entry.object.as_any().is::<SignalFdObject>() {
-        let res = run_sync_rw(ctx, &entry.object, is_write, &segments, offset);
+        let res = run_sync_rw(ctx, &entry.object, is_write, buffer, offset);
         state.complete_request(req_id, res, 0, false);
         return;
     }
 
     if force_async {
-        spawn_worker_rw(state, ctx, req_id, entry, is_write, segments, offset);
+        spawn_worker_rw(state, ctx, req_id, entry, is_write, buffer, offset);
         return;
     }
 
@@ -421,27 +599,29 @@ pub fn execute_rw_request(
             state.complete_request(req_id, -LinuxError::ESPIPE.code(), 0, false);
             return;
         }
-        let total_len: usize = segments.iter().map(|s| s.len).sum();
+        let total_len = buffer.total_len();
         if total_len == 0 {
             state.complete_request(req_id, 0, 0, false);
             return;
         }
-        if total_len <= RW_CHUNK_CAP {
-            execute_pipe_rw(state, ctx, req_id, entry, is_write, segments, total_len);
+        if (total_len <= RW_CHUNK_CAP && matches!(buffer, PreparedRwBuffer::SingleWindow(_)))
+            || matches!(buffer, PreparedRwBuffer::Fixed(_))
+        {
+            execute_pipe_rw(state, req_id, entry, is_write, buffer);
         } else {
-            spawn_worker_rw(state, ctx, req_id, entry, is_write, segments, offset);
+            spawn_worker_rw(state, ctx, req_id, entry, is_write, buffer, offset);
         }
         return;
     }
 
-    if entry.object.as_any().is::<Socket>() {
-        // Per-call non-blocking `Socket` try-ops arrive in #239; route blocking socket R/W
-        // to the bounded worker pool so `KernelExecutor::poll` never blocks (ADR-0007).
-        spawn_worker_rw(state, ctx, req_id, entry, is_write, segments, offset);
+    if entry.object.as_any().is::<Socket>() || matches!(buffer, PreparedRwBuffer::MultiWindow { .. }) {
+        // Blocking sockets and multi-window (> 64 KiB / > 32 fragments) requests
+        // execute on Path 3 so Reactor polling never blocks and user memory pins stream in bounded windows.
+        spawn_worker_rw(state, ctx, req_id, entry, is_write, buffer, offset);
         return;
     }
 
-    let res = run_sync_rw(ctx, &entry.object, is_write, &segments, offset);
+    let res = run_sync_rw(ctx, &entry.object, is_write, buffer, offset);
     state.complete_request(req_id, res, 0, false);
 }
 
@@ -451,7 +631,7 @@ fn spawn_worker_rw(
     req_id: RequestId,
     entry: FdEntry,
     is_write: bool,
-    segments: Vec<UserSegment>,
+    buffer: PreparedRwBuffer,
     offset: u64,
 ) {
     let Some(guard) = state.try_enter_inflight_owned() else {
@@ -464,108 +644,147 @@ fn spawn_worker_rw(
         if !state_wk.is_request_active(req_id) {
             return;
         }
-        let res = run_sync_rw(&ctx_wk, &entry.object, is_write, &segments, offset);
+        let res = run_sync_rw(&ctx_wk, &entry.object, is_write, buffer, offset);
         state_wk.complete_request(req_id, res, 0, true);
     });
 }
 
-fn read_segments(ctx: &AsyncExecContext, segments: &[UserSegment], dst: &mut [u8]) -> LinuxResult<()> {
-    let mut off = 0usize;
-    for seg in segments {
-        if seg.len > 0 {
-            ctx.read_bytes(seg.addr, &mut dst[off..off + seg.len])?;
-            off += seg.len;
-        }
-    }
-    Ok(())
+enum PipeStep {
+    Done(usize),
+    WouldBlock,
 }
 
-fn write_segments(ctx: &AsyncExecContext, segments: &[UserSegment], src: &[u8]) -> LinuxResult<()> {
-    let mut off = 0usize;
-    for seg in segments {
-        if seg.len == 0 || off >= src.len() {
-            continue;
+fn step_pipe_rw(
+    pipe: &PipeObject,
+    is_write: bool,
+    buffer: &mut PreparedRwBuffer,
+    kbuf: &mut [u8],
+    staged_off: &mut usize,
+    staged_len: &mut usize,
+) -> LinuxResult<PipeStep> {
+    let mut total_done = 0usize;
+    if is_write {
+        loop {
+            if *staged_off == *staged_len {
+                let next = buffer.remaining_bytes().min(kbuf.len());
+                if next == 0 {
+                    return Ok(PipeStep::Done(total_done));
+                }
+                buffer.copy_from_user_exact(&mut kbuf[..next])?;
+                *staged_off = 0;
+                *staged_len = next;
+            }
+            match pipe.try_write_nonblocking(&kbuf[*staged_off..*staged_len]) {
+                Ok(0) => return Ok(PipeStep::Done(total_done)),
+                Ok(n) => {
+                    *staged_off += n;
+                    total_done += n;
+                    if buffer.remaining_bytes() == 0 && *staged_off == *staged_len {
+                        return Ok(PipeStep::Done(total_done));
+                    }
+                    if *staged_off < *staged_len {
+                        return Ok(PipeStep::Done(total_done));
+                    }
+                }
+                Err(LinuxError::EAGAIN) => {
+                    return Ok(if total_done > 0 {
+                        PipeStep::Done(total_done)
+                    } else {
+                        PipeStep::WouldBlock
+                    });
+                }
+                Err(err) => {
+                    return if total_done > 0 {
+                        Ok(PipeStep::Done(total_done))
+                    } else {
+                        Err(err)
+                    };
+                }
+            }
         }
-        let n = seg.len.min(src.len() - off);
-        ctx.write_bytes(seg.addr, &src[off..off + n])?;
-        off += n;
+    } else {
+        loop {
+            let next = buffer.remaining_bytes().min(kbuf.len());
+            if next == 0 {
+                return Ok(PipeStep::Done(total_done));
+            }
+            match pipe.try_read_nonblocking(&mut kbuf[..next]) {
+                Ok(0) => return Ok(PipeStep::Done(total_done)),
+                Ok(n) => {
+                    buffer.copy_to_user_exact(&kbuf[..n])?;
+                    total_done += n;
+                    if n < next {
+                        return Ok(PipeStep::Done(total_done));
+                    }
+                }
+                Err(LinuxError::EAGAIN) => {
+                    return Ok(if total_done > 0 {
+                        PipeStep::Done(total_done)
+                    } else {
+                        PipeStep::WouldBlock
+                    });
+                }
+                Err(err) => {
+                    return if total_done > 0 {
+                        Ok(PipeStep::Done(total_done))
+                    } else {
+                        Err(err)
+                    };
+                }
+            }
+        }
     }
-    Ok(())
 }
 
 fn execute_pipe_rw(
     state: &Arc<IoUringState>,
-    ctx: &AsyncExecContext,
     req_id: RequestId,
     entry: FdEntry,
     is_write: bool,
-    mut segments: Vec<UserSegment>,
-    total_len: usize,
+    mut buffer: PreparedRwBuffer,
 ) {
     let nonblocking_fd = entry.flags.contains(FdFlags::NONBLOCK)
         || entry.object.nonblocking_state().unwrap_or(false);
-    let mut kbuf = vec![0u8; total_len];
+    let transfer_len = buffer.total_len();
+    let mut kbuf = vec![0u8; transfer_len.min(RW_CHUNK_CAP)];
+    let mut staged_off = 0usize;
+    let mut staged_len = 0usize;
+
+    if is_write && transfer_len <= kbuf.len() {
+        if let Err(err) = buffer.copy_from_user_exact(&mut kbuf[..transfer_len]) {
+            state.complete_request(req_id, -err.code(), 0, false);
+            return;
+        }
+        staged_len = transfer_len;
+        buffer = PreparedRwBuffer::Empty;
+    }
+
     let pipe = entry
         .object
         .as_any()
         .downcast_ref::<PipeObject>()
         .expect("PipeObject");
 
-    if is_write {
-        if let Err(err) = read_segments(ctx, &segments, &mut kbuf) {
-            state.complete_request(req_id, -err.code(), 0, false);
+    match step_pipe_rw(
+        pipe,
+        is_write,
+        &mut buffer,
+        &mut kbuf,
+        &mut staged_off,
+        &mut staged_len,
+    ) {
+        Ok(PipeStep::Done(n)) => {
+            state.complete_request(req_id, n as i32, 0, false);
             return;
         }
-        match pipe.try_write_nonblocking(&kbuf) {
-            Ok(n) => {
-                state.complete_request(req_id, n as i32, 0, false);
-                return;
-            }
-            Err(LinuxError::EAGAIN) if nonblocking_fd => {
-                state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
-                return;
-            }
-            Err(LinuxError::EAGAIN) => {}
-            Err(err) => {
-                state.complete_request(req_id, -err.code(), 0, false);
-                return;
-            }
+        Ok(PipeStep::WouldBlock) if nonblocking_fd => {
+            state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
+            return;
         }
-    } else {
-        for seg in &segments {
-            if seg.len > 0 {
-                if let Err(err) = ctx.process.try_fault_in_user_range(
-                    seg.addr,
-                    seg.len,
-                    axhal::paging::MappingFlags::WRITE,
-                ) {
-                    state.complete_request(req_id, -LinuxError::from(err).code(), 0, false);
-                    return;
-                }
-            }
-        }
-        match pipe.try_read_nonblocking(&mut kbuf) {
-            Ok(0) => {
-                state.complete_request(req_id, 0, 0, false);
-                return;
-            }
-            Ok(n) => {
-                let res = match write_segments(ctx, &segments, &kbuf[..n]) {
-                    Ok(()) => n as i32,
-                    Err(err) => -err.code(),
-                };
-                state.complete_request(req_id, res, 0, false);
-                return;
-            }
-            Err(LinuxError::EAGAIN) if nonblocking_fd => {
-                state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
-                return;
-            }
-            Err(LinuxError::EAGAIN) => {}
-            Err(err) => {
-                state.complete_request(req_id, -err.code(), 0, false);
-                return;
-            }
+        Ok(PipeStep::WouldBlock) => {}
+        Err(err) => {
+            state.complete_request(req_id, -err.code(), 0, false);
+            return;
         }
     }
 
@@ -573,7 +792,6 @@ fn execute_pipe_rw(
         return;
     };
     let state_cloned = Arc::clone(state);
-    let ctx_cloned = ctx.clone();
     let mut registrations: Vec<PollRegistration> = Vec::new();
     let mut guard_slot = Some(guard);
 
@@ -589,86 +807,46 @@ fn execute_pipe_rw(
             .downcast_ref::<PipeObject>()
             .expect("PipeObject");
 
+        let (interest, check_ready): (IoEvents, fn(axio::PollState) -> bool) = if is_write {
+            (IoEvents::OUT | IoEvents::ERR | IoEvents::HUP, |p| p.writable)
+        } else {
+            (IoEvents::IN | IoEvents::RDHUP | IoEvents::ERR | IoEvents::HUP, |p| {
+                p.readable
+            })
+        };
+
         loop {
-            if is_write {
-                match pipe.try_write_nonblocking(&kbuf) {
-                    Ok(n) => {
-                        state_cloned.complete_request(req_id, n as i32, 0, true);
-                        let _ = guard_slot.take();
-                        return Poll::Ready(());
-                    }
-                    Err(LinuxError::EAGAIN) => {
-                        if let Err(e) = Arc::clone(&entry.object).register_poll(
-                            cx,
-                            IoEvents::OUT | IoEvents::ERR | IoEvents::HUP,
-                            &mut registrations,
-                        ) {
-                            state_cloned.complete_request(req_id, -e.code(), 0, true);
-                            let _ = guard_slot.take();
-                            return Poll::Ready(());
-                        }
-                        if entry.object.poll().is_ok_and(|p| p.writable) {
-                            registrations.clear();
-                            continue;
-                        }
-                        return Poll::Pending;
-                    }
-                    Err(err) => {
-                        state_cloned.complete_request(req_id, -err.code(), 0, true);
-                        let _ = guard_slot.take();
-                        return Poll::Ready(());
-                    }
+            match step_pipe_rw(
+                pipe,
+                is_write,
+                &mut buffer,
+                &mut kbuf,
+                &mut staged_off,
+                &mut staged_len,
+            ) {
+                Ok(PipeStep::Done(n)) => {
+                    state_cloned.complete_request(req_id, n as i32, 0, true);
+                    let _ = guard_slot.take();
+                    return Poll::Ready(());
                 }
-            } else {
-                match pipe.try_read_nonblocking(&mut kbuf) {
-                    Ok(0) => {
-                        state_cloned.complete_request(req_id, 0, 0, true);
+                Ok(PipeStep::WouldBlock) => {
+                    if let Err(e) =
+                        Arc::clone(&entry.object).register_poll(cx, interest, &mut registrations)
+                    {
+                        state_cloned.complete_request(req_id, -e.code(), 0, true);
                         let _ = guard_slot.take();
                         return Poll::Ready(());
                     }
-                    Ok(n) => {
-                        if !state_cloned.try_begin_completing_request(req_id) {
-                            let _ = guard_slot.take();
-                            return Poll::Ready(());
-                        }
-                        let Some(wk_guard) = guard_slot.take() else {
-                            return Poll::Ready(());
-                        };
-                        let state_wk = Arc::clone(&state_cloned);
-                        let ctx_wk = ctx_cloned.clone();
-                        let data = core::mem::take(&mut kbuf);
-                        let segs = core::mem::take(&mut segments);
-                        global_worker_pool().submit(state_cloned.ring_id(), req_id, move || {
-                            let _guard: OwnedInflightGuard = wk_guard;
-                            let res = match write_segments(&ctx_wk, &segs, &data[..n]) {
-                                Ok(()) => n as i32,
-                                Err(err) => -err.code(),
-                            };
-                            state_wk.finish_completing_request(req_id, res, 0, true);
-                        });
-                        return Poll::Ready(());
+                    if entry.object.poll().is_ok_and(check_ready) {
+                        registrations.clear();
+                        continue;
                     }
-                    Err(LinuxError::EAGAIN) => {
-                        if let Err(e) = Arc::clone(&entry.object).register_poll(
-                            cx,
-                            IoEvents::IN | IoEvents::RDHUP | IoEvents::ERR | IoEvents::HUP,
-                            &mut registrations,
-                        ) {
-                            state_cloned.complete_request(req_id, -e.code(), 0, true);
-                            let _ = guard_slot.take();
-                            return Poll::Ready(());
-                        }
-                        if entry.object.poll().is_ok_and(|p| p.readable) {
-                            registrations.clear();
-                            continue;
-                        }
-                        return Poll::Pending;
-                    }
-                    Err(err) => {
-                        state_cloned.complete_request(req_id, -err.code(), 0, true);
-                        let _ = guard_slot.take();
-                        return Poll::Ready(());
-                    }
+                    return Poll::Pending;
+                }
+                Err(err) => {
+                    state_cloned.complete_request(req_id, -err.code(), 0, true);
+                    let _ = guard_slot.take();
+                    return Poll::Ready(());
                 }
             }
         }
@@ -677,87 +855,145 @@ fn execute_pipe_rw(
     state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
+#[inline]
+fn transfer_obj_chunk(
+    obj: &Arc<dyn FdObject>,
+    is_write: bool,
+    base_offset: u64,
+    cur_off: u64,
+    buf: &mut [u8],
+) -> LinuxResult<usize> {
+    if is_write {
+        if base_offset != u64::MAX {
+            match obj.write_at(buf, cur_off) {
+                Err(LinuxError::ESPIPE) if base_offset == 0 => obj.write(buf),
+                other => other,
+            }
+        } else {
+            obj.write(buf)
+        }
+    } else if base_offset != u64::MAX {
+        match obj.read_at(buf, cur_off) {
+            Err(LinuxError::ESPIPE) if base_offset == 0 => obj.read(buf),
+            other => other,
+        }
+    } else {
+        obj.read(buf)
+    }
+}
+
+fn run_sync_rw_window(
+    buffer: &mut PreparedRwBuffer,
+    obj: &Arc<dyn FdObject>,
+    is_write: bool,
+    base_offset: u64,
+    cur_off: &mut u64,
+    kbuf: &mut [u8],
+    total_done: &mut usize,
+) -> LinuxResult<bool> {
+    let total = buffer.total_len();
+    let mut off_in_stream = 0usize;
+    while off_in_stream < total {
+        let chunk = (total - off_in_stream).min(kbuf.len());
+        if is_write {
+            buffer.copy_from_user_exact(&mut kbuf[..chunk])?;
+        }
+        let n = transfer_obj_chunk(obj, is_write, base_offset, *cur_off, &mut kbuf[..chunk])?;
+        if n == 0 {
+            return Ok(true);
+        }
+        if !is_write {
+            buffer.copy_to_user_exact(&kbuf[..n])?;
+        }
+        *total_done += n;
+        off_in_stream += n;
+        if base_offset != u64::MAX {
+            *cur_off = cur_off.saturating_add(n as u64);
+        }
+        if n < chunk {
+            return Ok(true);
+        }
+    }
+    Ok(buffer.terminal_error().is_some())
+}
+
+#[inline]
+fn rw_progress_or_error(total_done: usize, err: LinuxError) -> i32 {
+    if total_done > 0 {
+        total_done as i32
+    } else {
+        -err.code()
+    }
+}
+
 fn run_sync_rw(
     ctx: &AsyncExecContext,
     obj: &Arc<dyn FdObject>,
     is_write: bool,
-    segments: &[UserSegment],
+    mut buffer: PreparedRwBuffer,
     offset: u64,
 ) -> i32 {
-    if segments.iter().all(|s| s.len == 0) {
+    let total_len = buffer.total_len();
+    if total_len == 0 {
         return 0;
     }
-    let use_positional = offset != u64::MAX;
+
     let mut cur_off = offset;
-    let mut kbuf = vec![0u8; RW_CHUNK_CAP];
+    let mut kbuf = vec![0u8; total_len.min(RW_CHUNK_CAP)];
     let mut total_done = 0usize;
 
-    for seg in segments {
-        let mut off_in_seg = 0usize;
-        while off_in_seg < seg.len {
-            let chunk = (seg.len - off_in_seg).min(kbuf.len());
-            let user_addr = seg.addr + off_in_seg;
-            if is_write {
-                if let Err(err) = ctx.read_bytes(user_addr, &mut kbuf[..chunk]) {
-                    return if total_done > 0 { total_done as i32 } else { -err.code() };
-                }
-                let res = if use_positional {
-                    match obj.write_at(&kbuf[..chunk], cur_off) {
-                        Err(LinuxError::ESPIPE) if offset == 0 => obj.write(&kbuf[..chunk]),
-                        other => other,
-                    }
-                } else {
-                    obj.write(&kbuf[..chunk])
-                };
-                match res {
-                    Ok(0) => return total_done as i32,
-                    Ok(n) => {
-                        total_done += n;
-                        off_in_seg += n;
-                        if use_positional {
-                            cur_off = cur_off.saturating_add(n as u64);
-                        }
-                        if n < chunk {
-                            return total_done as i32;
-                        }
-                    }
-                    Err(err) => {
-                        return if total_done > 0 { total_done as i32 } else { -err.code() };
-                    }
-                }
-            } else {
-                let res = if use_positional {
-                    match obj.read_at(&mut kbuf[..chunk], cur_off) {
-                        Err(LinuxError::ESPIPE) if offset == 0 => obj.read(&mut kbuf[..chunk]),
-                        other => other,
-                    }
-                } else {
-                    obj.read(&mut kbuf[..chunk])
-                };
-                match res {
-                    Ok(0) => return total_done as i32,
-                    Ok(n) => {
-                        if let Err(err) = ctx.write_bytes(user_addr, &kbuf[..n]) {
-                            return if total_done > 0 { total_done as i32 } else { -err.code() };
-                        }
-                        total_done += n;
-                        off_in_seg += n;
-                        if use_positional {
-                            cur_off = cur_off.saturating_add(n as u64);
-                        }
-                        if n < chunk {
-                            return total_done as i32;
-                        }
-                    }
-                    Err(err) => {
-                        return if total_done > 0 { total_done as i32 } else { -err.code() };
-                    }
-                }
+    match &buffer {
+        PreparedRwBuffer::Empty => 0,
+        PreparedRwBuffer::SingleWindow(_) | PreparedRwBuffer::Fixed(_) => {
+            match run_sync_rw_window(
+                &mut buffer,
+                obj,
+                is_write,
+                offset,
+                &mut cur_off,
+                &mut kbuf,
+                &mut total_done,
+            ) {
+                Ok(_) => total_done as i32,
+                Err(err) => rw_progress_or_error(total_done, err),
             }
         }
+        PreparedRwBuffer::MultiWindow { .. } => {
+            let PreparedRwBuffer::MultiWindow { segments, .. } = buffer else {
+                unreachable!()
+            };
+            let mut cursor = UserBufferCursor::default();
+            loop {
+                let window = match PinnedUserBuffers::pin_with_process(
+                    &ctx.process,
+                    &segments,
+                    &mut cursor,
+                    !is_write,
+                ) {
+                    Ok(win) => win,
+                    Err(err) => return rw_progress_or_error(total_done, err),
+                };
+                if window.is_empty() {
+                    break;
+                }
+                let mut win_buf = PreparedRwBuffer::SingleWindow(window);
+                match run_sync_rw_window(
+                    &mut win_buf,
+                    obj,
+                    is_write,
+                    offset,
+                    &mut cur_off,
+                    &mut kbuf,
+                    &mut total_done,
+                ) {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(err) => return rw_progress_or_error(total_done, err),
+                }
+            }
+            total_done as i32
+        }
     }
-
-    total_done as i32
 }
 
 pub fn spawn_poll_add_future(
@@ -872,6 +1108,7 @@ pub fn spawn_accept_future(
     entry: FdEntry,
     addr: usize,
     addrlen_ptr: usize,
+    initial_addrlen: Option<u32>,
     accept_flags: u32,
 ) {
     let Some(guard) = state.try_enter_inflight_owned() else {
@@ -952,8 +1189,8 @@ pub fn spawn_accept_future(
                         match ctx_wk.insert_fd_entry(FdEntry::new(Arc::new(new_sock), new_fd_flags)) {
                             Ok(new_fd) => {
                                 if addr != 0 && addrlen_ptr != 0 {
-                                    if let Some(remote) = remote_addr {
-                                        write_peer_sockaddr(&ctx_wk, remote, addr, addrlen_ptr);
+                                    if let (Some(remote), Some(buf_len)) = (remote_addr, initial_addrlen) {
+                                        write_peer_sockaddr(&ctx_wk, remote, addr, addrlen_ptr, buf_len);
                                     }
                                 }
                                 new_fd as i32
@@ -978,10 +1215,8 @@ fn write_peer_sockaddr(
     remote: core::net::SocketAddr,
     addr: usize,
     addrlen_ptr: usize,
+    buf_len: u32,
 ) {
-    let Ok(buf_len) = ctx.read_value::<u32>(addrlen_ptr) else {
-        return;
-    };
     let mut encoded = [0u8; 28];
     let needed = match remote {
         core::net::SocketAddr::V4(v4) => {
