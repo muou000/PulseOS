@@ -12,7 +12,7 @@ use linux_raw_sys::general::{
 };
 use pulse_core::fd_table::{
     EpollObject, EpollRegistration, EventFdObject, FdEntry, FdFlags, FdObject, PidfdObject,
-    PipeObject, PollRegistration, SignalFdObject, StdinObject, StdoutObject,
+    PipeObject, PollRegistration, SignalFdObject, StdinObject, StdoutObject, TimerFdObject,
 };
 
 use crate::{
@@ -103,6 +103,7 @@ pub fn sys_epoll_ctl(
         || target_obj.as_any().is::<PidfdObject>()
         || target_obj.as_any().is::<EventFdObject>()
         || target_obj.as_any().is::<SignalFdObject>()
+        || target_obj.as_any().is::<TimerFdObject>()
         || target_obj.as_any().is::<pulse_core::net::Socket>()
         || target_obj.as_any().is::<pulse_core::io_uring::IoUringObject>()
         || target_obj.as_any().is::<pulse_core::bpf::PerfEventObject>()

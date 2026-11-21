@@ -7,7 +7,8 @@ use linux_raw_sys::general::{
 };
 use pulse_core::{
     fd_table::{
-        EventFdObject, FD_LIMIT, FdObject, FileObject, PipeObject, SignalFdObject, pipe_entries,
+        EventFdObject, FD_LIMIT, FdObject, FileObject, PipeObject, SignalFdObject, TimerFdObject,
+        pipe_entries,
     },
     net::Socket,
     task::{current_thread, queue_signal_to_thread, uaccess},

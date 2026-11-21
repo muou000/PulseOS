@@ -147,6 +147,18 @@ pub trait FdObject: Send + Sync {
         Err(LinuxError::EOPNOTSUPP)
     }
 
+    /// Registers a readiness waker on behalf of an explicit submitting `thread`
+    /// (used by Path 2 async execution when running off-thread from the submitter).
+    fn register_poll_for_thread(
+        self: Arc<Self>,
+        _thread: &Arc<crate::task::Thread>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        self.register_poll(cx, events, registrations)
+    }
+
     fn location(&self) -> Option<Location> {
         None
     }
@@ -319,6 +331,7 @@ mod objects;
 mod pipe;
 mod signalfd;
 mod table;
+mod timerfd;
 mod tty;
 
 pub use epoll::*;
@@ -326,4 +339,5 @@ pub use objects::*;
 pub use pipe::*;
 pub use signalfd::*;
 pub use table::*;
+pub use timerfd::*;
 pub use tty::*;

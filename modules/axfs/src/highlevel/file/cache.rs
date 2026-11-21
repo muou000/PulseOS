@@ -1754,12 +1754,20 @@ impl CachedFileShared {
     /// The caller holds `io_lock.write()` through this durability checkpoint.
     /// Keep frame identities until sync succeeds; failures and cancellation
     /// re-dirty these pages without overwriting a newer generation or frame.
-    async fn sync_dirty_pages_async(&self, file: &FileNode, data_only: bool) -> VfsResult<()> {
+    async fn sync_dirty_range_with_backend(
+        &self,
+        file: &FileNode,
+        page_range: Option<(u32, u32)>,
+        data_only: bool,
+    ) -> VfsResult<()> {
         let pages = self
             .page_cache
             .lock()
             .iter()
-            .filter(|(_, page)| page.dirty || (page.may_write_mapping && page.has_user_mapping()))
+            .filter(|(pn, page)| {
+                let in_range = page_range.is_none_or(|(first, end)| **pn >= first && **pn < end);
+                in_range && (page.dirty || (page.may_write_mapping && page.has_user_mapping()))
+            })
             .map(|(pn, page)| (*pn, page.frame.clone()))
             .collect();
         let mut dirty_pages = SyncDirtyPages {
@@ -1771,10 +1779,111 @@ impl CachedFileShared {
         if file.len().await? != cached_size {
             file.set_len(cached_size).await?;
         }
-        self.flush_dirty_pages_async(file).await?;
+        self.flush_dirty_pages_in_range_async(file, page_range)
+            .await?;
         file.sync(data_only).await?;
         dirty_pages.completed = true;
         Ok(())
+    }
+
+    async fn sync_dirty_pages_async(&self, file: &FileNode, data_only: bool) -> VfsResult<()> {
+        self.sync_dirty_range_with_backend(file, None, data_only).await
+    }
+
+    pub(super) async fn sync_range_async(
+        &self,
+        file: &FileNode,
+        offset: u64,
+        len: u64,
+        wait_before: bool,
+        write: bool,
+        wait_after: bool,
+    ) -> VfsResult<()> {
+        if !wait_before && !write && !wait_after {
+            return Ok(());
+        }
+        let cached_size = self.size();
+        if file.len().await? != cached_size {
+            file.set_len(cached_size).await?;
+        }
+        if !write && !wait_after {
+            return Ok(());
+        }
+
+        let page_range = if offset == 0 && len == 0 {
+            None
+        } else if len == 0 {
+            if offset < cached_size {
+                let remaining = (cached_size - offset).min(usize::MAX as u64) as usize;
+                Some(checked_dirty_page_range(offset, remaining)?)
+            } else {
+                Some((0, 0))
+            }
+        } else {
+            let end = offset.checked_add(len).ok_or(VfsError::InvalidInput)?;
+            let first_page =
+                u32::try_from(offset / PAGE_SIZE as u64).map_err(|_| VfsError::StorageFull)?;
+            let end_page =
+                u32::try_from(end.div_ceil(PAGE_SIZE as u64)).map_err(|_| VfsError::StorageFull)?;
+            Some((first_page, end_page))
+        };
+
+        if let Some((first_page, end_page)) = page_range {
+            if first_page < end_page {
+                return self
+                    .sync_dirty_range_with_backend(file, Some((first_page, end_page)), true)
+                    .await;
+            }
+            return file.sync(true).await;
+        }
+        self.sync_dirty_range_with_backend(file, None, true).await
+    }
+
+    pub(super) fn bump_cache_generation(&self) {
+        self.cache_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn inspect_cache_range(&self, offset: u64, len: usize, dirty_only: bool) -> bool {
+        if len == 0 {
+            return false;
+        }
+        let Some(end) = offset.checked_add(len as u64) else {
+            return true;
+        };
+        let start_pn = offset / PAGE_SIZE as u64;
+        let end_pn = end.div_ceil(PAGE_SIZE as u64);
+        if end_pn <= start_pn {
+            return false;
+        }
+        let Ok(first_page) = u32::try_from(start_pn) else {
+            return true;
+        };
+        let Ok(last_page) = u32::try_from(end_pn) else {
+            return true;
+        };
+
+        let cache = self.page_cache.lock();
+        if cache.is_empty() {
+            return false;
+        }
+        let is_match = |page: &PageCache| {
+            !dirty_only || page.dirty || (page.may_write_mapping && page.has_user_mapping())
+        };
+        if (last_page - first_page) as usize <= cache.len() {
+            (first_page..last_page).any(|pn| cache.peek(&pn).is_some_and(is_match))
+        } else {
+            cache
+                .iter()
+                .any(|(pn, page)| *pn >= first_page && *pn < last_page && is_match(page))
+        }
+    }
+
+    pub(super) fn has_dirty_pages_in_range(&self, offset: u64, len: usize) -> bool {
+        self.inspect_cache_range(offset, len, true)
+    }
+
+    pub(super) fn has_cached_pages_in_range(&self, offset: u64, len: usize) -> bool {
+        self.inspect_cache_range(offset, len, false)
     }
 
     /// Flushes dirty cache pages that overlap one direct-I/O request.
@@ -3586,6 +3695,24 @@ impl CachedFile {
         let _guard = self.shared.io_lock.write().await;
         let file = self.inner.entry().as_file()?;
         self.shared.sync_dirty_pages_async(file, data_only).await
+    }
+
+    pub async fn sync_range_async(
+        &self,
+        offset: u64,
+        len: u64,
+        wait_before: bool,
+        write: bool,
+        wait_after: bool,
+    ) -> VfsResult<()> {
+        if self.in_memory || (!wait_before && !write && !wait_after) {
+            return Ok(());
+        }
+        let _guard = self.shared.io_lock.write().await;
+        let file = self.inner.entry().as_file()?;
+        self.shared
+            .sync_range_async(file, offset, len, wait_before, write, wait_after)
+            .await
     }
 
     pub fn write_at(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {

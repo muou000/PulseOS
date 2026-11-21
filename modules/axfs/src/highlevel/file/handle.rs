@@ -1,7 +1,8 @@
 use super::{
     cache::{
-        FileWriteGuard, append_slice_source_async, append_source_async, shared_file_state_async,
-        write_slice_once_at_async, write_slice_source_at_async, write_source_at_async,
+        CachedFileShared, FileWriteGuard, append_slice_source_async, append_source_async,
+        shared_file_state_async, write_slice_once_at_async, write_slice_source_at_async,
+        write_source_at_async,
     },
     *,
 };
@@ -24,6 +25,69 @@ async fn extend_backend_to_cached_size(file: &FileNode, cached_size: u64) -> Vfs
         file.set_len(cached_size).await?;
     }
     Ok(())
+}
+
+async fn can_use_direct_read_fast_path(
+    shared: &CachedFileShared,
+    file: &FileNode,
+    offset: u64,
+    requested: usize,
+) -> VfsResult<bool> {
+    Ok(file.len().await? >= shared.size() && !shared.has_dirty_pages_in_range(offset, requested))
+}
+
+async fn can_use_direct_write_fast_path(
+    shared: &CachedFileShared,
+    file: &FileNode,
+    offset: u64,
+    requested: usize,
+) -> VfsResult<bool> {
+    let cached_size = shared.size();
+    let end_fits = offset
+        .checked_add(requested as u64)
+        .is_some_and(|e| e <= cached_size);
+    Ok(end_fits
+        && file.len().await? >= cached_size
+        && !shared.has_cached_pages_in_range(offset, requested))
+}
+
+async fn prepare_direct_write_slow(
+    shared: &CachedFileShared,
+    file: &FileNode,
+    offset: u64,
+    requested: usize,
+) -> VfsResult<()> {
+    extend_backend_to_cached_size(file, shared.size()).await?;
+    shared.flush_dirty_range_async(file, offset, requested).await
+}
+
+async fn finish_direct_write(
+    shared: &CachedFileShared,
+    file: &FileNode,
+    offset: u64,
+    requested: usize,
+    result: VfsResult<usize>,
+) -> VfsResult<usize> {
+    if let Ok(written) = result.as_ref() {
+        if *written != 0 {
+            let end = offset
+                .checked_add(*written as u64)
+                .ok_or(VfsError::InvalidInput)?;
+            shared.set_size(shared.size().max(end));
+        }
+    } else if let Ok(backend_size) = file.len().await {
+        shared.set_size(shared.size().max(backend_size));
+    }
+    let invalidate = shared
+        .discard_direct_write_range_without_writeback_async(file, offset, requested)
+        .await;
+    match (result, invalidate) {
+        (Ok(written), Ok(())) => Ok(written),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(written), Err(_)) if written != 0 => Ok(written),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(err), Err(_)) => Err(err),
+    }
 }
 
 async fn read_source_at_async<W: Write + IoBufMut>(
@@ -120,6 +184,12 @@ impl FileBackend {
                         return Ok(0);
                     }
                     let shared = shared_file_state_async(loc).await?;
+                    {
+                        let _guard = shared.io_lock.read().await;
+                        if can_use_direct_read_fast_path(&shared, file, offset, requested).await? {
+                            return read_source_at_async(file, &mut dst, offset).await;
+                        }
+                    }
                     let _guard = shared.io_lock.write().await;
                     extend_backend_to_cached_size(file, shared.size()).await?;
                     shared
@@ -145,16 +215,32 @@ impl FileBackend {
             Self::Direct(loc) => {
                 let file = loc.entry().as_file()?;
                 let requested = dst.len();
+                if requested == 0 {
+                    return Ok(0);
+                }
                 let read = if node_allows_page_cache(loc.flags())
                     && !loc.flags().contains(NodeFlags::STREAM)
                 {
                     let shared = shared_file_state_async(loc).await?;
-                    let _guard = shared.io_lock.write().await;
-                    extend_backend_to_cached_size(file, shared.size()).await?;
-                    shared
-                        .flush_dirty_range_async(file, offset, requested)
-                        .await?;
-                    file.read_at(dst, offset).await?
+                    let fast_read = {
+                        let _guard = shared.io_lock.read().await;
+                        if can_use_direct_read_fast_path(&shared, file, offset, requested).await? {
+                            Some(file.read_at(dst, offset).await?)
+                        } else {
+                            None
+                        }
+                    };
+                    match fast_read {
+                        Some(read) => read,
+                        None => {
+                            let _guard = shared.io_lock.write().await;
+                            extend_backend_to_cached_size(file, shared.size()).await?;
+                            shared
+                                .flush_dirty_range_async(file, offset, requested)
+                                .await?;
+                            file.read_at(dst, offset).await?
+                        }
+                    }
                 } else {
                     file.read_at(dst, offset).await?
                 };
@@ -200,33 +286,31 @@ impl FileBackend {
                     write_source_at_async(file, &mut src, offset).await
                 } else {
                     let requested = src.remaining();
+                    if requested == 0 {
+                        return Ok(0);
+                    }
                     let shared = shared_file_state_async(loc).await?;
-                    let _guard = shared.io_lock.write().await;
-                    extend_backend_to_cached_size(file, shared.size()).await?;
-                    shared
-                        .flush_dirty_range_async(file, offset, requested)
-                        .await?;
-                    let result = write_source_at_async(file, &mut src, offset).await;
-                    if let Ok(written) = result.as_ref() {
-                        if *written != 0 {
-                            let end = offset
-                                .checked_add(*written as u64)
-                                .ok_or(VfsError::InvalidInput)?;
-                            shared.set_size(shared.size().max(end));
+                    let fast_result = {
+                        let _guard = shared.io_lock.read().await;
+                        if can_use_direct_write_fast_path(&shared, file, offset, requested).await? {
+                            // Reject concurrent cache fills that started before this direct write.
+                            shared.bump_cache_generation();
+                            Some(write_source_at_async(file, &mut src, offset).await)
+                        } else {
+                            None
                         }
-                    } else if let Ok(backend_size) = file.len().await {
-                        shared.set_size(shared.size().max(backend_size));
+                    };
+                    if let Some(result) = fast_result {
+                        if !shared.has_cached_pages_in_range(offset, requested) {
+                            return result;
+                        }
+                        let _guard = shared.io_lock.write().await;
+                        return finish_direct_write(&shared, file, offset, requested, result).await;
                     }
-                    let invalidate = shared
-                        .discard_direct_write_range_without_writeback_async(file, offset, requested)
-                        .await;
-                    match (result, invalidate) {
-                        (Ok(written), Ok(())) => Ok(written),
-                        (Err(err), Ok(())) => Err(err),
-                        (Ok(written), Err(_)) if written != 0 => Ok(written),
-                        (Ok(_), Err(err)) => Err(err),
-                        (Err(err), Err(_)) => Err(err),
-                    }
+                    let _guard = shared.io_lock.write().await;
+                    prepare_direct_write_slow(&shared, file, offset, requested).await?;
+                    let result = write_source_at_async(file, &mut src, offset).await;
+                    finish_direct_write(&shared, file, offset, requested, result).await
                 }
             }
         }
@@ -248,37 +332,39 @@ impl FileBackend {
                 }
 
                 let requested = src.len();
+                if requested == 0 {
+                    return Ok(0);
+                }
                 let shared = shared_file_state_async(loc).await?;
+                let fast_result = {
+                    let _guard = shared.io_lock.read().await;
+                    if can_use_direct_write_fast_path(&shared, file, offset, requested).await? {
+                        shared.bump_cache_generation();
+                        let res = if loc.node_type() == NodeType::RegularFile {
+                            write_slice_once_at_async(file, src, offset).await
+                        } else {
+                            write_slice_source_at_async(file, src, offset).await
+                        };
+                        Some(res)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(result) = fast_result {
+                    if !shared.has_cached_pages_in_range(offset, requested) {
+                        return result;
+                    }
+                    let _guard = shared.io_lock.write().await;
+                    return finish_direct_write(&shared, file, offset, requested, result).await;
+                }
                 let _guard = shared.io_lock.write().await;
-                extend_backend_to_cached_size(file, shared.size()).await?;
-                shared
-                    .flush_dirty_range_async(file, offset, requested)
-                    .await?;
+                prepare_direct_write_slow(&shared, file, offset, requested).await?;
                 let result = if loc.node_type() == NodeType::RegularFile {
                     write_slice_once_at_async(file, src, offset).await
                 } else {
                     write_slice_source_at_async(file, src, offset).await
                 };
-                if let Ok(written) = result.as_ref() {
-                    if *written != 0 {
-                        let end = offset
-                            .checked_add(*written as u64)
-                            .ok_or(VfsError::InvalidInput)?;
-                        shared.set_size(shared.size().max(end));
-                    }
-                } else if let Ok(backend_size) = file.len().await {
-                    shared.set_size(shared.size().max(backend_size));
-                }
-                let invalidate = shared
-                    .discard_direct_write_range_without_writeback_async(file, offset, requested)
-                    .await;
-                match (result, invalidate) {
-                    (Ok(written), Ok(())) => Ok(written),
-                    (Err(err), Ok(())) => Err(err),
-                    (Ok(written), Err(_)) if written != 0 => Ok(written),
-                    (Ok(_), Err(err)) => Err(err),
-                    (Err(err), Err(_)) => Err(err),
-                }
+                finish_direct_write(&shared, file, offset, requested, result).await
             }
         }
     }
@@ -398,6 +484,42 @@ impl FileBackend {
         }
     }
 
+    pub async fn sync_range(
+        &self,
+        offset: u64,
+        len: u64,
+        wait_before: bool,
+        write: bool,
+        wait_after: bool,
+    ) -> VfsResult<()> {
+        if !wait_before && !write && !wait_after {
+            return Ok(());
+        }
+        match self {
+            Self::Cached(cached) => {
+                cached
+                    .sync_range_async(offset, len, wait_before, write, wait_after)
+                    .await
+            }
+            Self::Direct(loc) => {
+                let file = loc.entry().as_file()?;
+                if !node_allows_page_cache(loc.flags()) || loc.flags().contains(NodeFlags::STREAM) {
+                    return if write || wait_after {
+                        file.sync(true).await
+                    } else {
+                        Ok(())
+                    };
+                }
+
+                let shared = shared_file_state_async(loc).await?;
+                let _guard = shared.io_lock.write().await;
+                shared
+                    .sync_range_async(file, offset, len, wait_before, write, wait_after)
+                    .await
+            }
+        }
+    }
+
     pub async fn set_len(&self, len: u64) -> VfsResult<()> {
         match self {
             Self::Cached(cached) => cached.set_len_async(len).await,
@@ -439,7 +561,7 @@ impl FileBackend {
 pub struct File {
     inner: FileBackend,
     flags: FileFlags,
-    position: Option<FilePosition>,
+    position: Option<Arc<FilePosition>>,
     _write_access: Option<WriteAccessGuard>,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
@@ -744,11 +866,25 @@ impl File {
             && location.node_type() == NodeType::RegularFile
     }
 
+    /// Reserves one FIFO turn on the shared file position for deferred worker execution.
+    pub fn reserve_position_ticket(&self) -> Option<FilePositionTicket> {
+        self.position.as_ref().map(FilePosition::reserve)
+    }
+
     /// Begins position ownership. Transfer methods check the access mode,
     /// allowing syscall alignment and user-memory validation to retain their
     /// existing precedence before the first actual transfer.
     pub async fn begin_read_io(&self, offset: Option<u64>) -> VfsResult<FileIo<'_>> {
-        self.begin_io(offset, false).await
+        self.begin_io(None, offset, false, false).await
+    }
+
+    /// Begins position ownership using a submission-time ticket.
+    pub async fn begin_read_io_with_ticket(
+        &self,
+        ticket: Option<FilePositionTicket>,
+        offset: Option<u64>,
+    ) -> VfsResult<FileIo<'_>> {
+        self.begin_io(ticket, offset, false, false).await
     }
 
     /// Tries to retain the position transaction without waiting. A successful
@@ -763,15 +899,41 @@ impl File {
 
     /// Begins position/append ownership; write access is checked at transfer.
     pub async fn begin_write_io(&self, offset: Option<u64>) -> VfsResult<FileIo<'_>> {
-        self.begin_io(offset, true).await
+        self.begin_io(None, offset, true, false).await
     }
 
-    async fn begin_io(&self, offset: Option<u64>, write: bool) -> VfsResult<FileIo<'_>> {
+    /// Begins position/append ownership, forcing append semantics when `force_append` is set.
+    pub async fn begin_write_io_with_append(
+        &self,
+        offset: Option<u64>,
+        force_append: bool,
+    ) -> VfsResult<FileIo<'_>> {
+        self.begin_io(None, offset, true, force_append).await
+    }
+
+    /// Begins position/append ownership using a submission-time ticket.
+    pub async fn begin_write_io_with_ticket(
+        &self,
+        ticket: Option<FilePositionTicket>,
+        offset: Option<u64>,
+        force_append: bool,
+    ) -> VfsResult<FileIo<'_>> {
+        self.begin_io(ticket, offset, true, force_append).await
+    }
+
+    async fn begin_io(
+        &self,
+        ticket: Option<FilePositionTicket>,
+        offset: Option<u64>,
+        write: bool,
+        force_append: bool,
+    ) -> VfsResult<FileIo<'_>> {
         if !self.supports_file_io() {
             return Err(VfsError::InvalidInput);
         }
-        let mut position = IoPosition::begin(self.position.as_ref(), offset).await;
-        let append = write && self.flags.contains(FileFlags::APPEND);
+        let mut position =
+            IoPosition::begin_with_ticket(self.position.as_ref(), ticket, offset).await;
+        let append = write && (self.flags.contains(FileFlags::APPEND) || force_append);
         let write_operation = if write {
             self.inner.begin_write_operation(append).await?
         } else {
@@ -893,8 +1055,20 @@ impl File {
             )
     }
 
+    /// Whether I/O or sync on this file's backing node can perform blocking waits.
+    pub fn is_blocking_node(&self) -> bool {
+        self.location().flags().contains(axfs_ng_vfs::NodeFlags::BLOCKING)
+    }
+
     pub fn block_size(&self) -> u64 {
-        axtask::future::block_on(self.inner.location().metadata())
+        axtask::future::block_on(self.block_size_async())
+    }
+
+    pub async fn block_size_async(&self) -> u64 {
+        self.inner
+            .location()
+            .metadata()
+            .await
             .map(|m| m.block_size)
             .unwrap_or(512)
     }
@@ -915,6 +1089,7 @@ impl File {
         }
         result
     }
+
 
     /// Tries to read fully resident cache pages without constructing a future.
     /// A `None` result must be retried through [`Self::read_at`].
@@ -938,6 +1113,7 @@ impl File {
         result
     }
 
+
     /// Writes a number of bytes starting from a given offset.
     pub async fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
         let result = self.access(FileFlags::WRITE)?.write_at(src, offset).await;
@@ -948,6 +1124,7 @@ impl File {
         }
         result
     }
+
 
     /// Writes a contiguous, lifetime-stable byte slice at a given offset.
     ///
@@ -966,6 +1143,7 @@ impl File {
         result
     }
 
+
     /// Attempts to sync OS-internal file content and metadata to disk.
     ///
     /// If `data_only` is `true`, only the file data is synced, not the
@@ -983,6 +1161,28 @@ impl File {
         }
         result
     }
+
+    /// Flushes any deferred atime/mtime updates without suspending via `block_on`.
+    pub async fn flush_pending_timestamps(&self) -> VfsResult<()> {
+        #[cfg(feature = "times")]
+        let _ = self.take_timestamp_updates().await?;
+        Ok(())
+    }
+
+    /// Asynchronously flushes dirty cache pages in `[offset, offset + len)` and syncs storage.
+    pub async fn sync_range(
+        &self,
+        offset: u64,
+        len: u64,
+        wait_before: bool,
+        write: bool,
+        wait_after: bool,
+    ) -> VfsResult<()> {
+        self.access(FileFlags::empty())?
+            .sync_range(offset, len, wait_before, write, wait_after)
+            .await
+    }
+
 
     pub async fn read(&self, dst: impl Write + IoBufMut) -> axio::Result<usize> {
         if let Some(pos) = self.position.as_ref() {
@@ -1034,6 +1234,7 @@ impl File {
         result
     }
 
+
     /// Writes a contiguous, lifetime-stable byte slice at the current offset.
     ///
     /// Callers that may suspend while borrowing user memory must keep its
@@ -1061,6 +1262,7 @@ impl File {
         }
         result
     }
+
 
     pub async fn flush(&self) -> axio::Result {
         self.sync(false).await

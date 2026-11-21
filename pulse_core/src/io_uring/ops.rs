@@ -1,6 +1,7 @@
 //! Request preparation and async/worker execution helpers for PulseOS `io_uring`.
 
 use alloc::{
+    boxed::Box,
     sync::{Arc, Weak},
     vec,
     vec::Vec,
@@ -13,19 +14,27 @@ use axio::IoBuf;
 use axpoll::IoEvents;
 use axtask::future::{global_executor, sleep_until};
 use linux_raw_sys::{
-    general::{O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, POLLRDHUP, iovec},
+    general::{
+        O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, POLLRDHUP,
+        RLIMIT_FSIZE, iovec,
+    },
     io_uring::{__kernel_timespec, io_uring_op},
     net::{AF_INET, AF_INET6},
 };
 use pulse_io_uring_core::orchestrator::{PreparedRequest, RequestId, RequestKind, TimeoutClock};
-use pulse_io_uring_core::resources::MAX_FIXED_FILES;
+use pulse_io_uring_core::resources::{
+    MAX_FIXED_FILES, validate_direct_io_buffers, validate_direct_io_offset,
+};
 use pulse_io_uring_core::whitelist::{
-    validate_async_cancel_sqe, validate_files_update_sqe, validate_link_timeout_sqe,
-    validate_nop_sqe, validate_rw_fixed_sqe, validate_rw_or_poll_sqe, validate_sqe_v1,
+    RwOffset, resolve_rw_offset, validate_async_cancel_sqe, validate_files_update_sqe,
+    validate_fsync_sqe, validate_link_timeout_sqe, validate_nop_sqe, validate_rw_fixed_sqe,
+    validate_rw_or_poll_sqe, validate_rw_sqe, validate_sqe_v1, validate_sync_file_range_sqe,
     validate_timeout_remove_sqe, validate_timeout_sqe,
 };
 use pulse_user_abi::io_uring::{
-    IORING_TIMEOUT_UPDATE, IOSQE_ASYNC, IOSQE_FIXED_FILE, IoUringSqe,
+    IORING_FSYNC_DATASYNC, IORING_TIMEOUT_UPDATE, IOSQE_ASYNC, IOSQE_FIXED_FILE, IoUringSqe,
+    RWF_APPEND, RWF_DSYNC, RWF_NOWAIT, RWF_SYNC, SYNC_FILE_RANGE_WAIT_AFTER,
+    SYNC_FILE_RANGE_WAIT_BEFORE, SYNC_FILE_RANGE_WRITE,
 };
 
 use super::{
@@ -34,7 +43,8 @@ use super::{
     worker_pool::global_worker_pool,
 };
 use crate::fd_table::{
-    EpollObject, FdEntry, FdFlags, FdObject, PipeObject, PollRegistration, SignalFdObject,
+    DirObject, EpollObject, EventFdObject, FdEntry, FdFlags, FdObject, FileObject, PipeObject,
+    PollRegistration, SignalFdObject, StdinObject, TimerFdObject,
 };
 use crate::mm::{
     FixedBufferIo, PinnedUserBuffers, UserBufferCursor, UserIoSegment, fits_single_pin_window,
@@ -46,7 +56,7 @@ const RW_CHUNK_CAP: usize = 64 * 1024;
 
 pub enum PreparedRwBuffer {
     Empty,
-    SingleWindow(PinnedUserBuffers),
+    SingleWindow(Box<PinnedUserBuffers>),
     Fixed(FixedBufferIo),
     MultiWindow {
         segments: Vec<UserIoSegment>,
@@ -110,6 +120,13 @@ pub enum PollTarget {
     Ring(Weak<IoUringState>),
 }
 
+pub struct PreparedRwData {
+    pub entry: FdEntry,
+    pub buffer: PreparedRwBuffer,
+    pub offset: Option<u64>,
+    pub direct_buf_aligned: bool,
+}
+
 pub enum PreparedOpSpec {
     Nop,
     Timeout {
@@ -131,9 +148,23 @@ pub enum PreparedOpSpec {
         cancel_flags: u32,
     },
     Rw {
-        outcome: LinuxResult<(FdEntry, PreparedRwBuffer)>,
+        outcome: LinuxResult<Box<PreparedRwData>>,
         is_write: bool,
+        rw_flags: u32,
+        force_async: bool,
+    },
+    Fsync {
+        outcome: LinuxResult<FdEntry>,
         offset: u64,
+        len: u32,
+        data_only: bool,
+        force_async: bool,
+    },
+    SyncFileRange {
+        outcome: LinuxResult<FdEntry>,
+        offset: u64,
+        len: u32,
+        sync_flags: u32,
         force_async: bool,
     },
     FilesUpdate {
@@ -213,7 +244,38 @@ fn open_rw_fd_entry(
     if !is_write && !entry.object.is_read_open() {
         return Err(LinuxError::EBADF);
     }
+    if !is_write && entry.object.as_any().is::<DirObject>() {
+        return Err(LinuxError::EISDIR);
+    }
     Ok(entry)
+}
+
+#[inline]
+fn fd_is_seekable(obj: &dyn FdObject) -> bool {
+    if let Some(file) = obj.as_any().downcast_ref::<FileObject>() {
+        file.is_seekable()
+    } else {
+        obj.as_any().is::<DirObject>()
+    }
+}
+
+#[inline]
+fn check_direct_buf_aligned(obj: &dyn FdObject, segments: &[UserIoSegment]) -> bool {
+    if let Some(file_obj) = obj.as_any().downcast_ref::<FileObject>()
+        && file_obj.inner().is_direct_regular_file()
+    {
+        return validate_direct_io_buffers(segments, file_obj.inner().block_size() as usize)
+            .is_ok();
+    }
+    true
+}
+
+#[inline]
+fn rw_offset_to_option(rw_off: RwOffset) -> Option<u64> {
+    match rw_off {
+        RwOffset::CurrentPosition => None,
+        RwOffset::Positional(off) => Some(off),
+    }
 }
 
 fn prepare_rw_segments(
@@ -375,21 +437,34 @@ fn prepare_sqe_inner(
             || op == io_uring_op::IORING_OP_WRITE as u8
             || op == io_uring_op::IORING_OP_WRITEV as u8 =>
         {
-            validate_rw_or_poll_sqe(sqe)?;
+            validate_rw_sqe(sqe)?;
             let is_write = op == io_uring_op::IORING_OP_WRITE as u8
                 || op == io_uring_op::IORING_OP_WRITEV as u8;
             let vectored = op == io_uring_op::IORING_OP_READV as u8
                 || op == io_uring_op::IORING_OP_WRITEV as u8;
             // Defer FD permission/mode and user-segment validation beyond chain assembly so
             // invalid linked chains cancel queued R/W operations consistently (`-ECANCELED`).
-            let outcome = (|| -> LinuxResult<(FdEntry, PreparedRwBuffer, usize)> {
+            let outcome = (|| -> LinuxResult<(Box<PreparedRwData>, usize)> {
                 let entry = open_rw_fd_entry(state, ctx, sqe, is_write)?;
                 let (segments, total_len) = prepare_rw_segments(sqe, ctx, vectored)?;
+                let offset = rw_offset_to_option(resolve_rw_offset(
+                    sqe.off,
+                    total_len,
+                    fd_is_seekable(entry.object.as_ref()),
+                )?);
+                let direct_buf_aligned = check_direct_buf_aligned(entry.object.as_ref(), &segments);
                 if total_len == 0 {
-                    return Ok((entry, PreparedRwBuffer::Empty, 0));
+                    return Ok((
+                        Box::new(PreparedRwData {
+                            entry,
+                            buffer: PreparedRwBuffer::Empty,
+                            offset,
+                            direct_buf_aligned,
+                        }),
+                        0,
+                    ));
                 }
-                let pin_inline = !force_async
-                    && !entry.object.as_any().is::<Socket>()
+                let pin_inline = !entry.object.as_any().is::<Socket>()
                     && fits_single_pin_window(&segments);
                 let buffer = if pin_inline {
                     let mut cursor = UserBufferCursor::default();
@@ -399,19 +474,27 @@ fn prepare_sqe_inner(
                         &mut cursor,
                         !is_write,
                     )?;
-                    PreparedRwBuffer::SingleWindow(window)
+                    PreparedRwBuffer::SingleWindow(Box::new(window))
                 } else {
                     PreparedRwBuffer::MultiWindow {
                         segments,
                         total_len,
                     }
                 };
-                Ok((entry, buffer, total_len))
+                Ok((
+                    Box::new(PreparedRwData {
+                        entry,
+                        buffer,
+                        offset,
+                        direct_buf_aligned,
+                    }),
+                    total_len,
+                ))
             })();
             let (expected, outcome) = match outcome {
-                Ok((entry, buffer, total_len)) => (
+                Ok((data, total_len)) => (
                     if total_len > 0 { Some(total_len) } else { None },
-                    Ok((entry, buffer)),
+                    Ok(data),
                 ),
                 Err(err) => (None, Err(err)),
             };
@@ -420,7 +503,7 @@ fn prepare_sqe_inner(
                 PreparedOpSpec::Rw {
                     outcome,
                     is_write,
-                    offset: sqe.off,
+                    rw_flags: sqe.op_flags,
                     force_async,
                 },
             ))
@@ -430,22 +513,39 @@ fn prepare_sqe_inner(
         {
             validate_rw_fixed_sqe(sqe)?;
             let is_write = op == io_uring_op::IORING_OP_WRITE_FIXED as u8;
-            let outcome = (|| -> LinuxResult<(FdEntry, PreparedRwBuffer, usize)> {
+            let outcome = (|| -> LinuxResult<(Box<PreparedRwData>, usize)> {
                 let entry = open_rw_fd_entry(state, ctx, sqe, is_write)?;
+                let offset = rw_offset_to_option(resolve_rw_offset(
+                    sqe.off,
+                    sqe.len as usize,
+                    fd_is_seekable(entry.object.as_ref()),
+                )?);
                 let fixed_io =
                     state.resolve_fixed_buffer(sqe.buf_index, sqe.addr, sqe.len, !is_write)?;
                 let total_len = fixed_io.len();
+                let seg = [UserIoSegment::new(sqe.addr as usize, total_len)];
+                let seg_slice = if total_len > 0 { &seg[..1] } else { &seg[..0] };
+                let direct_buf_aligned =
+                    check_direct_buf_aligned(entry.object.as_ref(), seg_slice);
                 let buffer = if total_len == 0 {
                     PreparedRwBuffer::Empty
                 } else {
                     PreparedRwBuffer::Fixed(fixed_io)
                 };
-                Ok((entry, buffer, total_len))
+                Ok((
+                    Box::new(PreparedRwData {
+                        entry,
+                        buffer,
+                        offset,
+                        direct_buf_aligned,
+                    }),
+                    total_len,
+                ))
             })();
             let (expected, outcome) = match outcome {
-                Ok((entry, buffer, total_len)) => (
+                Ok((data, total_len)) => (
                     if total_len > 0 { Some(total_len) } else { None },
-                    Ok((entry, buffer)),
+                    Ok(data),
                 ),
                 Err(err) => (None, Err(err)),
             };
@@ -454,7 +554,55 @@ fn prepare_sqe_inner(
                 PreparedOpSpec::Rw {
                     outcome,
                     is_write,
+                    rw_flags: sqe.op_flags,
+                    force_async,
+                },
+            ))
+        }
+        op if op == io_uring_op::IORING_OP_FSYNC as u8 => {
+            validate_fsync_sqe(sqe)?;
+            let outcome = (|| -> LinuxResult<FdEntry> {
+                let entry = resolve_sqe_fd_entry(state, ctx, sqe)?;
+                if entry.flags.contains(FdFlags::PATH) {
+                    return Err(LinuxError::EBADF);
+                }
+                if fd_is_seekable(entry.object.as_ref()) {
+                    Ok(entry)
+                } else {
+                    Err(LinuxError::EINVAL)
+                }
+            })();
+            Ok((
+                PreparedRequest::from_normal(sqe, Some(sqe.fd), None),
+                PreparedOpSpec::Fsync {
+                    outcome,
                     offset: sqe.off,
+                    len: sqe.len,
+                    data_only: (sqe.op_flags & IORING_FSYNC_DATASYNC) != 0,
+                    force_async,
+                },
+            ))
+        }
+        op if op == io_uring_op::IORING_OP_SYNC_FILE_RANGE as u8 => {
+            validate_sync_file_range_sqe(sqe)?;
+            let outcome = (|| -> LinuxResult<FdEntry> {
+                let entry = resolve_sqe_fd_entry(state, ctx, sqe)?;
+                if entry.flags.contains(FdFlags::PATH) {
+                    return Err(LinuxError::EBADF);
+                }
+                if fd_is_seekable(entry.object.as_ref()) {
+                    Ok(entry)
+                } else {
+                    Err(LinuxError::ESPIPE)
+                }
+            })();
+            Ok((
+                PreparedRequest::from_normal(sqe, Some(sqe.fd), None),
+                PreparedOpSpec::SyncFileRange {
+                    outcome,
+                    offset: sqe.off,
+                    len: sqe.len,
+                    sync_flags: sqe.op_flags,
                     force_async,
                 },
             ))
@@ -570,61 +718,844 @@ pub fn spawn_timer_future(
     state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
+struct LimitedRead<'a, R> {
+    inner: &'a mut R,
+    remaining: usize,
+}
+
+impl<'a, R> LimitedRead<'a, R> {
+    #[inline]
+    fn new(inner: &'a mut R, remaining: usize) -> Self {
+        Self { inner, remaining }
+    }
+}
+
+impl<R: IoBuf> IoBuf for LimitedRead<'_, R> {
+    fn remaining(&self) -> usize {
+        self.inner.remaining().min(self.remaining)
+    }
+}
+
+impl<R: axio::Read> axio::Read for LimitedRead<'_, R> {
+    fn read(&mut self, dst: &mut [u8]) -> axio::Result<usize> {
+        let limit = dst.len().min(self.remaining);
+        if limit == 0 {
+            return Ok(0);
+        }
+        let n = self.inner.read(&mut dst[..limit])?;
+        self.remaining -= n;
+        Ok(n)
+    }
+}
+
+async fn release_fd_entry_async(entry: FdEntry) {
+    if Arc::strong_count(&entry.object) == 1
+        && let Some(file_obj) = entry.object.as_any().downcast_ref::<FileObject>()
+    {
+        file_obj.flush_pending_timestamps_async().await;
+    }
+    drop(entry);
+}
+
+#[inline]
+fn fd_serial_key(obj: &Arc<dyn FdObject>) -> u64 {
+    Arc::as_ptr(obj) as *const () as usize as u64
+}
+
+#[derive(Clone, Copy)]
+struct RwExecParams {
+    is_write: bool,
+    opt_offset: Option<u64>,
+    direct_buf_aligned: bool,
+    rw_flags: u32,
+}
+
+#[inline]
+fn process_fsize_limit(ctx: &AsyncExecContext) -> u64 {
+    ctx.process
+        .get_rlimit(RLIMIT_FSIZE)
+        .map(|lim| lim.rlim_cur)
+        .unwrap_or(u64::MAX)
+}
+
+#[derive(Clone, Copy)]
+enum FileSyncOpKind {
+    Fsync {
+        offset: u64,
+        len: u32,
+        data_only: bool,
+    },
+    SyncFileRange {
+        offset: u64,
+        len: u32,
+        wait_before: bool,
+        write: bool,
+        wait_after: bool,
+    },
+}
+
+async fn run_file_sync_op(entry: &FdEntry, op: FileSyncOpKind) -> LinuxResult<()> {
+    match op {
+        FileSyncOpKind::Fsync {
+            offset,
+            len,
+            data_only,
+        } => {
+            if let Some(file_obj) = entry.object.as_any().downcast_ref::<FileObject>() {
+                if data_only && (offset != 0 || len != 0) {
+                    file_obj
+                        .sync_range_async(offset, len as u64, true, true, true)
+                        .await
+                } else {
+                    file_obj.sync_async(data_only).await
+                }
+            } else if entry.object.as_any().is::<DirObject>()
+                && let Some(loc) = entry.object.location()
+            {
+                loc.sync(data_only).await.map_err(LinuxError::from)
+            } else {
+                Err(LinuxError::EINVAL)
+            }
+        }
+        FileSyncOpKind::SyncFileRange {
+            offset,
+            len,
+            wait_before,
+            write,
+            wait_after,
+        } => {
+            if let Some(file_obj) = entry.object.as_any().downcast_ref::<FileObject>() {
+                file_obj
+                    .sync_range_async(offset, len as u64, wait_before, write, wait_after)
+                    .await
+            } else if entry.object.as_any().is::<DirObject>()
+                && (write || wait_after)
+                && let Some(loc) = entry.object.location()
+            {
+                loc.sync(true).await.map_err(LinuxError::from)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn spawn_file_sync_op(
+    state: &Arc<IoUringState>,
+    req_id: RequestId,
+    entry: FdEntry,
+    force_async: bool,
+    op: FileSyncOpKind,
+) {
+    let is_blocking = entry
+        .object
+        .as_any()
+        .downcast_ref::<FileObject>()
+        .is_some_and(FileObject::is_blocking_node);
+    let Some(guard) = state.try_enter_inflight_owned() else {
+        return;
+    };
+    let state_cloned = Arc::clone(state);
+    if force_async || is_blocking {
+        global_worker_pool().submit(state.ring_id(), req_id, move || {
+            let _guard: OwnedInflightGuard = guard;
+            if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
+                return;
+            }
+            let res = axtask::future::block_on(run_file_sync_op(&entry, op));
+            drop(entry);
+            let code = res.map(|()| 0).unwrap_or_else(|err| -err.code());
+            state_cloned.complete_request(req_id, code, 0, true);
+        });
+        return;
+    }
+
+    let handle = global_executor().spawn_and_poll_once(async move {
+        let _guard = guard;
+        if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
+            release_fd_entry_async(entry).await;
+            return;
+        }
+        let res = run_file_sync_op(&entry, op).await;
+        release_fd_entry_async(entry).await;
+        let code = res.map(|()| 0).unwrap_or_else(|err| -err.code());
+        state_cloned.complete_request(req_id, code, 0, true);
+    });
+    state.install_cancel_handle_or_cancel(req_id, handle);
+}
+
+pub fn execute_fsync_request(
+    state: &Arc<IoUringState>,
+    req_id: RequestId,
+    entry: FdEntry,
+    offset: u64,
+    len: u32,
+    data_only: bool,
+    force_async: bool,
+) {
+    spawn_file_sync_op(
+        state,
+        req_id,
+        entry,
+        force_async,
+        FileSyncOpKind::Fsync {
+            offset,
+            len,
+            data_only,
+        },
+    );
+}
+
+pub fn execute_sync_file_range_request(
+    state: &Arc<IoUringState>,
+    req_id: RequestId,
+    entry: FdEntry,
+    offset: u64,
+    len: u32,
+    sync_flags: u32,
+    force_async: bool,
+) {
+    spawn_file_sync_op(
+        state,
+        req_id,
+        entry,
+        force_async,
+        FileSyncOpKind::SyncFileRange {
+            offset,
+            len,
+            wait_before: (sync_flags & SYNC_FILE_RANGE_WAIT_BEFORE) != 0,
+            write: (sync_flags & SYNC_FILE_RANGE_WRITE) != 0,
+            wait_after: (sync_flags & SYNC_FILE_RANGE_WAIT_AFTER) != 0,
+        },
+    );
+}
+
 pub fn execute_rw_request(
     state: &Arc<IoUringState>,
     ctx: &AsyncExecContext,
     req_id: RequestId,
-    entry: FdEntry,
+    data: Box<PreparedRwData>,
     is_write: bool,
-    buffer: PreparedRwBuffer,
-    offset: u64,
+    rw_flags: u32,
     force_async: bool,
 ) {
-    // Special FDs depend on `current_process()` / `current_thread()`, so keep them
-    // inline on the submitting thread rather than dispatching raw onto workers (ADR-0007).
-    if entry.object.as_any().is::<EpollObject>() || entry.object.as_any().is::<SignalFdObject>() {
-        let res = run_sync_rw(ctx, &entry.object, is_write, buffer, offset);
+    let PreparedRwData {
+        entry,
+        buffer,
+        offset,
+        direct_buf_aligned,
+    } = *data;
+
+    if entry.object.as_any().is::<EpollObject>() {
+        let res = run_sync_rw(ctx, &entry.object, is_write, buffer, offset.unwrap_or(u64::MAX), false);
         state.complete_request(req_id, res, 0, false);
         return;
     }
 
-    if force_async {
-        spawn_worker_rw(state, ctx, req_id, entry, is_write, buffer, offset);
-        return;
-    }
-
-    if entry.object.as_any().is::<PipeObject>() {
-        // Non-zero explicit file offsets on stream FDs fail with `-ESPIPE`.
-        if offset != 0 && offset != u64::MAX {
-            state.complete_request(req_id, -LinuxError::ESPIPE.code(), 0, false);
+    if let Some(file_obj) = entry.object.as_any().downcast_ref::<FileObject>() {
+        let params = RwExecParams {
+            is_write,
+            opt_offset: offset,
+            direct_buf_aligned,
+            rw_flags,
+        };
+        if file_obj.supports_file_io() {
+            execute_regular_file_rw(state, ctx, req_id, entry, buffer, params, force_async);
             return;
         }
+        if file_obj.is_seekable() {
+            execute_seekable_special_file_rw(
+                state,
+                ctx,
+                req_id,
+                entry,
+                buffer,
+                params,
+                force_async,
+            );
+            return;
+        }
+    }
+
+    if is_stream_ready_fd(entry.object.as_ref()) {
         let total_len = buffer.total_len();
-        if total_len == 0 {
-            state.complete_request(req_id, 0, 0, false);
+        if let Err(err) = validate_stream_rw_len(entry.object.as_ref(), is_write, total_len) {
+            state.complete_request(req_id, -err.code(), 0, false);
             return;
         }
-        if (total_len <= RW_CHUNK_CAP && matches!(buffer, PreparedRwBuffer::SingleWindow(_)))
-            || matches!(buffer, PreparedRwBuffer::Fixed(_))
+        if !force_async
+            && ((total_len <= RW_CHUNK_CAP && !matches!(buffer, PreparedRwBuffer::MultiWindow { .. }))
+                || matches!(buffer, PreparedRwBuffer::Fixed(_)))
         {
-            execute_pipe_rw(state, req_id, entry, is_write, buffer);
+            execute_stream_rw(
+                state,
+                ctx,
+                req_id,
+                entry,
+                is_write,
+                buffer,
+                rw_flags,
+            );
         } else {
-            spawn_worker_rw(state, ctx, req_id, entry, is_write, buffer, offset);
+            let serial_key = Some(fd_serial_key(&entry.object));
+            spawn_worker_rw(
+                state,
+                ctx,
+                req_id,
+                entry,
+                is_write,
+                buffer,
+                offset.unwrap_or(u64::MAX),
+                (rw_flags & RWF_NOWAIT) != 0,
+                serial_key,
+            );
         }
         return;
     }
 
-    if entry.object.as_any().is::<Socket>() || matches!(buffer, PreparedRwBuffer::MultiWindow { .. }) {
-        // Blocking sockets and multi-window (> 64 KiB / > 32 fragments) requests
-        // execute on Path 3 so Reactor polling never blocks and user memory pins stream in bounded windows.
-        spawn_worker_rw(state, ctx, req_id, entry, is_write, buffer, offset);
+    if force_async
+        || entry.object.as_any().is::<Socket>()
+        || matches!(buffer, PreparedRwBuffer::MultiWindow { .. })
+    {
+        spawn_worker_rw(
+            state,
+            ctx,
+            req_id,
+            entry,
+            is_write,
+            buffer,
+            offset.unwrap_or(u64::MAX),
+            (rw_flags & RWF_NOWAIT) != 0,
+            None,
+        );
         return;
     }
 
-    let res = run_sync_rw(ctx, &entry.object, is_write, buffer, offset);
+    let res = run_sync_rw(
+        ctx,
+        &entry.object,
+        is_write,
+        buffer,
+        offset.unwrap_or(u64::MAX),
+        (rw_flags & RWF_NOWAIT) != 0,
+    );
     state.complete_request(req_id, res, 0, false);
 }
 
+#[inline]
+fn is_stream_ready_fd(obj: &dyn FdObject) -> bool {
+    obj.as_any().is::<PipeObject>()
+        || obj.as_any().is::<EventFdObject>()
+        || obj.as_any().is::<StdinObject>()
+        || obj.as_any().is::<SignalFdObject>()
+        || obj.as_any().is::<TimerFdObject>()
+}
+
+#[inline]
+fn validate_stream_rw_len(obj: &dyn FdObject, is_write: bool, len: usize) -> LinuxResult<()> {
+    if obj.as_any().is::<EventFdObject>() && ((is_write && len != 8) || (!is_write && len < 8)) {
+        return Err(LinuxError::EINVAL);
+    }
+    if obj.as_any().is::<TimerFdObject>() && (is_write || len < 8) {
+        return Err(LinuxError::EINVAL);
+    }
+    if obj.as_any().is::<SignalFdObject>() && (is_write || len < 128) {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+fn try_path1_regular_read(
+    file_obj: &FileObject,
+    opt_offset: Option<u64>,
+    buffer: &mut PreparedRwBuffer,
+) -> Option<LinuxResult<usize>> {
+    let mut io = match file_obj.try_begin_read_io(opt_offset)? {
+        Ok(io) => io,
+        Err(err) => return Some(Err(err)),
+    };
+    let res = match buffer {
+        PreparedRwBuffer::SingleWindow(win) => io.try_read(win.as_mut())?,
+        PreparedRwBuffer::Fixed(fixed) => io.try_read(fixed)?,
+        _ => return None,
+    };
+    Some(res.map_err(LinuxError::from))
+}
+
+async fn transfer_file_io_buf(
+    io: &mut axfs::FileIo<'_>,
+    buffer: &mut PreparedRwBuffer,
+    is_write: bool,
+    fsize_limit: u64,
+) -> LinuxResult<usize> {
+    let total_len = buffer.total_len();
+    if total_len == 0 {
+        return Ok(0);
+    }
+    if is_write {
+        let cur_off = io.current_offset();
+        if cur_off >= fsize_limit {
+            return Err(LinuxError::EFBIG);
+        }
+        let max_write = (fsize_limit - cur_off).min(total_len as u64) as usize;
+        let written = match buffer {
+            PreparedRwBuffer::SingleWindow(win) => {
+                let mut limited = LimitedRead::new(win.as_mut(), max_write);
+                io.write(&mut limited).await.map_err(LinuxError::from)?
+            }
+            PreparedRwBuffer::Fixed(fixed) => {
+                let mut limited = LimitedRead::new(fixed, max_write);
+                io.write(&mut limited).await.map_err(LinuxError::from)?
+            }
+            PreparedRwBuffer::Empty | PreparedRwBuffer::MultiWindow { .. } => {
+                return Err(LinuxError::EINVAL);
+            }
+        };
+        if written == 0 && let Some(err) = buffer.terminal_error() {
+            return Err(err);
+        }
+        Ok(written)
+    } else {
+        let read = match buffer {
+            PreparedRwBuffer::SingleWindow(win) => {
+                io.read(win.as_mut()).await.map_err(LinuxError::from)?
+            }
+            PreparedRwBuffer::Fixed(fixed) => io.read(fixed).await.map_err(LinuxError::from)?,
+            PreparedRwBuffer::Empty | PreparedRwBuffer::MultiWindow { .. } => {
+                return Err(LinuxError::EINVAL);
+            }
+        };
+        if read == 0 && let Some(err) = buffer.terminal_error() {
+            return Err(err);
+        }
+        Ok(read)
+    }
+}
+
+async fn transfer_regular_file_buffer(
+    state: &Arc<IoUringState>,
+    ctx: &AsyncExecContext,
+    req_id: RequestId,
+    io: &mut axfs::FileIo<'_>,
+    buffer: PreparedRwBuffer,
+    is_write: bool,
+    fsize_limit: u64,
+) -> LinuxResult<usize> {
+    match buffer {
+        PreparedRwBuffer::Empty => Ok(0),
+        mut single @ (PreparedRwBuffer::SingleWindow(_) | PreparedRwBuffer::Fixed(_)) => {
+            transfer_file_io_buf(io, &mut single, is_write, fsize_limit).await
+        }
+        PreparedRwBuffer::MultiWindow {
+            segments,
+            total_len,
+        } => {
+            let mut cursor = UserBufferCursor::default();
+            let mut total_done = 0usize;
+            while total_done < total_len {
+                if !state.is_request_active(req_id) || state.is_dying() {
+                    return Ok(total_done);
+                }
+                if is_write && io.current_offset() >= fsize_limit {
+                    if total_done == 0 {
+                        return Err(LinuxError::EFBIG);
+                    }
+                    break;
+                }
+                let window = match PinnedUserBuffers::pin_with_process(
+                    &ctx.process,
+                    &segments,
+                    &mut cursor,
+                    !is_write,
+                ) {
+                    Ok(win) => win,
+                    Err(err) => {
+                        return if total_done > 0 {
+                            Ok(total_done)
+                        } else {
+                            Err(err)
+                        };
+                    }
+                };
+                let submitted = window.len();
+                if submitted == 0 {
+                    if total_done == 0
+                        && let Some(err) = window.terminal_error()
+                    {
+                        return Err(err);
+                    }
+                    break;
+                }
+                let mut win_buf = PreparedRwBuffer::SingleWindow(Box::new(window));
+                let transferred =
+                    match transfer_file_io_buf(io, &mut win_buf, is_write, fsize_limit).await {
+                        Ok(n) => n,
+                        Err(err) => {
+                            return if total_done > 0 {
+                                Ok(total_done)
+                            } else {
+                                Err(err)
+                            };
+                        }
+                    };
+                total_done += transferred;
+                if transferred < submitted || win_buf.terminal_error().is_some() {
+                    break;
+                }
+            }
+            Ok(total_done)
+        }
+    }
+}
+
+async fn run_regular_file_io_transaction(
+    state: &Arc<IoUringState>,
+    ctx: &AsyncExecContext,
+    req_id: RequestId,
+    file_obj: &FileObject,
+    buffer: PreparedRwBuffer,
+    pos_ticket: Option<axfs::FilePositionTicket>,
+    params: RwExecParams,
+) -> LinuxResult<usize> {
+    let force_append = (params.rw_flags & RWF_APPEND) != 0;
+    let sync_after = (params.rw_flags & (RWF_DSYNC | RWF_SYNC)) != 0;
+    let data_only = (params.rw_flags & RWF_SYNC) == 0;
+    let total_len = buffer.total_len();
+
+    let mut io = if params.is_write {
+        file_obj
+            .begin_write_io_with_ticket(pos_ticket, params.opt_offset, force_append)
+            .await?
+    } else {
+        file_obj
+            .begin_read_io_with_ticket(pos_ticket, params.opt_offset)
+            .await?
+    };
+
+    if file_obj.is_direct_regular_file() {
+        if !params.direct_buf_aligned {
+            return Err(LinuxError::EINVAL);
+        }
+        let block_size = file_obj.block_size_async().await as usize;
+        validate_direct_io_offset(io.validation_offset(), block_size)?;
+    }
+
+    if total_len == 0 {
+        drop(io);
+        if params.is_write && sync_after {
+            file_obj.sync_async(data_only).await?;
+        }
+        return Ok(0);
+    }
+
+    let fsize_limit = process_fsize_limit(ctx);
+    let transferred = transfer_regular_file_buffer(
+        state,
+        ctx,
+        req_id,
+        &mut io,
+        buffer,
+        params.is_write,
+        fsize_limit,
+    )
+    .await?;
+    drop(io);
+
+    if params.is_write && sync_after && transferred > 0 {
+        file_obj.sync_async(data_only).await?;
+    }
+    Ok(transferred)
+}
+
+fn execute_regular_file_rw(
+    state: &Arc<IoUringState>,
+    ctx: &AsyncExecContext,
+    req_id: RequestId,
+    entry: FdEntry,
+    mut buffer: PreparedRwBuffer,
+    params: RwExecParams,
+    force_async: bool,
+) {
+    let file_obj = entry
+        .object
+        .as_any()
+        .downcast_ref::<FileObject>()
+        .expect("FileObject");
+    let is_direct = file_obj.is_direct_regular_file();
+    let nowait = (params.rw_flags & RWF_NOWAIT) != 0;
+
+    if is_direct && !params.direct_buf_aligned {
+        state.complete_request(req_id, -LinuxError::EINVAL.code(), 0, false);
+        return;
+    }
+
+    // Path 1: non-IOSQE_ASYNC cached read hitting resident pages on a bounded single window.
+    if !force_async
+        && !params.is_write
+        && !is_direct
+        && !matches!(buffer, PreparedRwBuffer::MultiWindow { .. })
+    {
+        if matches!(buffer, PreparedRwBuffer::Empty) {
+            state.complete_request(req_id, 0, 0, false);
+            return;
+        }
+        if let Some(res) = try_path1_regular_read(file_obj, params.opt_offset, &mut buffer) {
+            let code = match res {
+                Ok(0) if buffer.terminal_error().is_some() => {
+                    -buffer.terminal_error().unwrap().code()
+                }
+                Ok(n) => n as i32,
+                Err(err) => -err.code(),
+            };
+            state.complete_request(req_id, code, 0, false);
+            return;
+        }
+    }
+
+    if nowait {
+        state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
+        return;
+    }
+
+    if !force_async && !matches!(buffer, PreparedRwBuffer::MultiWindow { .. }) {
+        // Path 2: native multi-Future execution on KernelExecutor.
+        let Some(guard) = state.try_enter_inflight_owned() else {
+            return;
+        };
+        let state_cloned = Arc::clone(state);
+        let ctx_cloned = ctx.clone();
+
+        let handle = global_executor().spawn_and_poll_once(async move {
+            let _guard = guard;
+            let file_obj = entry
+                .object
+                .as_any()
+                .downcast_ref::<FileObject>()
+                .expect("FileObject");
+            let res = run_regular_file_io_transaction(
+                &state_cloned,
+                &ctx_cloned,
+                req_id,
+                file_obj,
+                buffer,
+                None,
+                params,
+            )
+            .await;
+            release_fd_entry_async(entry).await;
+            let code = match res {
+                Ok(n) => n as i32,
+                Err(err) => -err.code(),
+            };
+            state_cloned.complete_request(req_id, code, 0, true);
+        });
+
+        state.install_cancel_handle_or_cancel(req_id, handle);
+        return;
+    }
+
+    // Path 3: IOSQE_ASYNC or Multi-window (> 64 KiB / > 32 fragments) on worker pool.
+    let force_append = (params.rw_flags & RWF_APPEND) != 0;
+    let needs_serial = params.opt_offset.is_none()
+        || (params.is_write && (force_append || file_obj.is_append_open()));
+    let serial_key = needs_serial.then(|| fd_serial_key(&entry.object));
+    let pos_ticket = params
+        .opt_offset
+        .is_none()
+        .then(|| file_obj.reserve_position_ticket())
+        .flatten();
+
+    let Some(guard) = state.try_enter_inflight_owned() else {
+        return;
+    };
+    let state_wk = Arc::clone(state);
+    let ctx_wk = ctx.clone();
+
+    global_worker_pool().submit_ordered(state.ring_id(), req_id, serial_key, move || {
+        let _guard: OwnedInflightGuard = guard;
+        if !state_wk.is_request_active(req_id) || state_wk.is_dying() {
+            drop(pos_ticket);
+            return;
+        }
+
+        let res = axtask::future::block_on(async {
+            let file_obj = entry
+                .object
+                .as_any()
+                .downcast_ref::<FileObject>()
+                .expect("FileObject");
+            run_regular_file_io_transaction(
+                &state_wk,
+                &ctx_wk,
+                req_id,
+                file_obj,
+                buffer,
+                pos_ticket,
+                params,
+            )
+            .await
+        });
+        drop(entry);
+
+        let code = match res {
+            Ok(done) => done as i32,
+            Err(err) => -err.code(),
+        };
+        state_wk.complete_request(req_id, code, 0, true);
+    });
+}
+
+async fn transfer_seekable_special_buf(
+    file_obj: &FileObject,
+    buffer: &mut PreparedRwBuffer,
+    is_write: bool,
+    opt_offset: Option<u64>,
+    limit: usize,
+) -> LinuxResult<usize> {
+    if is_write {
+        match buffer {
+            PreparedRwBuffer::SingleWindow(win) => {
+                let mut limited = LimitedRead::new(win.as_mut(), limit);
+                match opt_offset {
+                    Some(off) => file_obj.write_at_async(&mut limited, off).await,
+                    None => file_obj.write_async(&mut limited).await,
+                }
+            }
+            PreparedRwBuffer::Fixed(fixed) => {
+                let mut limited = LimitedRead::new(fixed, limit);
+                match opt_offset {
+                    Some(off) => file_obj.write_at_async(&mut limited, off).await,
+                    None => file_obj.write_async(&mut limited).await,
+                }
+            }
+            _ => Err(LinuxError::EINVAL),
+        }
+    } else {
+        match buffer {
+            PreparedRwBuffer::SingleWindow(win) => match opt_offset {
+                Some(off) => file_obj.read_at_async(win.as_mut(), off).await,
+                None => file_obj.read_async(win.as_mut()).await,
+            },
+            PreparedRwBuffer::Fixed(fixed) => match opt_offset {
+                Some(off) => file_obj.read_at_async(fixed, off).await,
+                None => file_obj.read_async(fixed).await,
+            },
+            _ => Err(LinuxError::EINVAL),
+        }
+    }
+}
+
+fn execute_seekable_special_file_rw(
+    state: &Arc<IoUringState>,
+    ctx: &AsyncExecContext,
+    req_id: RequestId,
+    entry: FdEntry,
+    mut buffer: PreparedRwBuffer,
+    params: RwExecParams,
+    force_async: bool,
+) {
+    let nowait = (params.rw_flags & RWF_NOWAIT) != 0;
+    let file_obj = entry
+        .object
+        .as_any()
+        .downcast_ref::<FileObject>()
+        .expect("FileObject");
+    let is_blocking = file_obj.is_blocking_node();
+    if nowait && is_blocking {
+        state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
+        return;
+    }
+
+    if force_async || is_blocking || matches!(buffer, PreparedRwBuffer::MultiWindow { .. }) {
+        let serial_key = params
+            .opt_offset
+            .is_none()
+            .then(|| fd_serial_key(&entry.object));
+        spawn_worker_rw(
+            state,
+            ctx,
+            req_id,
+            entry,
+            params.is_write,
+            buffer,
+            params.opt_offset.unwrap_or(u64::MAX),
+            nowait,
+            serial_key,
+        );
+        return;
+    }
+
+    let Some(guard) = state.try_enter_inflight_owned() else {
+        return;
+    };
+    let state_cloned = Arc::clone(state);
+    let ctx_cloned = ctx.clone();
+    let sync_after = (params.rw_flags & (RWF_DSYNC | RWF_SYNC)) != 0;
+    let data_only = (params.rw_flags & RWF_SYNC) == 0;
+
+    let handle = global_executor().spawn_and_poll_once(async move {
+        let _guard = guard;
+        if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
+            release_fd_entry_async(entry).await;
+            return;
+        }
+        let file_obj = entry
+            .object
+            .as_any()
+            .downcast_ref::<FileObject>()
+            .expect("FileObject");
+        let total_len = buffer.total_len();
+        let fsize_limit = process_fsize_limit(&ctx_cloned);
+
+        let res: LinuxResult<usize> = async {
+            if total_len == 0 {
+                if params.is_write && sync_after {
+                    file_obj.sync_async(data_only).await?;
+                }
+                return Ok(0);
+            }
+            let limit = if params.is_write {
+                if let Some(off) = params.opt_offset {
+                    if off >= fsize_limit {
+                        return Err(LinuxError::EFBIG);
+                    }
+                    (fsize_limit - off).min(total_len as u64) as usize
+                } else {
+                    total_len
+                }
+            } else {
+                total_len
+            };
+            let transferred = transfer_seekable_special_buf(
+                file_obj,
+                &mut buffer,
+                params.is_write,
+                params.opt_offset,
+                limit,
+            )
+            .await?;
+            if transferred == 0 && let Some(err) = buffer.terminal_error() {
+                return Err(err);
+            }
+            if params.is_write && sync_after && transferred > 0 {
+                file_obj.sync_async(data_only).await?;
+            }
+            Ok(transferred)
+        }
+        .await;
+
+        release_fd_entry_async(entry).await;
+        let code = match res {
+            Ok(n) => n as i32,
+            Err(err) => -err.code(),
+        };
+        state_cloned.complete_request(req_id, code, 0, true);
+    });
+
+    state.install_cancel_handle_or_cancel(req_id, handle);
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_worker_rw(
     state: &Arc<IoUringState>,
     ctx: &AsyncExecContext,
@@ -633,69 +1564,117 @@ fn spawn_worker_rw(
     is_write: bool,
     buffer: PreparedRwBuffer,
     offset: u64,
+    nowait: bool,
+    serial_key: Option<u64>,
 ) {
     let Some(guard) = state.try_enter_inflight_owned() else {
         return;
     };
     let state_wk = Arc::clone(state);
     let ctx_wk = ctx.clone();
-    global_worker_pool().submit(state.ring_id(), req_id, move || {
+    global_worker_pool().submit_ordered(state.ring_id(), req_id, serial_key, move || {
         let _guard: OwnedInflightGuard = guard;
         if !state_wk.is_request_active(req_id) {
             return;
         }
-        let res = run_sync_rw(&ctx_wk, &entry.object, is_write, buffer, offset);
+        let res = run_sync_rw(&ctx_wk, &entry.object, is_write, buffer, offset, nowait);
         state_wk.complete_request(req_id, res, 0, true);
     });
 }
 
-enum PipeStep {
+enum StreamStep {
     Done(usize),
     WouldBlock,
 }
 
-fn step_pipe_rw(
-    pipe: &PipeObject,
+fn try_stream_rw_once(
+    thread: Option<&Arc<crate::task::Thread>>,
+    obj: &Arc<dyn FdObject>,
+    is_write: bool,
+    buf: &mut [u8],
+) -> LinuxResult<usize> {
+    if let Some(pipe) = obj.as_any().downcast_ref::<PipeObject>() {
+        return if is_write {
+            pipe.try_write_nonblocking(buf)
+        } else {
+            pipe.try_read_nonblocking(buf)
+        };
+    }
+    if let Some(ev) = obj.as_any().downcast_ref::<EventFdObject>() {
+        return if is_write {
+            ev.try_write_nonblocking(buf)
+        } else {
+            ev.try_read_nonblocking(buf)
+        };
+    }
+    if let Some(stdin) = obj.as_any().downcast_ref::<StdinObject>() {
+        return if is_write {
+            Err(LinuxError::EPERM)
+        } else {
+            stdin.try_read_nonblocking(buf)
+        };
+    }
+    if let Some(sigfd) = obj.as_any().downcast_ref::<SignalFdObject>() {
+        return if is_write {
+            Err(LinuxError::EINVAL)
+        } else {
+            let th = thread.ok_or(LinuxError::EINVAL)?;
+            sigfd.try_read_nonblocking_for_thread(th.as_ref(), buf)
+        };
+    }
+    if let Some(timerfd) = obj.as_any().downcast_ref::<TimerFdObject>() {
+        return if is_write {
+            Err(LinuxError::EINVAL)
+        } else {
+            timerfd.try_read_nonblocking(buf)
+        };
+    }
+    Err(LinuxError::EINVAL)
+}
+
+fn step_stream_rw(
+    thread: Option<&Arc<crate::task::Thread>>,
+    obj: &Arc<dyn FdObject>,
     is_write: bool,
     buffer: &mut PreparedRwBuffer,
     kbuf: &mut [u8],
     staged_off: &mut usize,
     staged_len: &mut usize,
-) -> LinuxResult<PipeStep> {
+) -> LinuxResult<StreamStep> {
     let mut total_done = 0usize;
     if is_write {
         loop {
             if *staged_off == *staged_len {
                 let next = buffer.remaining_bytes().min(kbuf.len());
                 if next == 0 {
-                    return Ok(PipeStep::Done(total_done));
+                    return Ok(StreamStep::Done(total_done));
                 }
                 buffer.copy_from_user_exact(&mut kbuf[..next])?;
                 *staged_off = 0;
                 *staged_len = next;
             }
-            match pipe.try_write_nonblocking(&kbuf[*staged_off..*staged_len]) {
-                Ok(0) => return Ok(PipeStep::Done(total_done)),
+            match try_stream_rw_once(thread, obj, true, &mut kbuf[*staged_off..*staged_len]) {
+                Ok(0) => return Ok(StreamStep::Done(total_done)),
                 Ok(n) => {
                     *staged_off += n;
                     total_done += n;
                     if buffer.remaining_bytes() == 0 && *staged_off == *staged_len {
-                        return Ok(PipeStep::Done(total_done));
+                        return Ok(StreamStep::Done(total_done));
                     }
                     if *staged_off < *staged_len {
-                        return Ok(PipeStep::Done(total_done));
+                        return Ok(StreamStep::Done(total_done));
                     }
                 }
                 Err(LinuxError::EAGAIN) => {
                     return Ok(if total_done > 0 {
-                        PipeStep::Done(total_done)
+                        StreamStep::Done(total_done)
                     } else {
-                        PipeStep::WouldBlock
+                        StreamStep::WouldBlock
                     });
                 }
                 Err(err) => {
                     return if total_done > 0 {
-                        Ok(PipeStep::Done(total_done))
+                        Ok(StreamStep::Done(total_done))
                     } else {
                         Err(err)
                     };
@@ -706,27 +1685,27 @@ fn step_pipe_rw(
         loop {
             let next = buffer.remaining_bytes().min(kbuf.len());
             if next == 0 {
-                return Ok(PipeStep::Done(total_done));
+                return Ok(StreamStep::Done(total_done));
             }
-            match pipe.try_read_nonblocking(&mut kbuf[..next]) {
-                Ok(0) => return Ok(PipeStep::Done(total_done)),
+            match try_stream_rw_once(thread, obj, false, &mut kbuf[..next]) {
+                Ok(0) => return Ok(StreamStep::Done(total_done)),
                 Ok(n) => {
                     buffer.copy_to_user_exact(&kbuf[..n])?;
                     total_done += n;
                     if n < next {
-                        return Ok(PipeStep::Done(total_done));
+                        return Ok(StreamStep::Done(total_done));
                     }
                 }
                 Err(LinuxError::EAGAIN) => {
                     return Ok(if total_done > 0 {
-                        PipeStep::Done(total_done)
+                        StreamStep::Done(total_done)
                     } else {
-                        PipeStep::WouldBlock
+                        StreamStep::WouldBlock
                     });
                 }
                 Err(err) => {
                     return if total_done > 0 {
-                        Ok(PipeStep::Done(total_done))
+                        Ok(StreamStep::Done(total_done))
                     } else {
                         Err(err)
                     };
@@ -736,21 +1715,28 @@ fn step_pipe_rw(
     }
 }
 
-fn execute_pipe_rw(
+fn execute_stream_rw(
     state: &Arc<IoUringState>,
+    ctx: &AsyncExecContext,
     req_id: RequestId,
     entry: FdEntry,
     is_write: bool,
     mut buffer: PreparedRwBuffer,
+    rw_flags: u32,
 ) {
-    let nonblocking_fd = entry.flags.contains(FdFlags::NONBLOCK)
-        || entry.object.nonblocking_state().unwrap_or(false);
     let transfer_len = buffer.total_len();
+    let nowait = (rw_flags & RWF_NOWAIT) != 0;
+
+    if let Err(err) = validate_stream_rw_len(entry.object.as_ref(), is_write, transfer_len) {
+        state.complete_request(req_id, -err.code(), 0, false);
+        return;
+    }
+
     let mut kbuf = vec![0u8; transfer_len.min(RW_CHUNK_CAP)];
     let mut staged_off = 0usize;
     let mut staged_len = 0usize;
 
-    if is_write && transfer_len <= kbuf.len() {
+    if is_write && transfer_len <= kbuf.len() && transfer_len > 0 {
         if let Err(err) = buffer.copy_from_user_exact(&mut kbuf[..transfer_len]) {
             state.complete_request(req_id, -err.code(), 0, false);
             return;
@@ -759,29 +1745,25 @@ fn execute_pipe_rw(
         buffer = PreparedRwBuffer::Empty;
     }
 
-    let pipe = entry
-        .object
-        .as_any()
-        .downcast_ref::<PipeObject>()
-        .expect("PipeObject");
-
-    match step_pipe_rw(
-        pipe,
+    let ctx_thread = ctx.thread.clone();
+    match step_stream_rw(
+        ctx_thread.as_ref(),
+        &entry.object,
         is_write,
         &mut buffer,
         &mut kbuf,
         &mut staged_off,
         &mut staged_len,
     ) {
-        Ok(PipeStep::Done(n)) => {
+        Ok(StreamStep::Done(n)) => {
             state.complete_request(req_id, n as i32, 0, false);
             return;
         }
-        Ok(PipeStep::WouldBlock) if nonblocking_fd => {
+        Ok(StreamStep::WouldBlock) if nowait => {
             state.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, false);
             return;
         }
-        Ok(PipeStep::WouldBlock) => {}
+        Ok(StreamStep::WouldBlock) => {}
         Err(err) => {
             state.complete_request(req_id, -err.code(), 0, false);
             return;
@@ -801,47 +1783,54 @@ fn execute_pipe_rw(
             let _ = guard_slot.take();
             return Poll::Ready(());
         }
-        let pipe = entry
-            .object
-            .as_any()
-            .downcast_ref::<PipeObject>()
-            .expect("PipeObject");
 
-        let (interest, check_ready): (IoEvents, fn(axio::PollState) -> bool) = if is_write {
-            (IoEvents::OUT | IoEvents::ERR | IoEvents::HUP, |p| p.writable)
+        let interest = if is_write {
+            IoEvents::OUT | IoEvents::ERR | IoEvents::HUP
         } else {
-            (IoEvents::IN | IoEvents::RDHUP | IoEvents::ERR | IoEvents::HUP, |p| {
-                p.readable
-            })
+            IoEvents::IN | IoEvents::RDHUP | IoEvents::ERR | IoEvents::HUP
         };
 
+        let mut registered = false;
         loop {
-            match step_pipe_rw(
-                pipe,
+            match step_stream_rw(
+                ctx_thread.as_ref(),
+                &entry.object,
                 is_write,
                 &mut buffer,
                 &mut kbuf,
                 &mut staged_off,
                 &mut staged_len,
             ) {
-                Ok(PipeStep::Done(n)) => {
+                Ok(StreamStep::Done(n)) => {
                     state_cloned.complete_request(req_id, n as i32, 0, true);
                     let _ = guard_slot.take();
                     return Poll::Ready(());
                 }
-                Ok(PipeStep::WouldBlock) => {
-                    if let Err(e) =
+                Ok(StreamStep::WouldBlock) => {
+                    if nowait {
+                        state_cloned.complete_request(req_id, -LinuxError::EAGAIN.code(), 0, true);
+                        let _ = guard_slot.take();
+                        return Poll::Ready(());
+                    }
+                    if registered {
+                        return Poll::Pending;
+                    }
+                    let reg_res = if let Some(ref th) = ctx_thread {
+                        Arc::clone(&entry.object).register_poll_for_thread(
+                            th,
+                            cx,
+                            interest,
+                            &mut registrations,
+                        )
+                    } else {
                         Arc::clone(&entry.object).register_poll(cx, interest, &mut registrations)
-                    {
+                    };
+                    if let Err(e) = reg_res {
                         state_cloned.complete_request(req_id, -e.code(), 0, true);
                         let _ = guard_slot.take();
                         return Poll::Ready(());
                     }
-                    if entry.object.poll().is_ok_and(check_ready) {
-                        registrations.clear();
-                        continue;
-                    }
-                    return Poll::Pending;
+                    registered = true;
                 }
                 Err(err) => {
                     state_cloned.complete_request(req_id, -err.code(), 0, true);
@@ -857,12 +1846,34 @@ fn execute_pipe_rw(
 
 #[inline]
 fn transfer_obj_chunk(
+    thread: Option<&Arc<crate::task::Thread>>,
     obj: &Arc<dyn FdObject>,
     is_write: bool,
     base_offset: u64,
     cur_off: u64,
     buf: &mut [u8],
+    nowait: bool,
 ) -> LinuxResult<usize> {
+    if is_stream_ready_fd(obj.as_ref()) {
+        let wait_event = if is_write {
+            linux_raw_sys::general::POLLOUT as i16
+        } else {
+            linux_raw_sys::general::POLLIN as i16
+        };
+        loop {
+            match try_stream_rw_once(thread, obj, is_write, buf) {
+                Err(LinuxError::EAGAIN) if !nowait => {
+                    if let Some(sigfd) = obj.as_any().downcast_ref::<SignalFdObject>() {
+                        let th = thread.ok_or(LinuxError::EINVAL)?;
+                        let _ = sigfd.wait_ready_for_thread(th, wait_event, None)?;
+                    } else {
+                        let _ = obj.wait_ready(wait_event, None)?;
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
     if is_write {
         if base_offset != u64::MAX {
             match obj.write_at(buf, cur_off) {
@@ -882,7 +1893,9 @@ fn transfer_obj_chunk(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_sync_rw_window(
+    thread: Option<&Arc<crate::task::Thread>>,
     buffer: &mut PreparedRwBuffer,
     obj: &Arc<dyn FdObject>,
     is_write: bool,
@@ -890,6 +1903,7 @@ fn run_sync_rw_window(
     cur_off: &mut u64,
     kbuf: &mut [u8],
     total_done: &mut usize,
+    nowait: bool,
 ) -> LinuxResult<bool> {
     let total = buffer.total_len();
     let mut off_in_stream = 0usize;
@@ -898,7 +1912,15 @@ fn run_sync_rw_window(
         if is_write {
             buffer.copy_from_user_exact(&mut kbuf[..chunk])?;
         }
-        let n = transfer_obj_chunk(obj, is_write, base_offset, *cur_off, &mut kbuf[..chunk])?;
+        let n = transfer_obj_chunk(
+            thread,
+            obj,
+            is_write,
+            base_offset,
+            *cur_off,
+            &mut kbuf[..chunk],
+            nowait,
+        )?;
         if n == 0 {
             return Ok(true);
         }
@@ -932,6 +1954,7 @@ fn run_sync_rw(
     is_write: bool,
     mut buffer: PreparedRwBuffer,
     offset: u64,
+    nowait: bool,
 ) -> i32 {
     let total_len = buffer.total_len();
     if total_len == 0 {
@@ -941,11 +1964,13 @@ fn run_sync_rw(
     let mut cur_off = offset;
     let mut kbuf = vec![0u8; total_len.min(RW_CHUNK_CAP)];
     let mut total_done = 0usize;
+    let thread = ctx.thread.as_ref();
 
     match &buffer {
         PreparedRwBuffer::Empty => 0,
         PreparedRwBuffer::SingleWindow(_) | PreparedRwBuffer::Fixed(_) => {
             match run_sync_rw_window(
+                thread,
                 &mut buffer,
                 obj,
                 is_write,
@@ -953,6 +1978,7 @@ fn run_sync_rw(
                 &mut cur_off,
                 &mut kbuf,
                 &mut total_done,
+                nowait,
             ) {
                 Ok(_) => total_done as i32,
                 Err(err) => rw_progress_or_error(total_done, err),
@@ -976,8 +2002,9 @@ fn run_sync_rw(
                 if window.is_empty() {
                     break;
                 }
-                let mut win_buf = PreparedRwBuffer::SingleWindow(window);
+                let mut win_buf = PreparedRwBuffer::SingleWindow(Box::new(window));
                 match run_sync_rw_window(
+                    thread,
                     &mut win_buf,
                     obj,
                     is_write,
@@ -985,6 +2012,7 @@ fn run_sync_rw(
                     &mut cur_off,
                     &mut kbuf,
                     &mut total_done,
+                    nowait,
                 ) {
                     Ok(true) => break,
                     Ok(false) => {}

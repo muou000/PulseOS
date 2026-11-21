@@ -2,7 +2,7 @@
 
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     format,
     vec::Vec,
 };
@@ -18,6 +18,7 @@ const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct WorkerJob {
     req_id: u64,
+    serial_key: Option<u64>,
     task: Box<dyn FnOnce() + Send + 'static>,
 }
 
@@ -38,6 +39,7 @@ impl RingWorkerQueue {
 struct PoolInner {
     ring_order: VecDeque<u64>,
     rings: BTreeMap<u64, RingWorkerQueue>,
+    in_flight_keys: BTreeSet<u64>,
     active_workers: usize,
     idle_workers: usize,
     queued_jobs: usize,
@@ -49,6 +51,7 @@ impl PoolInner {
         Self {
             ring_order: VecDeque::new(),
             rings: BTreeMap::new(),
+            in_flight_keys: BTreeSet::new(),
             active_workers: 0,
             idle_workers: 0,
             queued_jobs: 0,
@@ -56,10 +59,18 @@ impl PoolInner {
         }
     }
 
+    #[inline]
+    fn job_key_eligible(job: &WorkerJob, in_flight_keys: &BTreeSet<u64>) -> bool {
+        job.serial_key.is_none_or(|k| !in_flight_keys.contains(&k))
+    }
+
     fn has_runnable_job(&self, per_ring_limit: usize) -> bool {
-        self.rings
-            .values()
-            .any(|q| !q.jobs.is_empty() && q.in_flight < per_ring_limit)
+        self.rings.values().any(|q| {
+            q.in_flight < per_ring_limit
+                && q.jobs
+                    .iter()
+                    .any(|job| Self::job_key_eligible(job, &self.in_flight_keys))
+        })
     }
 
     /// Pops the next eligible job using Per-Ring Round-Robin fairness.
@@ -71,10 +82,19 @@ impl PoolInner {
             let mut picked = None;
             if let Some(entry) = self.rings.get_mut(&ring_id) {
                 if !entry.jobs.is_empty() && entry.in_flight < per_ring_limit {
-                    picked = entry.jobs.pop_front();
-                    if picked.is_some() {
-                        entry.in_flight += 1;
-                        self.queued_jobs = self.queued_jobs.saturating_sub(1);
+                    if let Some(idx) = entry
+                        .jobs
+                        .iter()
+                        .position(|job| Self::job_key_eligible(job, &self.in_flight_keys))
+                    {
+                        picked = entry.jobs.remove(idx);
+                        if let Some(ref job) = picked {
+                            entry.in_flight += 1;
+                            self.queued_jobs = self.queued_jobs.saturating_sub(1);
+                            if let Some(key) = job.serial_key {
+                                self.in_flight_keys.insert(key);
+                            }
+                        }
                     }
                 }
                 if entry.jobs.is_empty() && entry.in_flight == 0 {
@@ -135,6 +155,18 @@ impl BoundedWorkerPool {
         req_id: u64,
         job: impl FnOnce() + Send + 'static,
     ) {
+        self.submit_ordered(ring_id, req_id, None, job);
+    }
+
+    /// Submits one Path 3 blocking job with an optional ordering key (`serial_key`).
+    /// At most one in-flight worker executes a given `Some(key)` at a time.
+    pub fn submit_ordered(
+        &'static self,
+        ring_id: u64,
+        req_id: u64,
+        serial_key: Option<u64>,
+        job: impl FnOnce() + Send + 'static,
+    ) {
         let boxed: Box<dyn FnOnce() + Send + 'static> = Box::new(job);
         let (max_workers, _per_ring_limit) = Self::limits();
 
@@ -146,6 +178,7 @@ impl BoundedWorkerPool {
             }
             inner.rings.get_mut(&ring_id).unwrap().jobs.push_back(WorkerJob {
                 req_id,
+                serial_key,
                 task: boxed,
             });
             inner.queued_jobs += 1;
@@ -220,8 +253,11 @@ impl BoundedWorkerPool {
         drop(removed);
     }
 
-    fn finish_ring_job(&self, ring_id: u64) {
+    fn finish_ring_job(&self, ring_id: u64, serial_key: Option<u64>) {
         let mut inner = self.inner.lock();
+        if let Some(key) = serial_key {
+            inner.in_flight_keys.remove(&key);
+        }
         if let Some(entry) = inner.rings.get_mut(&ring_id) {
             entry.in_flight = entry.in_flight.saturating_sub(1);
             if entry.jobs.is_empty() && entry.in_flight == 0 {
@@ -242,8 +278,9 @@ impl BoundedWorkerPool {
             };
 
             if let Some((ring_id, job)) = next {
+                let serial_key = job.serial_key;
                 (job.task)();
-                self.finish_ring_job(ring_id);
+                self.finish_ring_job(ring_id, serial_key);
                 continue;
             }
 

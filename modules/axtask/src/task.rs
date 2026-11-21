@@ -452,8 +452,18 @@ impl TaskInner {
     }
 
     #[inline]
+    pub(crate) fn state_seqcst(&self) -> TaskState {
+        self.state.load(Ordering::SeqCst).into()
+    }
+
+    #[inline]
     pub(crate) fn set_state(&self, state: TaskState) {
         self.state.store(state as u8, Ordering::Release)
+    }
+
+    #[inline]
+    pub(crate) fn set_state_seqcst(&self, state: TaskState) {
+        self.state.store(state as u8, Ordering::SeqCst)
     }
 
     /// Transition the task state from `current_state` to `new_state`,
@@ -491,9 +501,15 @@ impl TaskInner {
         self.is_idle
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn in_wait_queue(&self) -> bool {
         self.in_wait_queue.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn in_wait_queue_seqcst(&self) -> bool {
+        self.in_wait_queue.load(Ordering::SeqCst)
     }
 
     #[inline]
@@ -502,9 +518,14 @@ impl TaskInner {
     }
 
     #[inline]
+    pub(crate) fn set_in_wait_queue_seqcst(&self, in_wait_queue: bool) {
+        self.in_wait_queue.store(in_wait_queue, Ordering::SeqCst);
+    }
+
+    #[inline]
     pub(crate) fn consume_wait_queue_entry(&self) -> bool {
         self.in_wait_queue
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
