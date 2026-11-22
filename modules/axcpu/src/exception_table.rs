@@ -40,16 +40,19 @@ fn exception_addr(offset: &i32) -> usize {
     }
 }
 
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     static _ex_table_start: u8;
     static _ex_table_end: u8;
 }
 
+#[cfg(target_os = "none")]
 #[inline]
 fn exception_table_start() -> usize {
     core::ptr::addr_of!(_ex_table_start) as usize
 }
 
+#[cfg(target_os = "none")]
 #[inline]
 fn exception_table() -> &'static [ExceptionTableEntry] {
     let start = exception_table_start();
@@ -62,6 +65,12 @@ fn exception_table() -> &'static [ExceptionTableEntry] {
             byte_len / core::mem::size_of::<ExceptionTableEntry>(),
         )
     }
+}
+
+#[cfg(not(target_os = "none"))]
+#[inline]
+fn exception_table() -> &'static [ExceptionTableEntry] {
+    &[]
 }
 
 impl TrapFrame {

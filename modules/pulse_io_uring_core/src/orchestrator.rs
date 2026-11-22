@@ -244,6 +244,19 @@ impl RequestOrchestrator {
         self.completion_seq
     }
 
+    /// Returns `true` when no drain barrier or count-based timeout requires tracking
+    /// every completion through the full orchestrator state machine.
+    #[inline]
+    pub fn can_bypass_inline_fast_path(&self) -> bool {
+        !self.drain_next && self.drain_queue.is_empty() && self.count_timeouts.is_empty()
+    }
+
+    /// Advances `completion_seq` after inline fast-path completions bypass `commit_chain`.
+    #[inline]
+    pub fn record_inline_completions(&mut self, count: u64) {
+        self.completion_seq = self.completion_seq.wrapping_add(count);
+    }
+
     #[inline]
     pub fn inflight_len(&self) -> usize {
         self.requests.len()
@@ -1838,5 +1851,67 @@ mod tests {
         assert_eq!(orch.inflight_len(), 0);
         assert!(orch.user_data_index.is_empty());
         assert!(orch.count_timeouts.is_empty());
+    }
+
+    #[test]
+    fn inline_fast_path_gate_respects_drain_and_count_timeouts() {
+        let mut orch = RequestOrchestrator::new();
+        assert!(orch.can_bypass_inline_fast_path());
+
+        orch.record_inline_completions(5);
+        assert_eq!(orch.completion_seq(), 5);
+        assert!(orch.can_bypass_inline_fast_path());
+
+        let (t_id, _) = orch
+            .commit_chain(&mut [PreparedRequest {
+                user_data: 77,
+                sqe_flags: 0,
+                owner_pid: 1,
+                kind: RequestKind::Timeout {
+                    clock: TimeoutClock::Monotonic,
+                    abs: false,
+                    etime_success: false,
+                    target_completions: Some(orch.completion_seq() + 1),
+                    generation: 1,
+                },
+            }])
+            .unwrap();
+        assert!(!orch.can_bypass_inline_fast_path());
+        let _ = orch.async_cancel(None, 77, 0, 0);
+        let _ = orch.finish_completing(t_id, -LinuxError::ECANCELED.code(), 0);
+        assert!(orch.can_bypass_inline_fast_path());
+
+        let read_op = linux_raw_sys::io_uring::io_uring_op::IORING_OP_READ as u8;
+        let (d_id, _) = orch
+            .commit_chain(&mut [PreparedRequest {
+                user_data: 88,
+                sqe_flags: IOSQE_IO_DRAIN,
+                owner_pid: 1,
+                kind: RequestKind::Normal {
+                    opcode: read_op,
+                    fd: Some(3),
+                    expected_min_bytes: Some(4096),
+                },
+            }])
+            .unwrap();
+        assert!(!orch.can_bypass_inline_fast_path());
+        let _ = orch.try_claim_completion(d_id, 4096, 0);
+        // `drain_next` stays armed until one non-drain chain consumes the barrier.
+        assert!(!orch.can_bypass_inline_fast_path());
+        let (n_id, _) = orch
+            .commit_chain(&mut [PreparedRequest {
+                user_data: 89,
+                sqe_flags: 0,
+                owner_pid: 1,
+                kind: RequestKind::Normal {
+                    opcode: read_op,
+                    fd: Some(3),
+                    expected_min_bytes: Some(4096),
+                },
+            }])
+            .unwrap();
+        assert!(orch.can_bypass_inline_fast_path());
+        let _ = orch.try_claim_completion(n_id, 4096, 0);
+        assert!(orch.can_bypass_inline_fast_path());
     }
 }

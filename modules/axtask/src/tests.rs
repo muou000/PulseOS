@@ -9,10 +9,22 @@ use crate::{WaitQueue, api as axtask, current};
 static INIT: Once = Once::new();
 static SERIAL: Mutex<()> = Mutex::new(());
 
+fn init_test_env() {
+    const TEST_POOL_SIZE: usize = 32 * 1024 * 1024;
+    let layout = std::alloc::Layout::from_size_align(TEST_POOL_SIZE, 4096)
+        .expect("valid test pool layout");
+    // SAFETY: non-zero layout; memory is intentionally leaked for the lifetime
+    // of the host test process so `axalloc::GLOBAL_ALLOCATOR` remains valid.
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    assert!(!ptr.is_null(), "failed to allocate host test page pool");
+    axalloc::global_init(ptr as usize, TEST_POOL_SIZE);
+    axtask::init_scheduler();
+}
+
 #[test]
 fn test_sched_fifo() {
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     const NUM_TASKS: usize = 10;
     static FINISHED_TASKS: AtomicUsize = AtomicUsize::new(0);
@@ -38,7 +50,7 @@ fn test_sched_fifo() {
 #[test]
 fn test_fp_state_switch() {
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     const NUM_TASKS: usize = 5;
     const FLOATS: [f64; NUM_TASKS] = [
@@ -69,7 +81,7 @@ fn test_fp_state_switch() {
 #[test]
 fn test_wait_queue() {
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     const NUM_TASKS: usize = 10;
 
@@ -110,7 +122,7 @@ fn test_wait_queue() {
 #[test]
 fn test_task_join() {
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     const NUM_TASKS: usize = 10;
     let mut tasks = Vec::with_capacity(NUM_TASKS);
@@ -136,7 +148,7 @@ fn test_task_join() {
 fn test_async_task() {
     use core::sync::atomic::AtomicU64;
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     static HAS_KERNEL_STACK: AtomicBool = AtomicBool::new(false);
     static TASK_ID_BEFORE_YIELD: AtomicU64 = AtomicU64::new(0);
@@ -182,7 +194,7 @@ fn test_block_on_waker_reuse_quarantines_retained_wakers() {
     use crate::future::AxWaker;
 
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     let task = current().as_task_ref().clone();
     let first = AxWaker::acquire(&task);
@@ -226,7 +238,7 @@ fn test_poll_io_registers_before_recheck() {
     }
 
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     let pollable = RegisterMakesReady {
         ready: AtomicBool::new(false),
@@ -254,7 +266,7 @@ fn test_notify_one_consumes_one_running_waiter() {
     use crate::task::{TaskInner, TaskState};
 
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     let first = TaskInner::new_init("running-waiter-1".into()).into_arc();
     let second = TaskInner::new_init("running-waiter-2".into()).into_arc();
@@ -291,7 +303,7 @@ fn test_wait_queue_is_not_empty_with_registered_waker() {
     }
 
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     let queue = WaitQueue::new();
     let wake = Arc::new(CountWake(AtomicUsize::new(0)));
@@ -321,7 +333,7 @@ fn test_wait_future_refreshes_and_cancels_waker() {
     }
 
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     let queue = WaitQueue::new();
     let first = Arc::new(CountWake(AtomicUsize::new(0)));
@@ -390,7 +402,7 @@ fn test_kernel_executor_inline_and_dedup_wake() {
     }
 
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     let exec = KernelExecutor::with_background_drivers(false);
 
@@ -451,7 +463,7 @@ fn test_kernel_executor_wake_during_poll_and_cancel_safety() {
     use crate::future::{CancelHandle, KernelExecutor};
 
     let _lock = SERIAL.lock();
-    INIT.call_once(axtask::init_scheduler);
+    INIT.call_once(init_test_env);
 
     let exec = Arc::new(KernelExecutor::with_background_drivers(false));
 

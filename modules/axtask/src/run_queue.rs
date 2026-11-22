@@ -1628,15 +1628,29 @@ fn gc_entry() {
         // use `current_ref_raw` to get the `WAIT_FOR_EXIT`'s reference here to avoid the use of `NoPreemptGuard`.
         // Since gc task is pinned to the current CPU, there is no affection if the gc task is preempted during the process.
         let wait_queue = unsafe { WAIT_FOR_EXIT.current_ref_raw() };
-        let period = core::time::Duration::from_millis(100);
-        let context = WaitContext::new(|| {
-            (
-                WaitReason::Gc,
-                wait_queue as *const WaitQueue as usize as u64,
-                period.as_nanos() as u64,
-            )
-        });
-        let _ = wait_queue.wait_timeout_with_context(context, period);
+        #[cfg(feature = "irq")]
+        {
+            let period = core::time::Duration::from_millis(100);
+            let context = WaitContext::new(|| {
+                (
+                    WaitReason::Gc,
+                    wait_queue as *const WaitQueue as usize as u64,
+                    period.as_nanos() as u64,
+                )
+            });
+            let _ = wait_queue.wait_timeout_with_context(context, period);
+        }
+        #[cfg(not(feature = "irq"))]
+        {
+            let context = WaitContext::new(|| {
+                (
+                    WaitReason::Gc,
+                    wait_queue as *const WaitQueue as usize as u64,
+                    0,
+                )
+            });
+            wait_queue.wait_with_context(context);
+        }
     }
 }
 

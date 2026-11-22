@@ -69,6 +69,16 @@ impl TrapFrame {
     pub const fn is_user(&self) -> bool {
         self.cs & 0b11 == 3
     }
+
+    /// Gets the instruction pointer (`rip`).
+    pub const fn ip(&self) -> usize {
+        self.rip as usize
+    }
+
+    /// Sets the instruction pointer (`rip`).
+    pub fn set_ip(&mut self, new_ip: usize) {
+        self.rip = new_ip as u64;
+    }
 }
 
 #[repr(C)]
@@ -195,8 +205,10 @@ impl TaskContext {
             kstack_top: va!(0),
             rsp: 0,
             fs_base: 0,
-            #[cfg(feature = "uspace")]
+            #[cfg(all(feature = "uspace", target_os = "none"))]
             cr3: crate::asm::read_kernel_page_table(),
+            #[cfg(all(feature = "uspace", not(target_os = "none")))]
+            cr3: pa!(0),
             #[cfg(feature = "fp-simd")]
             ext_state: ExtendedState::default(),
             #[cfg(feature = "uspace")]
@@ -245,12 +257,12 @@ impl TaskContext {
             self.ext_state.save();
             next_ctx.ext_state.restore();
         }
-        #[cfg(any(feature = "tls", feature = "uspace"))]
+        #[cfg(all(any(feature = "tls", feature = "uspace"), target_os = "none"))]
         unsafe {
             self.fs_base = crate::asm::read_thread_pointer();
             crate::asm::write_thread_pointer(next_ctx.fs_base);
         }
-        #[cfg(feature = "uspace")]
+        #[cfg(all(feature = "uspace", target_os = "none"))]
         unsafe {
             // Switch gs base for user space.
             self.gs_base = x86::msr::rdmsr(x86::msr::IA32_KERNEL_GSBASE) as usize;
