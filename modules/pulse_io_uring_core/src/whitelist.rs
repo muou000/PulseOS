@@ -2,6 +2,7 @@
 
 use axerrno::LinuxError;
 use linux_raw_sys::io_uring::{io_uring_op, io_uring_probe, io_uring_probe_op};
+use linux_raw_sys::net::{MSG_DONTWAIT, MSG_ERRQUEUE, MSG_NOSIGNAL, MSG_PEEK, MSG_WAITALL};
 use pulse_user_abi::io_uring::{
     IORING_ASYNC_CANCEL_ALL, IORING_ASYNC_CANCEL_ANY, IORING_ASYNC_CANCEL_FD,
     IORING_ASYNC_CANCEL_FD_FIXED, IORING_FSYNC_DATASYNC, IORING_TIMEOUT_ABS,
@@ -398,6 +399,157 @@ pub fn validate_files_update_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
     Ok(())
 }
 
+const ALLOWED_MSG_FLAGS: u32 =
+    MSG_PEEK | MSG_DONTWAIT | MSG_WAITALL | MSG_NOSIGNAL | MSG_ERRQUEUE;
+
+/// Validates an `IORING_OP_POLL_ADD` SQE (one-shot only in PulseOS v1).
+pub fn validate_poll_add_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_POLL_ADD as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    // Reject `IORING_POLL_ADD_MULTI`, `IORING_POLL_UPDATE_*`, and non-zero `len`/`addr`/`off`.
+    if sqe.buf_index != 0 || sqe.addr != 0 || sqe.off != 0 || sqe.len != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_POLL_REMOVE` SQE.
+pub fn validate_poll_remove_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_POLL_REMOVE as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.flags & IOSQE_FIXED_FILE != 0 {
+        return Err(LinuxError::EBADF);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.fd != -1 || sqe.buf_index != 0 || sqe.off != 0 || sqe.len != 0 || sqe.op_flags != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_SOCKET` SQE.
+pub fn validate_socket_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_SOCKET as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.flags & IOSQE_FIXED_FILE != 0 {
+        return Err(LinuxError::EBADF);
+    }
+    validate_common_zero_fields(sqe)?;
+    if u32::try_from(sqe.off).is_err() || sqe.buf_index != 0 || sqe.addr != 0 || sqe.op_flags != 0
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_ACCEPT` SQE.
+pub fn validate_accept_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_ACCEPT as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.buf_index != 0 || sqe.len != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    let allowed = linux_raw_sys::general::O_NONBLOCK | linux_raw_sys::general::O_CLOEXEC;
+    if sqe.op_flags & !allowed != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_CONNECT` SQE.
+pub fn validate_connect_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_CONNECT as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.buf_index != 0 || sqe.len != 0 || sqe.op_flags != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_SEND` or `IORING_OP_RECV` SQE.
+///
+/// For `SEND` with a non-zero destination address (`off != 0`), returns `Ok(Some((addr, addr_len)))`.
+pub fn validate_send_recv_sqe(sqe: &IoUringSqe) -> Result<Option<(u64, u32)>, LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.ioprio != 0 || sqe.personality != 0 || sqe.buf_index != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.op_flags & !ALLOWED_MSG_FLAGS != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.opcode == io_uring_op::IORING_OP_SEND as u8 {
+        // In Linux UAPI `io_uring_sqe`, `addr_len` (`u16`) + `__pad3` (`u16`) share bytes 44..48
+        // with `splice_fd_in` (`u32`).
+        let addr_len = (sqe.splice_fd_in & 0xffff) as u16;
+        let pad3 = (sqe.splice_fd_in >> 16) as u16;
+        if pad3 != 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        if sqe.off != 0 {
+            if addr_len == 0 {
+                return Err(LinuxError::EINVAL);
+            }
+            Ok(Some((sqe.off, u32::from(addr_len))))
+        } else {
+            if addr_len != 0 {
+                return Err(LinuxError::EINVAL);
+            }
+            Ok(None)
+        }
+    } else if sqe.opcode == io_uring_op::IORING_OP_RECV as u8 {
+        if sqe.off != 0 || sqe.splice_fd_in != 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        Ok(None)
+    } else {
+        Err(LinuxError::EINVAL)
+    }
+}
+
+/// Validates an `IORING_OP_SENDMSG` or `IORING_OP_RECVMSG` SQE.
+pub fn validate_sendmsg_recvmsg_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_SENDMSG as u8
+        && sqe.opcode != io_uring_op::IORING_OP_RECVMSG as u8
+    {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.buf_index != 0 || sqe.off != 0 || sqe.len > 1 {
+        return Err(LinuxError::EINVAL);
+    }
+    if sqe.op_flags & !ALLOWED_MSG_FLAGS != 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
+/// Validates an `IORING_OP_SHUTDOWN` SQE.
+pub fn validate_shutdown_sqe(sqe: &IoUringSqe) -> Result<(), LinuxError> {
+    validate_sqe_v1(sqe)?;
+    if sqe.opcode != io_uring_op::IORING_OP_SHUTDOWN as u8 {
+        return Err(LinuxError::EINVAL);
+    }
+    validate_common_zero_fields(sqe)?;
+    if sqe.buf_index != 0 || sqe.addr != 0 || sqe.off != 0 || sqe.op_flags != 0 || sqe.len > 2 {
+        return Err(LinuxError::EINVAL);
+    }
+    Ok(())
+}
+
 pub fn populate_probe(
     header: &mut io_uring_probe,
     nr_args: u32,
@@ -756,5 +908,141 @@ mod tests {
         sfr.op_flags = 0;
         sfr.off = (i64::MAX as u64) + 1;
         assert_eq!(validate_sync_file_range_sqe(&sfr), Err(LinuxError::EINVAL));
+    }
+
+    #[test]
+    fn poll_add_and_remove_validators() {
+        let mut add = empty_sqe(io_uring_op::IORING_OP_POLL_ADD as u8);
+        add.fd = 3;
+        add.op_flags = 0x0001;
+        assert_eq!(validate_poll_add_sqe(&add), Ok(()));
+
+        add.flags = IOSQE_FIXED_FILE;
+        assert_eq!(validate_poll_add_sqe(&add), Ok(()));
+
+        let mut add_buf_sel = empty_sqe(io_uring_op::IORING_OP_POLL_ADD as u8);
+        add_buf_sel.flags = 1 << 5; // IOSQE_BUFFER_SELECT
+        assert_eq!(validate_poll_add_sqe(&add_buf_sel), Err(LinuxError::EOPNOTSUPP));
+
+        let mut add_multi = empty_sqe(io_uring_op::IORING_OP_POLL_ADD as u8);
+        add_multi.len = 1; // IORING_POLL_ADD_MULTI
+        assert_eq!(validate_poll_add_sqe(&add_multi), Err(LinuxError::EINVAL));
+
+        let mut add_update = empty_sqe(io_uring_op::IORING_OP_POLL_ADD as u8);
+        add_update.len = 1 << 1; // IORING_POLL_UPDATE_EVENTS
+        assert_eq!(validate_poll_add_sqe(&add_update), Err(LinuxError::EINVAL));
+
+        let mut rem = empty_sqe(io_uring_op::IORING_OP_POLL_REMOVE as u8);
+        rem.fd = -1;
+        rem.addr = 0x1234;
+        assert_eq!(validate_poll_remove_sqe(&rem), Ok(()));
+
+        rem.flags = IOSQE_FIXED_FILE;
+        assert_eq!(validate_poll_remove_sqe(&rem), Err(LinuxError::EBADF));
+
+        let mut rem_bad = empty_sqe(io_uring_op::IORING_OP_POLL_REMOVE as u8);
+        rem_bad.fd = -1;
+        rem_bad.len = 1;
+        assert_eq!(validate_poll_remove_sqe(&rem_bad), Err(LinuxError::EINVAL));
+
+        let mut rem_bad_fd = empty_sqe(io_uring_op::IORING_OP_POLL_REMOVE as u8);
+        rem_bad_fd.fd = 0;
+        rem_bad_fd.addr = 0x1234;
+        assert_eq!(validate_poll_remove_sqe(&rem_bad_fd), Err(LinuxError::EINVAL));
+    }
+
+    #[test]
+    fn socket_accept_connect_shutdown_validators() {
+        let mut sock = empty_sqe(io_uring_op::IORING_OP_SOCKET as u8);
+        sock.fd = 2; // AF_INET
+        sock.off = 1; // SOCK_STREAM
+        assert_eq!(validate_socket_sqe(&sock), Ok(()));
+        sock.off = 1u64 << 32; // upper 32 bits non-zero
+        assert_eq!(validate_socket_sqe(&sock), Err(LinuxError::EINVAL));
+        sock.off = 1;
+        sock.flags = IOSQE_FIXED_FILE;
+        assert_eq!(validate_socket_sqe(&sock), Err(LinuxError::EBADF));
+        let mut sock_bad_flags = empty_sqe(io_uring_op::IORING_OP_SOCKET as u8);
+        sock_bad_flags.op_flags = 1;
+        assert_eq!(validate_socket_sqe(&sock_bad_flags), Err(LinuxError::EINVAL));
+
+        let mut acc = empty_sqe(io_uring_op::IORING_OP_ACCEPT as u8);
+        acc.fd = 4;
+        acc.flags = IOSQE_FIXED_FILE;
+        acc.op_flags = linux_raw_sys::general::O_NONBLOCK | linux_raw_sys::general::O_CLOEXEC;
+        assert_eq!(validate_accept_sqe(&acc), Ok(()));
+        acc.op_flags = 0x1; // unsupported flag
+        assert_eq!(validate_accept_sqe(&acc), Err(LinuxError::EINVAL));
+
+        let mut conn = empty_sqe(io_uring_op::IORING_OP_CONNECT as u8);
+        conn.addr = 0x1000;
+        conn.off = 16;
+        assert_eq!(validate_connect_sqe(&conn), Ok(()));
+        conn.op_flags = 1;
+        assert_eq!(validate_connect_sqe(&conn), Err(LinuxError::EINVAL));
+
+        let mut shut = empty_sqe(io_uring_op::IORING_OP_SHUTDOWN as u8);
+        shut.len = 2;
+        assert_eq!(validate_shutdown_sqe(&shut), Ok(()));
+        shut.len = 3;
+        assert_eq!(validate_shutdown_sqe(&shut), Err(LinuxError::EINVAL));
+    }
+
+    #[test]
+    fn send_recv_and_msghdr_validators() {
+        let mut send = empty_sqe(io_uring_op::IORING_OP_SEND as u8);
+        send.addr = 0x2000;
+        send.len = 64;
+        assert_eq!(validate_send_recv_sqe(&send), Ok(None));
+
+        send.off = 0x3000;
+        assert_eq!(validate_send_recv_sqe(&send), Err(LinuxError::EINVAL));
+
+        send.splice_fd_in = 16; // addr_len = 16, pad3 = 0
+        assert_eq!(validate_send_recv_sqe(&send), Ok(Some((0x3000, 16))));
+
+        send.splice_fd_in = (1 << 16) | 16; // non-zero pad3
+        assert_eq!(validate_send_recv_sqe(&send), Err(LinuxError::EINVAL));
+
+        let mut send_addr_len_no_off = empty_sqe(io_uring_op::IORING_OP_SEND as u8);
+        send_addr_len_no_off.splice_fd_in = 16;
+        assert_eq!(validate_send_recv_sqe(&send_addr_len_no_off), Err(LinuxError::EINVAL));
+
+        let mut send_bad_ioprio = empty_sqe(io_uring_op::IORING_OP_SEND as u8);
+        send_bad_ioprio.ioprio = 1;
+        assert_eq!(validate_send_recv_sqe(&send_bad_ioprio), Err(LinuxError::EINVAL));
+
+        let mut send_bad_flags = empty_sqe(io_uring_op::IORING_OP_SEND as u8);
+        send_bad_flags.op_flags = 1 << 31;
+        assert_eq!(validate_send_recv_sqe(&send_bad_flags), Err(LinuxError::EINVAL));
+
+        let mut send_oob = empty_sqe(io_uring_op::IORING_OP_SEND as u8);
+        send_oob.op_flags = linux_raw_sys::net::MSG_OOB;
+        assert_eq!(validate_send_recv_sqe(&send_oob), Err(LinuxError::EINVAL));
+
+        let mut recv_trunc = empty_sqe(io_uring_op::IORING_OP_RECV as u8);
+        recv_trunc.op_flags = linux_raw_sys::net::MSG_TRUNC;
+        assert_eq!(validate_send_recv_sqe(&recv_trunc), Err(LinuxError::EINVAL));
+
+        let mut recv = empty_sqe(io_uring_op::IORING_OP_RECV as u8);
+        recv.addr = 0x2000;
+        recv.len = 64;
+        recv.flags = 1 << 5; // IOSQE_BUFFER_SELECT
+        assert_eq!(validate_send_recv_sqe(&recv), Err(LinuxError::EOPNOTSUPP));
+
+        let mut sendmsg = empty_sqe(io_uring_op::IORING_OP_SENDMSG as u8);
+        sendmsg.addr = 0x4000;
+        sendmsg.len = 0; // io_uring02 passes 0
+        assert_eq!(validate_sendmsg_recvmsg_sqe(&sendmsg), Ok(()));
+        sendmsg.len = 1; // liburing passes 1
+        assert_eq!(validate_sendmsg_recvmsg_sqe(&sendmsg), Ok(()));
+        sendmsg.len = 2;
+        assert_eq!(validate_sendmsg_recvmsg_sqe(&sendmsg), Err(LinuxError::EINVAL));
+
+        let mut recvmsg = empty_sqe(io_uring_op::IORING_OP_RECVMSG as u8);
+        recvmsg.addr = 0x4000;
+        recvmsg.len = 1;
+        recvmsg.flags = IOSQE_FIXED_FILE;
+        assert_eq!(validate_sendmsg_recvmsg_sqe(&recvmsg), Ok(()));
     }
 }

@@ -1,13 +1,21 @@
 use alloc::sync::Arc;
-use core::{any::Any, net::SocketAddr};
+use core::{
+    any::Any,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
-use axerrno::LinuxError;
+use axerrno::{LinuxError, LinuxResult};
 use axio::PollState;
 use axnet::{IcmpSocket, TcpSocket, UdpSocket};
-use linux_raw_sys::general::{S_IFSOCK, stat};
+use axpoll::IoEvents;
+use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK, S_IFSOCK, stat};
 use linux_raw_sys::ioctl::{SIOCATMARK, SIOCGIFCONF};
+use linux_raw_sys::net::{
+    AF_INET, AF_INET6, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP, MSG_ERRQUEUE, MSG_OOB, MSG_PEEK,
+    SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM,
+};
 use crate::fd_table::{FdObject, PollRegistration};
 
 const RING_BUFFER_SIZE: usize = 65536;
@@ -30,7 +38,212 @@ fn ipv4_broadcast(address: [u8; 4], prefix_len: u8) -> [u8; 4] {
     core::array::from_fn(|index| address[index] | !mask[index])
 }
 
-pub static UNIX_REGISTRY: spin::Mutex<alloc::collections::BTreeMap<alloc::string::String, (core::net::SocketAddr, alloc::sync::Weak<Socket>)>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnixSocketKey {
+    Abstract(alloc::string::String),
+    Pathname { fs_id: u64, inode: u64 },
+}
+
+pub struct UnixRegistryEntry {
+    pub addr: core::net::SocketAddr,
+    pub path: alloc::string::String,
+    pub socket: alloc::sync::Weak<Socket>,
+}
+
+pub static UNIX_REGISTRY: spin::Mutex<
+    alloc::collections::BTreeMap<UnixSocketKey, UnixRegistryEntry>,
+> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Derives `(filesystem_id, inode)` for a resolved VFS [`axfs_ng_vfs::Location`].
+#[inline]
+pub fn vfs_node_key(loc: &axfs_ng_vfs::Location) -> (u64, u64) {
+    let fs_id =
+        loc.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const () as usize as u64;
+    (fs_id, loc.inode())
+}
+
+#[inline]
+fn is_abstract_unix_path(path: &str) -> bool {
+    path.is_empty() || path.starts_with('\0')
+}
+
+/// Resolves an `AF_UNIX` path through an explicit `FsContext` (honoring `chroot` root),
+/// returning `UnixSocketKey::Abstract` for abstract names and `UnixSocketKey::Pathname`
+/// for VFS-backed pathname sockets (or `-ENOENT` when missing or outside `chroot`).
+pub async fn resolve_unix_path_async(
+    fs: &axfs::FsContext,
+    path: &str,
+) -> LinuxResult<UnixSocketKey> {
+    if is_abstract_unix_path(path) {
+        return Ok(UnixSocketKey::Abstract(alloc::string::String::from(path)));
+    }
+    let loc = fs
+        .resolve(axfs_ng_vfs::path::Path::new(path))
+        .await
+        .map_err(|e| LinuxError::from(e.canonicalize()))?;
+    let (fs_id, inode) = vfs_node_key(&loc);
+    Ok(UnixSocketKey::Pathname { fs_id, inode })
+}
+
+/// Synchronous wrapper around [`resolve_unix_path_async`].
+pub fn resolve_unix_path_sync(fs: &axfs::FsContext, path: &str) -> LinuxResult<UnixSocketKey> {
+    axtask::future::block_on(resolve_unix_path_async(fs, path))
+}
+
+/// Pre-checks whether binding an `AF_UNIX` socket to `path` within `fs` can succeed
+/// before allocating an underlying loopback endpoint.
+pub fn check_unix_bind_available(fs: &axfs::FsContext, path: &str) -> LinuxResult {
+    if is_abstract_unix_path(path) {
+        let key = UnixSocketKey::Abstract(alloc::string::String::from(path));
+        let mut registry = UNIX_REGISTRY.lock();
+        if let Some(entry) = registry.get(&key) {
+            if entry.socket.upgrade().is_some() {
+                return Err(LinuxError::EADDRINUSE);
+            }
+            registry.remove(&key);
+        }
+        return Ok(());
+    }
+
+    axtask::future::block_on(async {
+        let vfs_path = axfs_ng_vfs::path::Path::new(path);
+        fs.resolve_parent(vfs_path)
+            .await
+            .map_err(|e| LinuxError::from(e.canonicalize()))?;
+        if fs.resolve(vfs_path).await.is_ok() {
+            return Err(LinuxError::EADDRINUSE);
+        }
+        Ok(())
+    })
+}
+
+/// Binds a pathname (inside `fs`) or abstract `AF_UNIX` socket and records it in [`UNIX_REGISTRY`].
+pub fn bind_unix_socket_with_fs(
+    fs: &axfs::FsContext,
+    path: &str,
+    addr: SocketAddr,
+    sock: &Arc<Socket>,
+) -> LinuxResult<UnixSocketKey> {
+    let key = if is_abstract_unix_path(path) {
+        UnixSocketKey::Abstract(alloc::string::String::from(path))
+    } else {
+        axtask::future::block_on(async {
+            let vfs_path = axfs_ng_vfs::path::Path::new(path);
+            if fs.resolve(vfs_path).await.is_ok() {
+                return Err(LinuxError::EADDRINUSE);
+            }
+            fs.write(vfs_path, [])
+                .await
+                .map_err(|e| LinuxError::from(e.canonicalize()))?;
+            let loc = fs
+                .resolve(vfs_path)
+                .await
+                .map_err(|e| LinuxError::from(e.canonicalize()))?;
+            let (fs_id, inode) = vfs_node_key(&loc);
+            Ok(UnixSocketKey::Pathname { fs_id, inode })
+        })?
+    };
+
+    let mut registry = UNIX_REGISTRY.lock();
+    if let Some(entry) = registry.get(&key) {
+        if entry.socket.upgrade().is_some() {
+            return Err(LinuxError::EADDRINUSE);
+        }
+        registry.remove(&key);
+    }
+    registry.insert(
+        key.clone(),
+        UnixRegistryEntry {
+            addr,
+            path: alloc::string::String::from(path),
+            socket: Arc::downgrade(sock),
+        },
+    );
+    Ok(key)
+}
+
+/// Looks up an active bound `AF_UNIX` socket by its [`UnixSocketKey`].
+pub fn lookup_unix_socket_by_key(key: &UnixSocketKey) -> LinuxResult<(SocketAddr, Arc<Socket>)> {
+    let mut registry = UNIX_REGISTRY.lock();
+    match registry.get(key) {
+        Some(entry) => {
+            if let Some(sock) = entry.socket.upgrade() {
+                Ok((entry.addr, sock))
+            } else {
+                registry.remove(key);
+                Err(LinuxError::ECONNREFUSED)
+            }
+        }
+        None => Err(LinuxError::ECONNREFUSED),
+    }
+}
+
+/// Looks up the bound path string for an `AF_UNIX` socket object.
+pub fn lookup_unix_path_by_socket(sock: &Socket) -> Option<alloc::string::String> {
+    let registry = UNIX_REGISTRY.lock();
+    let target_ptr = sock as *const Socket;
+    registry.values().find_map(|entry| {
+        entry
+            .socket
+            .upgrade()
+            .filter(|s| core::ptr::eq(Arc::as_ptr(s), target_ptr))
+            .map(|_| entry.path.clone())
+    })
+}
+
+/// Looks up the bound path string for an `AF_UNIX` loopback address.
+pub fn lookup_unix_path_by_addr(addr: SocketAddr) -> Option<alloc::string::String> {
+    let registry = UNIX_REGISTRY.lock();
+    registry.values().find_map(|entry| {
+        (entry.addr == addr && entry.socket.upgrade().is_some()).then(|| entry.path.clone())
+    })
+}
+
+/// Normalizes unspecified and IPv4-mapped connect addresses (`0.0.0.0`/`::ffff:0.0.0.0` -> `127.0.0.1`,
+/// `::ffff:a.b.c.d` -> `a.b.c.d`, `::` -> `::1`).
+pub fn normalize_connect_addr(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, v4.port()))
+        }
+        SocketAddr::V6(v6) => {
+            if let Some(mapped_v4) = v6.ip().to_ipv4_mapped() {
+                let ip = if mapped_v4.is_unspecified() {
+                    Ipv4Addr::LOCALHOST
+                } else {
+                    mapped_v4
+                };
+                SocketAddr::V4(SocketAddrV4::new(ip, v6.port()))
+            } else if v6.ip().is_unspecified() {
+                SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    v6.port(),
+                    v6.flowinfo(),
+                    v6.scope_id(),
+                ))
+            } else {
+                SocketAddr::V6(v6)
+            }
+        }
+        other => other,
+    }
+}
+
+/// Adapts an internal socket address to the userspace socket address family of `domain`
+/// (e.g., presenting IPv4 addresses on `AF_INET6` sockets as `::` or IPv4-mapped `::ffff:x.x.x.x`).
+pub fn adapt_sockaddr_for_domain(domain: u32, addr: SocketAddr) -> SocketAddr {
+    if domain == AF_INET6 {
+        if let SocketAddr::V4(v4) = addr {
+            let ip6 = if v4.ip().is_unspecified() {
+                Ipv6Addr::UNSPECIFIED
+            } else {
+                v4.ip().to_ipv6_mapped()
+            };
+            return SocketAddr::V6(SocketAddrV6::new(ip6, v4.port(), 0, 0));
+        }
+    }
+    addr
+}
 
 pub struct LocalSocketRingBuffer {
     arr: [u8; RING_BUFFER_SIZE],
@@ -106,12 +319,29 @@ impl LocalSocketRingBuffer {
         }
         to_read
     }
+
+    fn peek(&self, buf: &mut [u8]) -> usize {
+        let avail = self.available_read();
+        let to_read = core::cmp::min(buf.len(), avail);
+        if to_read == 0 {
+            return 0;
+        }
+        let chunk1 = core::cmp::min(to_read, RING_BUFFER_SIZE - self.head);
+        buf[..chunk1].copy_from_slice(&self.arr[self.head..self.head + chunk1]);
+        if chunk1 < to_read {
+            let chunk2 = to_read - chunk1;
+            buf[chunk1..to_read].copy_from_slice(&self.arr[..chunk2]);
+        }
+        to_read
+    }
 }
 
 pub struct LocalSocketBuffer {
     pub buffer: axsync::Mutex<LocalSocketRingBuffer>,
     pub read_wait_queue: axtask::WaitQueue,
     pub write_wait_queue: axtask::WaitQueue,
+    pub write_closed: AtomicBool,
+    pub read_closed: AtomicBool,
 }
 
 impl LocalSocketBuffer {
@@ -120,6 +350,8 @@ impl LocalSocketBuffer {
             buffer: axsync::Mutex::new(LocalSocketRingBuffer::new()),
             read_wait_queue: axtask::WaitQueue::new(),
             write_wait_queue: axtask::WaitQueue::new(),
+            write_closed: AtomicBool::new(false),
+            read_closed: AtomicBool::new(false),
         }
     }
 
@@ -171,6 +403,71 @@ impl LocalSocket {
             .unwrap_or(false)
     }
 
+    pub fn try_read(&self, buf: &mut [u8], peek: bool) -> Result<usize, LinuxError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut ring = self.rx.lock_buffer();
+        let n = if peek { ring.peek(buf) } else { ring.read(buf) };
+        if n > 0 {
+            drop(ring);
+            if !peek {
+                self.rx.write_wait_queue.notify_all(true);
+            }
+            return Ok(n);
+        }
+        if self.peer_closed.load(Ordering::Acquire) || self.rx.write_closed.load(Ordering::Acquire)
+        {
+            return Ok(0);
+        }
+        Err(LinuxError::EAGAIN)
+    }
+
+    pub fn try_write(&self, buf: &[u8]) -> Result<usize, LinuxError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.peer_closed.load(Ordering::Acquire) || self.tx.read_closed.load(Ordering::Acquire) {
+            return Err(LinuxError::EPIPE);
+        }
+        let mut ring = self.tx.lock_buffer();
+        let n = ring.write(buf);
+        drop(ring);
+        if n > 0 {
+            self.tx.read_wait_queue.notify_all(true);
+            Ok(n)
+        } else {
+            Err(LinuxError::EAGAIN)
+        }
+    }
+
+    pub fn shutdown_how(&self, how: u32) -> Result<(), LinuxError> {
+        match how {
+            SHUT_RD => {
+                self.rx.read_closed.store(true, Ordering::Release);
+                self.rx.read_wait_queue.notify_all(true);
+                self.rx.write_wait_queue.notify_all(true);
+                Ok(())
+            }
+            SHUT_WR => {
+                self.tx.write_closed.store(true, Ordering::Release);
+                self.tx.read_wait_queue.notify_all(true);
+                self.tx.write_wait_queue.notify_all(true);
+                Ok(())
+            }
+            SHUT_RDWR => {
+                self.rx.read_closed.store(true, Ordering::Release);
+                self.tx.write_closed.store(true, Ordering::Release);
+                self.rx.read_wait_queue.notify_all(true);
+                self.rx.write_wait_queue.notify_all(true);
+                self.tx.read_wait_queue.notify_all(true);
+                self.tx.write_wait_queue.notify_all(true);
+                Ok(())
+            }
+            _ => Err(LinuxError::EINVAL),
+        }
+    }
+
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, LinuxError> {
         if buf.is_empty() {
             return Ok(0);
@@ -184,7 +481,9 @@ impl LocalSocket {
                 drop(ring);
                 continue;
             }
-            if self.peer_closed.load(Ordering::Acquire) {
+            if self.peer_closed.load(Ordering::Acquire)
+                || self.rx.write_closed.load(Ordering::Acquire)
+            {
                 break;
             }
             if read_size > 0 {
@@ -199,6 +498,7 @@ impl LocalSocket {
                 self.rx.buffer.try_lock().map_or(true, |ring| {
                     ring.available_read() > 0
                         || self.peer_closed.load(Ordering::Acquire)
+                        || self.rx.write_closed.load(Ordering::Acquire)
                         || self.current_has_pending_signal()
                 })
             });
@@ -210,9 +510,9 @@ impl LocalSocket {
             }
         }
         if read_size > 0 {
-            self.rx.write_wait_queue.notify_one(true);
+            self.rx.write_wait_queue.notify_all(true);
             if self.rx.lock_buffer().available_read() > 0 {
-                self.rx.read_wait_queue.notify_one(false);
+                self.rx.read_wait_queue.notify_all(false);
             }
         }
         Ok(read_size)
@@ -224,7 +524,9 @@ impl LocalSocket {
         }
         let mut write_size = 0usize;
         while write_size < buf.len() {
-            if self.peer_closed.load(Ordering::Acquire) {
+            if self.peer_closed.load(Ordering::Acquire)
+                || self.tx.read_closed.load(Ordering::Acquire)
+            {
                 if write_size > 0 {
                     break;
                 }
@@ -249,6 +551,7 @@ impl LocalSocket {
                 self.tx.buffer.try_lock().map_or(true, |ring| {
                     ring.available_write() > 0
                         || self.peer_closed.load(Ordering::Acquire)
+                        || self.tx.read_closed.load(Ordering::Acquire)
                         || self.current_has_pending_signal()
                 })
             });
@@ -260,9 +563,9 @@ impl LocalSocket {
             }
         }
         if write_size > 0 {
-            self.tx.read_wait_queue.notify_one(true);
+            self.tx.read_wait_queue.notify_all(true);
             if self.tx.lock_buffer().available_write() > 0 {
-                self.tx.write_wait_queue.notify_one(false);
+                self.tx.write_wait_queue.notify_all(false);
             }
         }
         Ok(write_size)
@@ -272,8 +575,12 @@ impl LocalSocket {
 impl Drop for LocalSocket {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
+        self.tx.write_closed.store(true, Ordering::Release);
+        self.rx.read_closed.store(true, Ordering::Release);
         self.tx.read_wait_queue.notify_all(false);
         self.rx.write_wait_queue.notify_all(false);
+        self.rx.read_wait_queue.notify_all(false);
+        self.tx.write_wait_queue.notify_all(false);
     }
 }
 
@@ -337,11 +644,19 @@ impl NetlinkSocket {
         }
     }
 
+    pub fn try_read(&self, buf: &mut [u8]) -> Result<usize, LinuxError> {
+        self.read_inner(buf, true)
+    }
+
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, LinuxError> {
+        self.read_inner(buf, self.nonblocking.load(Ordering::Acquire))
+    }
+
+    fn read_inner(&self, buf: &mut [u8], nonblocking: bool) -> Result<usize, LinuxError> {
         let rx = self.rx_data.lock();
         let mut offset = self.read_offset.lock();
         if *offset >= rx.len() {
-            if self.nonblocking.load(Ordering::Acquire) {
+            if nonblocking {
                 return Err(LinuxError::EAGAIN);
             } else {
                 return Ok(0);
@@ -354,7 +669,7 @@ impl NetlinkSocket {
         Ok(to_read)
     }
 
-    pub fn write(&self, buf: &[u8]) -> Result<usize, LinuxError> {
+    pub fn try_write_with_pid(&self, buf: &[u8], process_pid: u32) -> Result<usize, LinuxError> {
         if buf.len() < 16 {
             return Err(LinuxError::EINVAL);
         }
@@ -362,17 +677,22 @@ impl NetlinkSocket {
         let nlmsg_type = u16::from_ne_bytes(buf[4..6].try_into().unwrap());
         let nlmsg_seq = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
         let nlmsg_pid_val = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
-        let process_pid = crate::task::current_process().map(|p| p.pid() as u32).unwrap_or(0);
-        let nlmsg_pid = if nlmsg_pid_val == 0 { process_pid } else { nlmsg_pid_val };
+        let nlmsg_pid = if nlmsg_pid_val == 0 {
+            process_pid
+        } else {
+            nlmsg_pid_val
+        };
 
         let mut rx = self.rx_data.lock();
         let mut offset = self.read_offset.lock();
 
         let response = match nlmsg_type {
-            18 => { // RTM_GETLINK
+            18 => {
+                // RTM_GETLINK
                 Self::handle_rtm_getlink(nlmsg_seq, nlmsg_pid)
             }
-            22 => { // RTM_GETADDR
+            22 => {
+                // RTM_GETADDR
                 Self::handle_rtm_getaddr(nlmsg_seq, nlmsg_pid)
             }
             _ => {
@@ -391,6 +711,13 @@ impl NetlinkSocket {
         *offset = 0;
 
         Ok(buf.len())
+    }
+
+    pub fn write(&self, buf: &[u8]) -> Result<usize, LinuxError> {
+        let process_pid = crate::task::current_process()
+            .map(|p| p.pid() as u32)
+            .unwrap_or(0);
+        self.try_write_with_pid(buf, process_pid)
     }
 
     fn handle_rtm_getlink(seq: u32, pid: u32) -> alloc::vec::Vec<u8> {
@@ -572,6 +899,257 @@ pub enum SocketInner {
 }
 
 impl Socket {
+    /// Creates a new `Socket` plus `(cloexec, nonblock)` FD flags from Linux `socket(2)` args.
+    pub fn create(domain: u32, raw_ty: u32, proto: u32) -> LinuxResult<(Self, bool, bool)> {
+        const SOCK_TYPE_MASK: u32 = 0xf;
+        if (raw_ty & !SOCK_TYPE_MASK & !O_CLOEXEC & !O_NONBLOCK) != 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        let ty = raw_ty & SOCK_TYPE_MASK;
+        if ty < 1 || ty >= 11 {
+            return Err(LinuxError::EINVAL);
+        }
+
+        let socket = match (domain, ty) {
+            (AF_INET | AF_INET6, d) if d == SOCK_STREAM => {
+                if proto != 0 && proto != IPPROTO_TCP as u32 && proto != 132 {
+                    return Err(LinuxError::EPROTONOSUPPORT);
+                }
+                Socket::new(domain, SocketInner::Tcp(TcpSocket::new()))
+            }
+            (AF_INET | AF_INET6, d) if d == SOCK_DGRAM => {
+                if proto != 0 && proto != IPPROTO_UDP as u32 && proto != 136 {
+                    return Err(LinuxError::EPROTONOSUPPORT);
+                }
+                Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
+            }
+            (AF_INET, d) if d == SOCK_RAW => {
+                if proto != 1 {
+                    return Err(LinuxError::EPROTONOSUPPORT);
+                }
+                Socket::new(domain, SocketInner::Icmp(IcmpSocket::new()))
+            }
+            (AF_INET6, d) if d == SOCK_RAW => {
+                return Err(LinuxError::EPROTONOSUPPORT);
+            }
+            (AF_UNIX, d) if d == SOCK_STREAM || d == SOCK_SEQPACKET => {
+                Socket::new(domain, SocketInner::Tcp(TcpSocket::new()))
+            }
+            (AF_UNIX, d) if d == SOCK_DGRAM => {
+                Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
+            }
+            (17, d) if d == SOCK_DGRAM || d == SOCK_RAW => {
+                Socket::new(domain, SocketInner::Packet(PacketSocket::new()))
+            }
+            (16, d) if d == SOCK_RAW => {
+                if proto != 0 {
+                    return Err(LinuxError::EPROTONOSUPPORT);
+                }
+                Socket::new(domain, SocketInner::Netlink(NetlinkSocket::new()))
+            }
+            (AF_INET | AF_INET6 | AF_UNIX | 17 | 16, _) => {
+                return Err(LinuxError::ESOCKTNOSUPPORT);
+            }
+            _ => return Err(LinuxError::EAFNOSUPPORT),
+        };
+
+        let cloexec = (raw_ty & O_CLOEXEC) != 0;
+        let nonblock = (raw_ty & O_NONBLOCK) != 0;
+        if nonblock {
+            socket.set_nonblocking_inner(true);
+        }
+        Ok((socket, cloexec, nonblock))
+    }
+
+    pub fn try_accept(&self) -> LinuxResult<Self> {
+        match &self.inner {
+            SocketInner::Tcp(tcp) => {
+                let child = tcp
+                    .try_accept()
+                    .map_err(|e| LinuxError::from(e.canonicalize()))?;
+                Ok(Socket::new(
+                    self.domain.load(Ordering::Acquire),
+                    SocketInner::Tcp(child),
+                ))
+            }
+            _ => Err(LinuxError::EOPNOTSUPP),
+        }
+    }
+
+    pub fn try_connect_begin(&self, addr: SocketAddr) -> LinuxResult<bool> {
+        let addr = normalize_connect_addr(addr);
+        match &self.inner {
+            SocketInner::Tcp(tcp) => {
+                if tcp.peer_addr().is_ok() && !tcp.is_connecting() {
+                    return Err(LinuxError::EISCONN);
+                }
+                tcp.try_connect_begin(addr).map_err(|e| {
+                    let le = LinuxError::from(e.canonicalize());
+                    if le == LinuxError::EEXIST {
+                        if tcp.is_connecting() {
+                            LinuxError::EALREADY
+                        } else {
+                            LinuxError::EISCONN
+                        }
+                    } else {
+                        le
+                    }
+                })
+            }
+            SocketInner::Udp(udp) => {
+                udp.connect(addr)
+                    .map(|()| true)
+                    .map_err(|e| LinuxError::from(e.canonicalize()))
+            }
+            SocketInner::Icmp(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => {
+                Err(LinuxError::EOPNOTSUPP)
+            }
+            SocketInner::Local(_) => Err(LinuxError::EISCONN),
+        }
+    }
+
+    pub fn try_connect_poll(&self) -> LinuxResult<bool> {
+        match &self.inner {
+            SocketInner::Tcp(tcp) => tcp
+                .try_connect_poll()
+                .map_err(|e| LinuxError::from(e.canonicalize())),
+            _ => Ok(true),
+        }
+    }
+
+    pub fn try_recv_from(
+        &self,
+        buf: &mut [u8],
+        msg_flags: u32,
+    ) -> LinuxResult<(usize, Option<SocketAddr>)> {
+        if (msg_flags & MSG_OOB) != 0 {
+            return Err(LinuxError::EINVAL);
+        }
+        if (msg_flags & MSG_ERRQUEUE) != 0 {
+            return Err(LinuxError::EAGAIN);
+        }
+        if self.rx_shutdown.load(Ordering::Acquire) {
+            return Ok((0, None));
+        }
+        let peek = (msg_flags & MSG_PEEK) != 0;
+        match &self.inner {
+            SocketInner::Tcp(s) => {
+                let res = if peek { s.try_peek(buf) } else { s.try_recv(buf) };
+                res.map(|n| (n, None))
+                    .map_err(|e| LinuxError::from(e.canonicalize()))
+            }
+            SocketInner::Udp(s) => {
+                let res = if peek {
+                    s.try_peek_from(buf)
+                } else {
+                    s.try_recv_from(buf)
+                };
+                res.map(|(n, src)| (n, Some(src)))
+                    .map_err(|e| LinuxError::from(e.canonicalize()))
+            }
+            SocketInner::Icmp(s) => s
+                .try_recv_from(buf)
+                .map(|(n, src)| (n, Some(src)))
+                .map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Local(s) => s.try_read(buf, peek).map(|n| (n, None)),
+            SocketInner::Packet(_) => Ok((0, None)),
+            SocketInner::Netlink(s) => s.try_read(buf).map(|n| (n, None)),
+        }
+    }
+
+    pub fn try_send_to(
+        &self,
+        buf: &[u8],
+        dest: Option<SocketAddr>,
+        msg_flags: u32,
+        pid: u32,
+    ) -> LinuxResult<usize> {
+        if (msg_flags & MSG_OOB) != 0 {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        if self.tx_shutdown.load(Ordering::Acquire) {
+            return Err(LinuxError::EPIPE);
+        }
+        match &self.inner {
+            SocketInner::Tcp(s) => s.try_send(buf).map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Udp(s) => {
+                if buf.len() > 65507 {
+                    return Err(LinuxError::EMSGSIZE);
+                }
+                let res = if let Some(daddr) = dest {
+                    s.try_send_to(buf, normalize_connect_addr(daddr))
+                } else {
+                    s.try_send(buf)
+                };
+                res.map_err(|e| LinuxError::from(e.canonicalize()))
+            }
+            SocketInner::Icmp(s) => {
+                if let Some(daddr) = dest {
+                    s.try_send_to(buf, normalize_connect_addr(daddr))
+                        .map_err(|e| LinuxError::from(e.canonicalize()))
+                } else {
+                    Err(LinuxError::EDESTADDRREQ)
+                }
+            }
+            SocketInner::Local(s) => s.try_write(buf),
+            SocketInner::Packet(_) => Ok(buf.len()),
+            SocketInner::Netlink(s) => s.try_write_with_pid(buf, pid),
+        }
+    }
+
+    pub fn shutdown_how(&self, how: u32) -> LinuxResult {
+        if how > 2 {
+            return Err(LinuxError::EINVAL);
+        }
+        match how {
+            SHUT_RD => self.rx_shutdown.store(true, Ordering::Release),
+            SHUT_WR => self.tx_shutdown.store(true, Ordering::Release),
+            SHUT_RDWR => {
+                self.rx_shutdown.store(true, Ordering::Release);
+                self.tx_shutdown.store(true, Ordering::Release);
+            }
+            _ => unreachable!(),
+        }
+        match &self.inner {
+            SocketInner::Tcp(s) => match how {
+                SHUT_RD => {
+                    s.notify_wait_queues(IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP);
+                    Ok(())
+                }
+                SHUT_WR => {
+                    s.close();
+                    Ok(())
+                }
+                SHUT_RDWR => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),
+                _ => Err(LinuxError::EINVAL),
+            },
+            SocketInner::Udp(s) => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(s) => {
+                s.shutdown();
+                Ok(())
+            }
+            SocketInner::Local(s) => s.shutdown_how(how),
+            SocketInner::Packet(_) | SocketInner::Netlink(_) => Ok(()),
+        }
+    }
+
+    pub fn notify_wait_queues(&self, events: IoEvents) {
+        match &self.inner {
+            SocketInner::Tcp(s) => s.notify_wait_queues(events),
+            SocketInner::Udp(s) => s.notify_wait_queues(events),
+            SocketInner::Icmp(s) => s.notify_wait_queues(events),
+            SocketInner::Local(s) => {
+                if events.intersects(IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP | IoEvents::ERR) {
+                    s.rx.read_wait_queue.notify_all(true);
+                }
+                if events.intersects(IoEvents::OUT | IoEvents::HUP | IoEvents::ERR) {
+                    s.tx.write_wait_queue.notify_all(true);
+                }
+            }
+            SocketInner::Packet(_) | SocketInner::Netlink(_) => {}
+        }
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr, LinuxError> {
         match &self.inner {
             SocketInner::Tcp(s) => s
@@ -953,15 +1531,18 @@ impl FdObject for Socket {
             SocketInner::Udp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Icmp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Local(s) => {
-                let peer_closed = s.peer_closed.load(Ordering::Acquire);
+                let peer_write_closed = s.peer_closed.load(Ordering::Acquire)
+                    || s.rx.write_closed.load(Ordering::Acquire);
+                let peer_read_closed = s.peer_closed.load(Ordering::Acquire)
+                    || s.tx.read_closed.load(Ordering::Acquire);
                 // poll can execute beneath epoll's bookkeeping lock, so a
                 // contended ring is conservatively reported as ready instead
                 // of yielding while that lock is held.
                 let readable = s.rx.buffer.try_lock().map_or(true, |rx_ring| {
-                    rx_ring.available_read() > 0 || peer_closed
+                    rx_ring.available_read() > 0 || peer_write_closed
                 });
                 let writable = s.tx.buffer.try_lock().map_or(true, |tx_ring| {
-                    tx_ring.available_write() > 0 || peer_closed
+                    tx_ring.available_write() > 0 || peer_read_closed
                 });
                 Ok(PollState {
                     readable,
@@ -992,23 +1573,27 @@ impl FdObject for Socket {
         events: i16,
         wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
     ) -> Result<bool, LinuxError> {
+        let mut push_pair = |read_wq: &'a axtask::WaitQueue, write_wq: &'a axtask::WaitQueue| {
+            let mut supported = false;
+            if (events & (linux_raw_sys::general::POLLIN as i16)) != 0 {
+                wqs.push(read_wq);
+                supported = true;
+            }
+            if (events & (linux_raw_sys::general::POLLOUT as i16)) != 0 {
+                wqs.push(write_wq);
+                supported = true;
+            }
+            if !supported && events == 0 {
+                wqs.push(read_wq);
+                supported = true;
+            }
+            Ok(supported || events == 0)
+        };
         match &self.inner {
-            SocketInner::Local(s) => {
-                let mut supported = false;
-                if (events & (linux_raw_sys::general::POLLIN as i16)) != 0 {
-                    wqs.push(&s.rx.read_wait_queue);
-                    supported = true;
-                }
-                if (events & (linux_raw_sys::general::POLLOUT as i16)) != 0 {
-                    wqs.push(&s.tx.write_wait_queue);
-                    supported = true;
-                }
-                Ok(supported || events == 0)
-            }
-            SocketInner::Tcp(_) | SocketInner::Udp(_) | SocketInner::Icmp(_) => {
-                wqs.push(&axnet::NET_WAIT_QUEUE);
-                Ok(true)
-            }
+            SocketInner::Local(s) => push_pair(&s.rx.read_wait_queue, &s.tx.write_wait_queue),
+            SocketInner::Tcp(s) => push_pair(s.read_wait_queue(), s.write_wait_queue()),
+            SocketInner::Udp(s) => push_pair(s.read_wait_queue(), s.write_wait_queue()),
+            SocketInner::Icmp(s) => push_pair(s.read_wait_queue(), s.write_wait_queue()),
             _ => Ok(false),
         }
     }
@@ -1021,14 +1606,16 @@ impl FdObject for Socket {
     ) -> Result<(), LinuxError> {
         match &self.inner {
             SocketInner::Local(s) => {
-                if events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+                if events.intersects(
+                    IoEvents::IN | IoEvents::RDHUP | IoEvents::PRI | IoEvents::ERR | IoEvents::HUP,
+                ) {
                     let owner = s.rx.clone();
                     let registration = owner.read_wait_queue.register_owned_waker(cx.waker());
                     registrations.push(PollRegistration::new(move || {
                         owner.read_wait_queue.unregister_waker(registration);
                     }));
                 }
-                if events.contains(axpoll::IoEvents::OUT) {
+                if events.contains(IoEvents::OUT) {
                     let owner = s.tx.clone();
                     let registration = owner.write_wait_queue.register_owned_waker(cx.waker());
                     registrations.push(PollRegistration::new(move || {
@@ -1036,10 +1623,22 @@ impl FdObject for Socket {
                     }));
                 }
             }
-            SocketInner::Tcp(_) | SocketInner::Udp(_) | SocketInner::Icmp(_) => {
-                let registration = axnet::NET_WAIT_QUEUE.register_owned_waker(cx.waker());
+            SocketInner::Tcp(s) => {
+                let reg = s.register_poll_waker(cx.waker(), events);
                 registrations.push(PollRegistration::new(move || {
-                    axnet::NET_WAIT_QUEUE.unregister_waker(registration);
+                    drop(reg);
+                }));
+            }
+            SocketInner::Udp(s) => {
+                let reg = s.register_poll_waker(cx.waker(), events);
+                registrations.push(PollRegistration::new(move || {
+                    drop(reg);
+                }));
+            }
+            SocketInner::Icmp(s) => {
+                let reg = s.register_poll_waker(cx.waker(), events);
+                registrations.push(PollRegistration::new(move || {
+                    drop(reg);
                 }));
             }
             _ => {}
@@ -1060,6 +1659,21 @@ impl FdObject for Socket {
         true
     }
 
+    fn poll_hup(&self) -> bool {
+        if self.rx_shutdown.load(Ordering::Acquire) && self.tx_shutdown.load(Ordering::Acquire) {
+            return true;
+        }
+        match &self.inner {
+            SocketInner::Tcp(s) => s.is_hup(),
+            SocketInner::Local(s) => {
+                s.peer_closed.load(Ordering::Acquire)
+                    || (s.rx.write_closed.load(Ordering::Acquire)
+                        && s.tx.read_closed.load(Ordering::Acquire))
+            }
+            _ => false,
+        }
+    }
+
     fn is_rdhup(&self) -> bool {
         if self.rx_shutdown.load(Ordering::Acquire) {
             return true;
@@ -1072,6 +1686,7 @@ impl FdObject for Socket {
             }
             SocketInner::Local(local_sock) => {
                 local_sock.peer_closed.load(Ordering::Acquire)
+                    || local_sock.rx.write_closed.load(Ordering::Acquire)
             }
             _ => false,
         }

@@ -25,6 +25,92 @@ impl EpollObject {
     pub fn notify_control(&self) {
         self.control_wait_queue.notify_all(false);
     }
+
+    fn poll_for_process(
+        &self,
+        process: &crate::task::Process,
+        thread: Option<&crate::task::Thread>,
+    ) -> LinuxResult<PollState> {
+        let monitored: Vec<(usize, u32)> = {
+            let events = self.events.lock();
+            events
+                .iter()
+                .map(|(&fd, ev)| (fd, ev.event.events))
+                .collect()
+        };
+        for (fd, ev_events) in monitored {
+            if let Ok(entry) = process.get_fd_entry(fd) {
+                if let Ok(st) = entry.object.poll_readiness_with_context(process, thread) {
+                    let mut revents = 0u32;
+                    if st.readable && (ev_events & EPOLLIN != 0) {
+                        revents |= EPOLLIN;
+                    }
+                    if st.writable && (ev_events & EPOLLOUT != 0) {
+                        revents |= EPOLLOUT;
+                    }
+                    if ev_events & EPOLLRDHUP != 0 && st.rdhup {
+                        revents |= EPOLLRDHUP;
+                    }
+                    if st.hup {
+                        revents |= EPOLLHUP;
+                    }
+                    if st.err {
+                        revents |= EPOLLERR;
+                    }
+                    if revents != 0 {
+                        return Ok(PollState {
+                            readable: true,
+                            writable: false,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(PollState {
+            readable: false,
+            writable: false,
+        })
+    }
+
+    fn register_poll_for_process(
+        self: Arc<Self>,
+        process: &Arc<crate::task::Process>,
+        thread: Option<&Arc<crate::task::Thread>>,
+        cx: &mut core::task::Context<'_>,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        let control_wait_queue = self.control_wait_queue.clone();
+        let registration = control_wait_queue.register_owned_waker(cx.waker());
+        registrations.push(PollRegistration::new(move || {
+            control_wait_queue.unregister_waker(registration);
+        }));
+
+        let targets: Vec<(Arc<dyn FdObject>, axpoll::IoEvents)> = {
+            let monitored = self.events.lock();
+            let mut list = Vec::new();
+            for (&fd, ev) in monitored.iter() {
+                if let Ok(entry) = process.get_fd_entry(fd) {
+                    let mut target_events = axpoll::IoEvents::ALWAYS_POLL;
+                    if ev.event.events & EPOLLIN != 0 {
+                        target_events |= axpoll::IoEvents::IN;
+                    }
+                    if ev.event.events & EPOLLOUT != 0 {
+                        target_events |= axpoll::IoEvents::OUT;
+                    }
+                    if ev.event.events & EPOLLRDHUP != 0 {
+                        target_events |= axpoll::IoEvents::RDHUP;
+                    }
+                    list.push((entry.object.clone(), target_events));
+                }
+            }
+            list
+        };
+
+        for (object, target_events) in targets {
+            object.register_poll_with_context(process, thread, cx, target_events, registrations)?;
+        }
+        Ok(())
+    }
 }
 
 impl FdObject for EpollObject {
@@ -42,33 +128,16 @@ impl FdObject for EpollObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        let events = self.events.lock();
-        for (&fd, ev) in events.iter() {
-            if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
-                if let Ok(state) = entry.object.poll() {
-                    let mut revents = 0u32;
-                    if state.readable && (ev.event.events & EPOLLIN != 0) {
-                        revents |= EPOLLIN;
-                    }
-                    if state.writable && (ev.event.events & EPOLLOUT != 0) {
-                        revents |= EPOLLOUT;
-                    }
-                    if ev.event.events & EPOLLRDHUP != 0 && entry.object.is_rdhup() {
-                        revents |= EPOLLRDHUP;
-                    }
-                    if revents != 0 {
-                        return Ok(PollState {
-                            readable: true,
-                            writable: false,
-                        });
-                    }
-                }
-            }
-        }
-        Ok(PollState {
-            readable: false,
-            writable: false,
-        })
+        let process = crate::task::current_process()?;
+        self.poll_for_process(&process, None)
+    }
+
+    fn poll_with_context(
+        &self,
+        process: &crate::task::Process,
+        thread: Option<&crate::task::Thread>,
+    ) -> LinuxResult<PollState> {
+        self.poll_for_process(process, thread)
     }
 
     fn register_poll(
@@ -77,39 +146,18 @@ impl FdObject for EpollObject {
         _events: axpoll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
-        let control_wait_queue = self.control_wait_queue.clone();
-        let registration = control_wait_queue.register_owned_waker(cx.waker());
-        registrations.push(PollRegistration::new(move || {
-            control_wait_queue.unregister_waker(registration);
-        }));
+        let process = crate::task::current_process()?;
+        self.register_poll_for_process(&process, None, cx, registrations)
+    }
 
-        let targets: Vec<(Arc<dyn FdObject>, axpoll::IoEvents)> = {
-            let monitored = self.events.lock();
-            let mut list = Vec::new();
-            for (&fd, ev) in monitored.iter() {
-                if let Ok(entry) = crate::task::current_process()?.get_fd_entry(fd) {
-                    let mut target_events = axpoll::IoEvents::empty();
-                    if ev.event.events & EPOLLIN != 0 {
-                        target_events |= axpoll::IoEvents::IN;
-                    }
-                    if ev.event.events & EPOLLOUT != 0 {
-                        target_events |= axpoll::IoEvents::OUT;
-                    }
-                    if ev.event.events & EPOLLRDHUP != 0 {
-                        target_events |= axpoll::IoEvents::RDHUP;
-                    }
-
-                    if !target_events.is_empty() {
-                        list.push((entry.object.clone(), target_events));
-                    }
-                }
-            }
-            list
-        };
-
-        for (object, target_events) in targets {
-            object.register_poll(cx, target_events, registrations)?;
-        }
-        Ok(())
+    fn register_poll_with_context(
+        self: Arc<Self>,
+        process: &Arc<crate::task::Process>,
+        thread: Option<&Arc<crate::task::Thread>>,
+        cx: &mut core::task::Context<'_>,
+        _events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        self.register_poll_for_process(process, thread, cx, registrations)
     }
 }

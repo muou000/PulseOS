@@ -3,16 +3,17 @@ use core::sync::atomic::Ordering;
 
 use axerrno::LinuxError;
 use axlog::*;
-use axnet::{IcmpSocket, TcpSocket, UdpSocket};
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
-    net::{
-        AF_INET, AF_INET6, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR, SOCK_RAW,
-    },
+    net::{AF_INET, AF_INET6, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP},
 };
 use pulse_core::{
     fd_table::{FdEntry, FdFlags},
-    net::{LocalSocket, Socket, SocketInner, UNIX_REGISTRY},
+    net::{
+        LocalSocket, Socket, SocketInner, adapt_sockaddr_for_domain, bind_unix_socket_with_fs,
+        check_unix_bind_available, lookup_unix_path_by_addr, lookup_unix_socket_by_key,
+        normalize_connect_addr, resolve_unix_path_sync,
+    },
 };
 
 use super::{
@@ -50,78 +51,16 @@ pub fn sys_socket(domain: usize, raw_ty: usize, proto: usize) -> isize {
     let proto = proto as u32;
     debug!("sys_socket <= domain: {domain}, ty: {raw_ty}, proto: {proto}");
 
-    const SOCK_TYPE_MASK: u32 = 0xf;
-    if (raw_ty & !SOCK_TYPE_MASK & !(O_CLOEXEC as u32) & !(O_NONBLOCK as u32)) != 0 {
-        return -(LinuxError::EINVAL.code() as isize);
-    }
-
-    let ty = raw_ty & SOCK_TYPE_MASK;
-    if ty < 1 || ty >= 11 {
-        return -(LinuxError::EINVAL.code() as isize);
-    }
-
-    let socket = match (domain, ty) {
-        (AF_INET | AF_INET6, d) if d == linux_raw_sys::net::SOCK_STREAM => {
-            if proto != 0 && proto != IPPROTO_TCP as u32 && proto != 132 {
-                return -(LinuxError::EPROTONOSUPPORT.code() as isize);
-            }
-            Socket::new(domain, SocketInner::Tcp(TcpSocket::new()))
-        }
-        (AF_INET | AF_INET6, d) if d == linux_raw_sys::net::SOCK_DGRAM => {
-            if proto != 0 && proto != IPPROTO_UDP as u32 && proto != 136 {
-                return -(LinuxError::EPROTONOSUPPORT.code() as isize);
-            }
-            Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
-        }
-        (AF_INET, d) if d == SOCK_RAW => {
-            if proto != 1 {
-                return -(LinuxError::EPROTONOSUPPORT.code() as isize);
-            }
-            Socket::new(domain, SocketInner::Icmp(IcmpSocket::new()))
-        }
-        (AF_INET6, d) if d == SOCK_RAW => {
-            return -(LinuxError::EPROTONOSUPPORT.code() as isize);
-        }
-        (AF_UNIX, d)
-            if d == linux_raw_sys::net::SOCK_STREAM || d == linux_raw_sys::net::SOCK_SEQPACKET =>
-        {
-            Socket::new(domain, SocketInner::Tcp(TcpSocket::new()))
-        }
-        (AF_UNIX, d) if d == linux_raw_sys::net::SOCK_DGRAM => {
-            Socket::new(domain, SocketInner::Udp(UdpSocket::new()))
-        }
-        (17, d) if d == linux_raw_sys::net::SOCK_DGRAM || d == SOCK_RAW => Socket::new(
-            domain,
-            SocketInner::Packet(pulse_core::net::PacketSocket::new()),
-        ),
-        (16, d) if d == SOCK_RAW => {
-            if proto != 0 {
-                return -(LinuxError::EPROTONOSUPPORT.code() as isize);
-            }
-            Socket::new(
-                domain,
-                SocketInner::Netlink(pulse_core::net::NetlinkSocket::new()),
-            )
-        }
-        (AF_INET | AF_INET6 | AF_UNIX | 17 | 16, _) => {
-            warn!("Unsupported socket type: domain={domain}, ty={ty}");
-            return -(LinuxError::ESOCKTNOSUPPORT.code() as isize);
-        }
-        _ => {
-            warn!("Unsupported address family: domain={domain}");
-            return -(LinuxError::EAFNOSUPPORT.code() as isize);
-        }
+    let (socket, cloexec, nonblock) = match Socket::create(domain, raw_ty, proto) {
+        Ok(created) => created,
+        Err(e) => return -(e.code() as isize),
     };
 
-    if raw_ty & O_NONBLOCK != 0 {
-        socket.set_nonblocking_inner(true);
-    }
-
     let mut flags = FdFlags::empty();
-    if raw_ty & O_CLOEXEC != 0 {
+    if cloexec {
         flags.insert(FdFlags::CLOEXEC);
     }
-    if raw_ty & O_NONBLOCK != 0 {
+    if nonblock {
         flags.insert(FdFlags::NONBLOCK);
     }
 
@@ -160,50 +99,15 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
             Ok(path) => path,
             Err(e) => return -(e.code() as isize),
         };
+        let fs = match crate::impls::utils::with_process(|process| {
+            process.fs_context_handle().lock().clone()
+        }) {
+            Ok(fs) => fs,
+            Err(e) => return -(e.code() as isize),
+        };
 
-        let is_abstract = path.starts_with('\0');
-
-        if !is_abstract {
-            // Check parent directory component
-            let parent_res = crate::impls::utils::with_process(|process| {
-                let binding = process.fs_context_handle();
-                let fs = binding.lock().clone();
-                axtask::future::block_on(fs.resolve_parent(axfs_ng_vfs::path::Path::new(&path)))
-            });
-            match parent_res {
-                Ok(Ok((_parent, _name))) => {}
-                Ok(Err(e)) => {
-                    let le = LinuxError::from(e.canonicalize());
-                    return -(le.code() as isize);
-                }
-                Err(e) => {
-                    return -(e.code() as isize);
-                }
-            }
-
-            // Check if file already exists in filesystem
-            let exists = crate::impls::utils::with_process(|process| {
-                let binding = process.fs_context_handle();
-                let fs = binding.lock().clone();
-                axtask::future::block_on(fs.resolve(axfs_ng_vfs::path::Path::new(&path))).is_ok()
-            })
-            .unwrap_or(false);
-
-            if exists {
-                return -(LinuxError::EADDRINUSE.code() as isize);
-            }
-        }
-
-        // Look up in registry (brief lock)
-        {
-            let mut registry = UNIX_REGISTRY.lock();
-            if let Some((_addr, weak_sock)) = registry.get(&path) {
-                if weak_sock.upgrade().is_some() {
-                    return -(LinuxError::EADDRINUSE.code() as isize);
-                } else {
-                    registry.remove(&path);
-                }
-            }
+        if let Err(e) = check_unix_bind_available(&fs, &path) {
+            return -(e.code() as isize);
         }
 
         // Bind the degraded TCP/UDP socket to loopback (127.0.0.1:0)
@@ -219,49 +123,22 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
                 .bind(bind_addr)
                 .map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Icmp(_) => Err(LinuxError::EOPNOTSUPP),
-            SocketInner::Local(_) => Err(LinuxError::EINVAL),
-            SocketInner::Packet(_) => Err(LinuxError::EINVAL),
-            SocketInner::Netlink(_) => Err(LinuxError::EINVAL),
+            SocketInner::Local(_) | SocketInner::Packet(_) | SocketInner::Netlink(_) => {
+                Err(LinuxError::EINVAL)
+            }
         };
 
         if let Err(e) = res {
             return -(e.code() as isize);
         }
 
-        // Get dynamic local address
         let local_addr = match socket.local_addr() {
             Ok(a) => a,
             Err(e) => return -(e.code() as isize),
         };
 
-        // If pathname, write dummy file to VFS
-        if !is_abstract {
-            let create_res = crate::impls::utils::with_process(|process| {
-                let binding = process.fs_context_handle();
-                let fs = binding.lock().clone();
-                axtask::future::block_on(fs.write(axfs_ng_vfs::path::Path::new(&path), []))
-            });
-            match create_res {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    let le = LinuxError::from(e.canonicalize());
-                    return -(le.code() as isize);
-                }
-                Err(e) => {
-                    return -(e.code() as isize);
-                }
-            }
-        }
-
-        // Insert into registry (brief lock)
-        {
-            let mut registry = UNIX_REGISTRY.lock();
-            if let Some((_addr, weak_sock)) = registry.get(&path) {
-                if weak_sock.upgrade().is_some() {
-                    return -(LinuxError::EADDRINUSE.code() as isize);
-                }
-            }
-            registry.insert(path, (local_addr, Arc::downgrade(&socket)));
+        if let Err(e) = bind_unix_socket_with_fs(&fs, &path, local_addr, &socket) {
+            return -(e.code() as isize);
         }
         return 0;
     }
@@ -348,38 +225,19 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
             Err(e) => return -(e.code() as isize),
         };
 
-        let is_abstract = path.starts_with('\0');
-
-        if !is_abstract {
-            // Check if file exists in VFS
-            let exists = crate::impls::utils::with_process(|process| {
-                let binding = process.fs_context_handle();
-                let fs = binding.lock().clone();
-                axtask::future::block_on(fs.resolve(axfs_ng_vfs::path::Path::new(&path))).is_ok()
-            })
-            .unwrap_or(false);
-
-            if !exists {
-                return -(LinuxError::ENOENT.code() as isize);
-            }
-        }
-
-        // Look up in registry and drop the lock immediately
-        let target_addr = {
-            let mut registry = UNIX_REGISTRY.lock();
-            match registry.get(&path) {
-                Some(&(a, ref weak_sock)) => {
-                    if weak_sock.upgrade().is_some() {
-                        a
-                    } else {
-                        registry.remove(&path);
-                        return -(LinuxError::ECONNREFUSED.code() as isize);
-                    }
-                }
-                None => {
-                    return -(LinuxError::ECONNREFUSED.code() as isize);
-                }
-            }
+        let fs = match crate::impls::utils::with_process(|process| {
+            process.fs_context_handle().lock().clone()
+        }) {
+            Ok(fs) => fs,
+            Err(e) => return -(e.code() as isize),
+        };
+        let key = match resolve_unix_path_sync(&fs, &path) {
+            Ok(k) => k,
+            Err(e) => return -(e.code() as isize),
+        };
+        let (target_addr, _) = match lookup_unix_socket_by_key(&key) {
+            Ok(found) => found,
+            Err(e) => return -(e.code() as isize),
         };
 
         // Connect to the TCP/UDP target_addr
@@ -419,12 +277,7 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
         }
     }
 
-    let mut std_addr = core::net::SocketAddr::from(addr);
-    if let core::net::SocketAddr::V4(v4) = &mut std_addr {
-        if v4.ip().is_unspecified() {
-            *v4 = core::net::SocketAddrV4::new(core::net::Ipv4Addr::new(127, 0, 0, 1), v4.port());
-        }
-    }
+    let std_addr = normalize_connect_addr(core::net::SocketAddr::from(addr));
 
     let result = match &socket.inner {
         SocketInner::Tcp(s) => s.connect(std_addr).map_err(|e| {
@@ -522,17 +375,12 @@ pub fn sys_accept4(fd: usize, addr: usize, addrlen: usize, flags: usize) -> isiz
 
     // Write remote address to user if addr pointer is non-null.
     if addr != 0 {
-        if socket.domain.load(Ordering::Acquire) == AF_UNIX {
-            let peer_addr = remote_addr;
-            let path = peer_addr.and_then(|pa| {
-                let registry = UNIX_REGISTRY.lock();
-                registry
-                    .iter()
-                    .find_map(|(k, v)| if v.0 == pa { Some(k.clone()) } else { None })
-            });
+        let domain = socket.domain.load(Ordering::Acquire);
+        if domain == AF_UNIX {
+            let path = remote_addr.and_then(lookup_unix_path_by_addr);
             let _ = write_unix_addr(path, addr, addrlen);
         } else if let Some(remote) = remote_addr {
-            let net_addr = NetSocketAddr::from(remote);
+            let net_addr = NetSocketAddr::from(adapt_sockaddr_for_domain(domain, remote));
             if addrlen != 0 {
                 if let Ok(current_len) = read_user_value::<u32>(addrlen) {
                     let mut len = current_len;
@@ -553,56 +401,7 @@ pub fn sys_shutdown(fd: usize, how: usize) -> isize {
         Ok(s) => s,
         Err(e) => return -(e.code() as isize),
     };
-    let how = how as u32;
-    if how > 2 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    match how {
-        SHUT_RD => socket.rx_shutdown.store(true, Ordering::Release),
-        SHUT_WR => socket.tx_shutdown.store(true, Ordering::Release),
-        SHUT_RDWR => {
-            socket.rx_shutdown.store(true, Ordering::Release);
-            socket.tx_shutdown.store(true, Ordering::Release);
-        }
-        _ => {}
-    }
-
-    let result = match &socket.inner {
-        SocketInner::Tcp(s) => match how {
-            SHUT_RD => Ok(()),
-            SHUT_WR => {
-                s.close();
-                Ok(())
-            }
-            SHUT_RDWR => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),
-            _ => Err(LinuxError::EINVAL),
-        },
-        SocketInner::Udp(s) => s.shutdown().map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Icmp(s) => {
-            s.shutdown();
-            Ok(())
-        }
-        SocketInner::Local(s) => match how {
-            SHUT_RD => {
-                s.rx.write_wait_queue.notify_all(false);
-                Ok(())
-            }
-            SHUT_WR => {
-                s.tx.read_wait_queue.notify_all(false);
-                Ok(())
-            }
-            SHUT_RDWR => {
-                s.tx.read_wait_queue.notify_all(false);
-                s.rx.write_wait_queue.notify_all(false);
-                Ok(())
-            }
-            _ => Err(LinuxError::EINVAL),
-        },
-        SocketInner::Packet(_) => Ok(()),
-        SocketInner::Netlink(_) => Ok(()),
-    };
-    match result {
+    match socket.shutdown_how(how as u32) {
         Ok(()) => 0,
         Err(e) => -(e.code() as isize),
     }

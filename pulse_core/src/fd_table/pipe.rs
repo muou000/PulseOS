@@ -651,17 +651,7 @@ impl PipeObject {
         self.shared.reader_count.load(Ordering::Acquire) == 0
     }
 
-    fn available_pipe_write(&self) -> usize {
-        let zc = self.shared.zc_pages.lock();
-        let buffer = self.shared.buffer.lock();
-        pipe_available_write_bytes(
-            buffer.capacity(),
-            buffer.available_read(),
-            zero_copy_bytes(&zc),
-        )
-    }
-
-    fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
+    fn pipe_availability(&self) -> (usize, usize, usize) {
         let zc = self.shared.zc_pages.lock();
         let buffer = self.shared.buffer.lock();
         let zc_len = zero_copy_bytes(&zc);
@@ -669,6 +659,15 @@ impl PipeObject {
         let avail_read = buffer.available_read().saturating_add(zc_len);
         let avail_write =
             pipe_available_write_bytes(buffer.capacity(), buffer.available_read(), zc_len);
+        (avail_read, avail_write, limit)
+    }
+
+    fn available_pipe_write(&self) -> usize {
+        self.pipe_availability().1
+    }
+
+    fn ready_for(&self, wait_for_read: bool, wait_for_write: bool) -> bool {
+        let (avail_read, avail_write, limit) = self.pipe_availability();
         (wait_for_read && (avail_read > 0 || self.write_end_closed()))
             || (wait_for_write && (avail_write >= limit || self.read_end_closed()))
     }
@@ -1208,16 +1207,33 @@ impl FdObject for PipeObject {
     }
 
     fn poll(&self) -> LinuxResult<PollState> {
-        let zc = self.shared.zc_pages.lock();
-        let buffer = self.shared.buffer.lock();
-        let zc_len = zero_copy_bytes(&zc);
-        let limit = core::cmp::min(PIPE_PAGE_SIZE, buffer.capacity());
-        let avail_read = buffer.available_read().saturating_add(zc_len);
-        let avail_write =
-            pipe_available_write_bytes(buffer.capacity(), buffer.available_read(), zc_len);
+        let (avail_read, avail_write, limit) = self.pipe_availability();
         Ok(PollState {
             readable: self.readable && (avail_read > 0 || self.write_end_closed()),
             writable: self.writable() && (avail_write >= limit || self.read_end_closed()),
+        })
+    }
+
+    fn poll_hup(&self) -> bool {
+        self.readable && self.write_end_closed()
+    }
+
+    fn poll_err(&self) -> bool {
+        self.writable() && self.read_end_closed()
+    }
+
+    fn poll_readiness_with_context(
+        &self,
+        _process: &crate::task::Process,
+        _thread: Option<&crate::task::Thread>,
+    ) -> LinuxResult<pulse_io_uring_core::poll::PollReadiness> {
+        let (avail_read, avail_write, limit) = self.pipe_availability();
+        Ok(pulse_io_uring_core::poll::PollReadiness {
+            readable: self.readable && avail_read > 0,
+            writable: self.writable() && !self.read_end_closed() && avail_write >= limit,
+            rdhup: false,
+            hup: self.poll_hup(),
+            err: self.poll_err(),
         })
     }
 
@@ -1295,7 +1311,9 @@ impl FdObject for PipeObject {
         events: axpoll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
-        if self.readable && events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+        if self.readable
+            && events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP | axpoll::IoEvents::HUP)
+        {
             let owner = self.clone();
             let registration = owner
                 .shared
@@ -1305,7 +1323,9 @@ impl FdObject for PipeObject {
                 owner.shared.read_wait_queue.unregister_waker(registration);
             }));
         }
-        if self.writable && events.contains(axpoll::IoEvents::OUT) {
+        if self.writable
+            && events.intersects(axpoll::IoEvents::OUT | axpoll::IoEvents::ERR | axpoll::IoEvents::HUP)
+        {
             let owner = self.clone();
             let registration = owner
                 .shared

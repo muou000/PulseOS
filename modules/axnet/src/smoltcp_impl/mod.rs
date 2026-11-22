@@ -109,11 +109,61 @@ impl SocketWaitQueues {
     }
 
     fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
-        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP | IoEvents::PRI) {
             self.read.register_waker(context.waker());
         }
         if events.intersects(IoEvents::OUT) {
             self.write.register_waker(context.waker());
+        }
+    }
+
+    pub(crate) fn register_owned(
+        self: &Arc<Self>,
+        waker: &core::task::Waker,
+        events: IoEvents,
+    ) -> SocketPollRegistration {
+        let read = if events.intersects(IoEvents::IN | IoEvents::RDHUP | IoEvents::PRI) {
+            Some(self.read.register_owned_waker(waker))
+        } else {
+            None
+        };
+        let write = if events.intersects(IoEvents::OUT) {
+            Some(self.write.register_owned_waker(waker))
+        } else {
+            None
+        };
+        let any = if read.is_none() && write.is_none() {
+            Some(self.any.register_owned_waker(waker))
+        } else {
+            None
+        };
+        SocketPollRegistration {
+            queues: Arc::clone(self),
+            read,
+            write,
+            any,
+        }
+    }
+}
+
+/// RAII handle owning per-socket waker registrations across read/write/any wait queues.
+pub struct SocketPollRegistration {
+    queues: Arc<SocketWaitQueues>,
+    read: Option<axtask::WakerRegistration>,
+    write: Option<axtask::WakerRegistration>,
+    any: Option<axtask::WakerRegistration>,
+}
+
+impl Drop for SocketPollRegistration {
+    fn drop(&mut self) {
+        if let Some(reg) = self.read.take() {
+            self.queues.read.unregister_waker(reg);
+        }
+        if let Some(reg) = self.write.take() {
+            self.queues.write.unregister_waker(reg);
+        }
+        if let Some(reg) = self.any.take() {
+            self.queues.any.unregister_waker(reg);
         }
     }
 }
@@ -625,6 +675,9 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs
             .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
+            .unwrap();
+        ip_addrs
+            .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 128))
             .unwrap();
     });
     LOOPBACK.init_once(Mutex::new(iface));

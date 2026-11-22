@@ -276,6 +276,17 @@ impl FdObject for SignalFdObject {
         self.poll_for_thread(thread.as_ref())
     }
 
+    fn poll_with_context(
+        &self,
+        _process: &crate::task::Process,
+        thread: Option<&crate::task::Thread>,
+    ) -> LinuxResult<PollState> {
+        let Some(thread) = thread else {
+            return Err(LinuxError::ESRCH);
+        };
+        self.poll_for_thread(thread)
+    }
+
     fn wait_ready(&self, events: i16, deadline: Option<Duration>) -> LinuxResult<bool> {
         if (events & POLLIN as i16) == 0 {
             return Err(LinuxError::EOPNOTSUPP);
@@ -311,6 +322,20 @@ impl FdObject for SignalFdObject {
 
         let thread = crate::task::current_thread()?;
         self.register_poll_for_thread(&thread, cx, events, registrations)
+    }
+
+    fn register_poll_with_context(
+        self: Arc<Self>,
+        _process: &Arc<crate::task::Process>,
+        thread: Option<&Arc<crate::task::Thread>>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut alloc::vec::Vec<PollRegistration>,
+    ) -> LinuxResult {
+        let Some(thread) = thread else {
+            return Err(LinuxError::ESRCH);
+        };
+        self.register_poll_for_thread(thread, cx, events, registrations)
     }
 
     fn register_poll_for_thread(

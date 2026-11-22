@@ -171,7 +171,13 @@ pub fn sys_getsockopt(
             }
             4 => {
                 // SO_ERROR
-                let val: i32 = 0; // No error
+                let val: i32 = match &socket.inner {
+                    SocketInner::Tcp(s) if s.is_connecting() => match s.try_connect_poll() {
+                        Ok(_) => 0,
+                        Err(e) => LinuxError::from(e.canonicalize()).code(),
+                    },
+                    _ => 0,
+                };
                 if let Err(e) = write_user_value(optval, &val) {
                     return -(e.code() as isize);
                 }

@@ -1,4 +1,8 @@
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     task::Waker,
@@ -34,7 +38,7 @@ use crate::{AxTaskRef, CurrentTask, current_run_queue, select_wake_run_queue};
 /// ```
 pub struct WaitQueue {
     queue: SpinNoIrq<VecDeque<AxTaskRef>>,
-    wakers: SpinNoIrq<VecDeque<WakerEntry>>,
+    wakers: SpinNoIrq<BTreeMap<u64, WakerEntry>>,
 }
 
 /// A registered waker plus its companion notification flag.
@@ -228,7 +232,7 @@ impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             queue: SpinNoIrq::new(VecDeque::new()),
-            wakers: SpinNoIrq::new(VecDeque::new()),
+            wakers: SpinNoIrq::new(BTreeMap::new()),
         }
     }
 
@@ -236,7 +240,7 @@ impl WaitQueue {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             queue: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
-            wakers: SpinNoIrq::new(VecDeque::with_capacity(capacity)),
+            wakers: SpinNoIrq::new(BTreeMap::new()),
         }
     }
 
@@ -598,7 +602,7 @@ impl WaitQueue {
             // remain registered for future notifications.
             let entry = {
                 let mut wakers = self.wakers.lock();
-                let entry = wakers.pop_front();
+                let entry = wakers.pop_first().map(|(_, entry)| entry);
                 if let Some(entry) = entry.as_ref() {
                     // Keep this store under the queue lock. A concurrent poll
                     // that fails to find the removed registration must then
@@ -645,12 +649,12 @@ impl WaitQueue {
 
         let wakers = {
             let mut wakers = self.wakers.lock();
-            for entry in wakers.iter() {
+            for entry in wakers.values() {
                 entry.notified.store(true, Ordering::Release);
             }
             core::mem::take(&mut *wakers)
         };
-        for entry in wakers {
+        for entry in wakers.into_values() {
             entry.waker.wake();
         }
     }
@@ -770,7 +774,7 @@ impl WaitQueue {
         let mut wakers = self.wakers.lock();
         let task_id = crate::current().id().as_u64();
         if deduplicate_task {
-            if let Some(entry) = wakers.iter_mut().find(|entry| entry.task_id == task_id) {
+            if let Some(entry) = wakers.values_mut().find(|entry| entry.task_id == task_id) {
                 if !entry.waker.will_wake(waker) {
                     entry.waker = waker.clone();
                 }
@@ -780,12 +784,15 @@ impl WaitQueue {
 
         let id = WAKER_ENTRY_ID.fetch_add(1, Ordering::Relaxed);
         let notified = Arc::new(AtomicBool::new(false));
-        wakers.push_back(WakerEntry {
+        wakers.insert(
             id,
-            task_id,
-            notified: notified.clone(),
-            waker: waker.clone(),
-        });
+            WakerEntry {
+                id,
+                task_id,
+                notified: notified.clone(),
+                waker: waker.clone(),
+            },
+        );
         (id, notified)
     }
 
@@ -803,7 +810,7 @@ impl WaitQueue {
         waker: &core::task::Waker,
     ) {
         let mut wakers = self.wakers.lock();
-        if let Some(entry) = wakers.iter_mut().find(|entry| entry.id == registration.0)
+        if let Some(entry) = wakers.get_mut(&registration.0)
             && !entry.waker.will_wake(waker)
         {
             entry.waker = waker.clone();
@@ -811,9 +818,7 @@ impl WaitQueue {
     }
 
     pub fn unregister_waker(&self, registration: WakerRegistration) {
-        self.wakers
-            .lock()
-            .retain(|entry| entry.id != registration.0);
+        self.wakers.lock().remove(&registration.0);
     }
 
     /// Returns a future that waits for the wait queue.

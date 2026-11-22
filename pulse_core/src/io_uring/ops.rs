@@ -14,22 +14,22 @@ use axio::IoBuf;
 use axpoll::IoEvents;
 use axtask::future::{global_executor, sleep_until};
 use linux_raw_sys::{
-    general::{
-        O_CLOEXEC, O_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, POLLPRI, POLLRDHUP,
-        RLIMIT_FSIZE, iovec,
-    },
+    general::{POLLERR, POLLNVAL, RLIMIT_FSIZE, iovec},
     io_uring::{__kernel_timespec, io_uring_op},
-    net::{AF_INET, AF_INET6},
 };
 use pulse_io_uring_core::orchestrator::{PreparedRequest, RequestId, RequestKind, TimeoutClock};
+use pulse_io_uring_core::poll::{
+    OneShotPollStep, PollReadiness, compute_poll_revents, drive_one_shot_poll_step,
+    poll_mask_to_io_events,
+};
 use pulse_io_uring_core::resources::{
     MAX_FIXED_FILES, validate_direct_io_buffers, validate_direct_io_offset,
 };
 use pulse_io_uring_core::whitelist::{
     RwOffset, resolve_rw_offset, validate_async_cancel_sqe, validate_files_update_sqe,
-    validate_fsync_sqe, validate_link_timeout_sqe, validate_nop_sqe, validate_rw_fixed_sqe,
-    validate_rw_or_poll_sqe, validate_rw_sqe, validate_sqe_v1, validate_sync_file_range_sqe,
-    validate_timeout_remove_sqe, validate_timeout_sqe,
+    validate_fsync_sqe, validate_link_timeout_sqe, validate_nop_sqe, validate_poll_add_sqe,
+    validate_poll_remove_sqe, validate_rw_fixed_sqe, validate_rw_sqe, validate_sqe_v1,
+    validate_sync_file_range_sqe, validate_timeout_remove_sqe, validate_timeout_sqe,
 };
 use pulse_user_abi::io_uring::{
     IORING_FSYNC_DATASYNC, IORING_TIMEOUT_UPDATE, IOSQE_ASYNC, IOSQE_FIXED_FILE, IoUringSqe,
@@ -40,6 +40,11 @@ use pulse_user_abi::io_uring::{
 use super::{
     IoUringObject, IoUringState, OwnedInflightGuard,
     context::AsyncExecContext,
+    net_ops::{
+        PreparedAcceptData, PreparedConnectData, PreparedSocketMsgTransfer, PreparedSocketTransfer,
+        execute_socket_rw_request, prepare_accept_sqe, prepare_connect_sqe, prepare_send_recv_sqe,
+        prepare_sendmsg_recvmsg_sqe, prepare_shutdown_sqe, prepare_socket_sqe,
+    },
     worker_pool::global_worker_pool,
 };
 use crate::fd_table::{
@@ -49,7 +54,7 @@ use crate::fd_table::{
 use crate::mm::{
     FixedBufferIo, PinnedUserBuffers, UserBufferCursor, UserIoSegment, fits_single_pin_window,
 };
-use crate::net::{Socket, SocketInner};
+use crate::net::Socket;
 
 const UIO_MAXIOV: u32 = 1024;
 const RW_CHUNK_CAP: usize = 64 * 1024;
@@ -66,7 +71,7 @@ pub enum PreparedRwBuffer {
 
 impl PreparedRwBuffer {
     #[inline]
-    fn total_len(&self) -> usize {
+    pub(super) fn total_len(&self) -> usize {
         match self {
             Self::Empty => 0,
             Self::SingleWindow(win) => win.len(),
@@ -76,7 +81,7 @@ impl PreparedRwBuffer {
     }
 
     #[inline]
-    fn remaining_bytes(&self) -> usize {
+    pub(super) fn remaining_bytes(&self) -> usize {
         match self {
             Self::Empty => 0,
             Self::SingleWindow(win) => win.remaining(),
@@ -86,14 +91,14 @@ impl PreparedRwBuffer {
     }
 
     #[inline]
-    fn terminal_error(&self) -> Option<LinuxError> {
+    pub(super) fn terminal_error(&self) -> Option<LinuxError> {
         match self {
             Self::SingleWindow(win) => win.terminal_error(),
             _ => None,
         }
     }
 
-    fn copy_from_user_exact(&mut self, dst: &mut [u8]) -> LinuxResult<()> {
+    pub(super) fn copy_from_user_exact(&mut self, dst: &mut [u8]) -> LinuxResult<()> {
         match self {
             Self::Empty => Err(LinuxError::EFAULT),
             Self::SingleWindow(win) => win.copy_from_user_exact(dst),
@@ -102,7 +107,7 @@ impl PreparedRwBuffer {
         }
     }
 
-    fn copy_to_user_exact(&mut self, src: &[u8]) -> LinuxResult<()> {
+    pub(super) fn copy_to_user_exact(&mut self, src: &[u8]) -> LinuxResult<()> {
         match self {
             Self::Empty => Err(LinuxError::EFAULT),
             Self::SingleWindow(win) => win.copy_to_user_exact(src),
@@ -175,13 +180,38 @@ pub enum PreparedOpSpec {
         target: PollTarget,
         mask: u32,
         events: IoEvents,
+        force_async: bool,
+    },
+    PollRemove {
+        target_user_data: u64,
+    },
+    Socket {
+        domain: u32,
+        raw_ty: u32,
+        proto: u32,
+        force_async: bool,
     },
     Accept {
-        entry: FdEntry,
-        addr: usize,
-        addrlen_ptr: usize,
-        initial_addrlen: Option<u32>,
-        accept_flags: u32,
+        outcome: LinuxResult<Box<PreparedAcceptData>>,
+        force_async: bool,
+    },
+    Connect {
+        outcome: LinuxResult<Box<PreparedConnectData>>,
+        force_async: bool,
+    },
+    SendRecv {
+        outcome: LinuxResult<Box<PreparedSocketTransfer>>,
+        is_send: bool,
+        force_async: bool,
+    },
+    SendRecvMsg {
+        outcome: LinuxResult<Box<PreparedSocketMsgTransfer>>,
+        is_send: bool,
+        force_async: bool,
+    },
+    Shutdown {
+        outcome: LinuxResult<(FdEntry, u32)>,
+        force_async: bool,
     },
 }
 
@@ -215,7 +245,7 @@ fn copy_timeout_spec(ctx: &AsyncExecContext, addr: usize) -> LinuxResult<Duratio
     Ok(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
 }
 
-fn resolve_sqe_fd_entry(
+pub(super) fn resolve_sqe_fd_entry(
     state: &IoUringState,
     ctx: &AsyncExecContext,
     sqe: &IoUringSqe,
@@ -464,8 +494,7 @@ fn prepare_sqe_inner(
                         0,
                     ));
                 }
-                let pin_inline = !entry.object.as_any().is::<Socket>()
-                    && fits_single_pin_window(&segments);
+                let pin_inline = fits_single_pin_window(&segments);
                 let buffer = if pin_inline {
                     let mut cursor = UserBufferCursor::default();
                     let window = PinnedUserBuffers::pin_with_process(
@@ -628,66 +657,66 @@ fn prepare_sqe_inner(
             ))
         }
         op if op == io_uring_op::IORING_OP_POLL_ADD as u8 => {
-            validate_rw_or_poll_sqe(sqe)?;
-            if sqe.addr != 0 || sqe.off != 0 || sqe.len != 0 {
-                return Err(LinuxError::EINVAL);
-            }
+            validate_poll_add_sqe(sqe)?;
             let entry = resolve_sqe_fd_entry(state, ctx, sqe)?;
             let mask = sqe.op_flags;
-            let mut events = IoEvents::ALWAYS_POLL;
-            if mask & POLLIN != 0 {
-                events |= IoEvents::IN;
-            }
-            if mask & POLLPRI != 0 {
-                events |= IoEvents::PRI;
-            }
-            if mask & POLLOUT != 0 {
-                events |= IoEvents::OUT;
-            }
-            if mask & POLLRDHUP != 0 {
-                events |= IoEvents::RDHUP;
-            }
-            let target = if let Some(ring_obj) = entry.object.as_any().downcast_ref::<IoUringObject>() {
-                PollTarget::Ring(Arc::downgrade(ring_obj.state()))
-            } else {
-                PollTarget::Fd(entry.object)
-            };
+            let events = poll_mask_to_io_events(mask);
+            let target =
+                if let Some(ring_obj) = entry.object.as_any().downcast_ref::<IoUringObject>() {
+                    PollTarget::Ring(Arc::downgrade(ring_obj.state()))
+                } else {
+                    PollTarget::Fd(entry.object)
+                };
             Ok((
                 PreparedRequest::from_normal(sqe, Some(sqe.fd), None),
                 PreparedOpSpec::PollAdd {
                     target,
                     mask,
                     events,
+                    force_async,
                 },
             ))
         }
-        op if op == io_uring_op::IORING_OP_ACCEPT as u8 => {
-            validate_rw_or_poll_sqe(sqe)?;
-            let allowed = O_CLOEXEC | O_NONBLOCK;
-            if (sqe.op_flags & !allowed) != 0 {
-                return Err(LinuxError::EINVAL);
-            }
-            let entry = resolve_sqe_fd_entry(state, ctx, sqe)?;
-            if !entry.object.as_any().is::<Socket>() {
-                return Err(LinuxError::ENOTSOCK);
-            }
-            let addr = sqe.addr as usize;
-            let addrlen_ptr = sqe.off as usize;
-            let initial_addrlen = if addr != 0 && addrlen_ptr != 0 {
-                Some(ctx.read_value::<u32>(addrlen_ptr)?)
-            } else {
-                None
-            };
+        op if op == io_uring_op::IORING_OP_POLL_REMOVE as u8 => {
+            validate_poll_remove_sqe(sqe)?;
             Ok((
-                PreparedRequest::from_normal(sqe, Some(sqe.fd), None),
-                PreparedOpSpec::Accept {
-                    entry,
-                    addr,
-                    addrlen_ptr,
-                    initial_addrlen,
-                    accept_flags: sqe.op_flags,
+                PreparedRequest::from_normal(sqe, None, None),
+                PreparedOpSpec::PollRemove {
+                    target_user_data: sqe.addr,
                 },
             ))
+        }
+        op if op == io_uring_op::IORING_OP_SOCKET as u8 => prepare_socket_sqe(sqe, force_async),
+        op if op == io_uring_op::IORING_OP_ACCEPT as u8 => {
+            prepare_accept_sqe(state, ctx, sqe, force_async)
+        }
+        op if op == io_uring_op::IORING_OP_CONNECT as u8 => {
+            prepare_connect_sqe(state, ctx, sqe, force_async)
+        }
+        op if op == io_uring_op::IORING_OP_SEND as u8
+            || op == io_uring_op::IORING_OP_RECV as u8 =>
+        {
+            prepare_send_recv_sqe(
+                state,
+                ctx,
+                sqe,
+                op == io_uring_op::IORING_OP_SEND as u8,
+                force_async,
+            )
+        }
+        op if op == io_uring_op::IORING_OP_SENDMSG as u8
+            || op == io_uring_op::IORING_OP_RECVMSG as u8 =>
+        {
+            prepare_sendmsg_recvmsg_sqe(
+                state,
+                ctx,
+                sqe,
+                op == io_uring_op::IORING_OP_SENDMSG as u8,
+                force_async,
+            )
+        }
+        op if op == io_uring_op::IORING_OP_SHUTDOWN as u8 => {
+            prepare_shutdown_sqe(state, ctx, sqe, force_async)
         }
         _ => Err(LinuxError::EOPNOTSUPP),
     }
@@ -1013,8 +1042,12 @@ pub fn execute_rw_request(
         return;
     }
 
+    if entry.object.as_any().is::<Socket>() {
+        execute_socket_rw_request(state, ctx, req_id, entry, is_write, buffer, rw_flags, force_async);
+        return;
+    }
+
     if force_async
-        || entry.object.as_any().is::<Socket>()
         || matches!(buffer, PreparedRwBuffer::MultiWindow { .. })
     {
         spawn_worker_rw(
@@ -2026,6 +2059,7 @@ fn run_sync_rw(
 
 pub fn spawn_poll_add_future(
     state: &Arc<IoUringState>,
+    ctx: &AsyncExecContext,
     req_id: RequestId,
     target: PollTarget,
     mask: u32,
@@ -2035,236 +2069,95 @@ pub fn spawn_poll_add_future(
         return;
     };
     let state_cloned = Arc::clone(state);
-    let mut registrations: Vec<PollRegistration> = Vec::new();
+    let ctx_cloned = ctx.clone();
+    let registrations: core::cell::RefCell<Vec<PollRegistration>> =
+        core::cell::RefCell::new(Vec::new());
     let mut guard_slot = Some(guard);
 
     let handle = global_executor().spawn_and_poll_once(poll_fn(move |cx| {
-        registrations.clear();
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
+            registrations.borrow_mut().clear();
             let _ = guard_slot.take();
             return Poll::Ready(());
         }
 
-        if let Some(revents) = eval_poll_target(&target, mask) {
-            state_cloned.complete_request(req_id, revents as i32, 0, true);
-            let _ = guard_slot.take();
-            return Poll::Ready(());
-        }
-
-        match &target {
-            PollTarget::Fd(obj) => {
-                if let Err(err) = Arc::clone(obj).register_poll(cx, events, &mut registrations) {
-                    state_cloned.complete_request(req_id, -err.code(), 0, true);
-                    let _ = guard_slot.take();
-                    return Poll::Ready(());
-                }
-            }
-            PollTarget::Ring(weak_ring) => {
-                if let Some(target_ring) = weak_ring.upgrade() {
+        let step = drive_one_shot_poll_step(
+            || eval_poll_target_with_context(&target, &ctx_cloned, mask),
+            || match &target {
+                PollTarget::Fd(obj) => Arc::clone(obj).register_poll_with_context(
+                    &ctx_cloned.process,
+                    ctx_cloned.thread.as_ref(),
+                    cx,
+                    events,
+                    &mut registrations.borrow_mut(),
+                ),
+                PollTarget::Ring(weak_ring) => {
+                    let Some(target_ring) = weak_ring.upgrade() else {
+                        return Err(LinuxError::EBADF);
+                    };
                     let reg = target_ring.cq_wait_queue.register_owned_waker(cx.waker());
                     let weak_unreg = Arc::downgrade(&target_ring);
-                    registrations.push(PollRegistration::new(move || {
+                    registrations.borrow_mut().push(PollRegistration::new(move || {
                         if let Some(ring) = weak_unreg.upgrade() {
                             ring.cq_wait_queue.unregister_waker(reg);
                         }
                     }));
-                } else {
-                    state_cloned.complete_request(req_id, POLLNVAL as i32, 0, true);
-                    let _ = guard_slot.take();
-                    return Poll::Ready(());
+                    Ok(())
                 }
+            },
+            || registrations.borrow_mut().clear(),
+        );
+
+        match step {
+            Ok(OneShotPollStep::Ready(revents)) => {
+                registrations.borrow_mut().clear();
+                state_cloned.complete_request(req_id, revents as i32, 0, true);
+                let _ = guard_slot.take();
+                Poll::Ready(())
+            }
+            Ok(OneShotPollStep::Pending) => Poll::Pending,
+            Err(err) => {
+                registrations.borrow_mut().clear();
+                let res = if err == LinuxError::EBADF && matches!(target, PollTarget::Ring(_)) {
+                    POLLNVAL as i32
+                } else {
+                    -err.code()
+                };
+                state_cloned.complete_request(req_id, res, 0, true);
+                let _ = guard_slot.take();
+                Poll::Ready(())
             }
         }
-
-        // Re-check after registering waker so edge transitions never get lost.
-        if let Some(revents) = eval_poll_target(&target, mask) {
-            registrations.clear();
-            state_cloned.complete_request(req_id, revents as i32, 0, true);
-            let _ = guard_slot.take();
-            return Poll::Ready(());
-        }
-
-        Poll::Pending
     }));
 
     state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
-fn eval_poll_target(target: &PollTarget, mask: u32) -> Option<u32> {
-    match target {
+pub(super) fn eval_poll_target_with_context(
+    target: &PollTarget,
+    ctx: &AsyncExecContext,
+    mask: u32,
+) -> Option<u32> {
+    let rev = match target {
         PollTarget::Fd(obj) => {
-            let st = match obj.poll() {
-                Ok(s) => s,
-                Err(_) => return Some(POLLERR),
-            };
-            let mut rev = 0u32;
-            if st.readable && (mask & POLLIN != 0) {
-                rev |= POLLIN;
+            match obj.poll_readiness_with_context(&ctx.process, ctx.thread.as_deref()) {
+                Ok(readiness) => compute_poll_revents(mask, readiness),
+                Err(_) => POLLERR,
             }
-            if st.writable && (mask & POLLOUT != 0) {
-                rev |= POLLOUT;
-            }
-            if obj.is_rdhup() {
-                if mask & POLLRDHUP != 0 {
-                    rev |= POLLRDHUP;
-                }
-                if mask & POLLHUP != 0 {
-                    rev |= POLLHUP;
-                }
-            }
-            (rev != 0).then_some(rev)
         }
         PollTarget::Ring(weak) => {
             let Some(ring) = weak.upgrade() else {
                 return Some(POLLNVAL);
             };
-            if ring.is_dying() {
-                return Some(POLLHUP);
-            }
-            if (mask & POLLIN != 0) && ring.has_ready_cqes_fast() {
-                return Some(POLLIN);
-            }
-            None
-        }
-    }
-}
-
-pub fn spawn_accept_future(
-    state: &Arc<IoUringState>,
-    ctx: &AsyncExecContext,
-    req_id: RequestId,
-    entry: FdEntry,
-    addr: usize,
-    addrlen_ptr: usize,
-    initial_addrlen: Option<u32>,
-    accept_flags: u32,
-) {
-    let Some(guard) = state.try_enter_inflight_owned() else {
-        return;
-    };
-    let state_cloned = Arc::clone(state);
-    let ctx_cloned = ctx.clone();
-    let mut registrations: Vec<PollRegistration> = Vec::new();
-    let mut guard_slot = Some(guard);
-
-    let handle = global_executor().spawn_and_poll_once(poll_fn(move |cx| {
-        registrations.clear();
-        if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
-            let _ = guard_slot.take();
-            return Poll::Ready(());
-        }
-
-        let Some(sock) = entry.object.as_any().downcast_ref::<Socket>() else {
-            state_cloned.complete_request(req_id, -LinuxError::ENOTSOCK.code(), 0, true);
-            let _ = guard_slot.take();
-            return Poll::Ready(());
-        };
-
-        let is_readable = sock.poll().is_ok_and(|p| p.readable);
-        if !is_readable {
-            if let Err(err) = Arc::clone(&entry.object).register_poll(
-                cx,
-                IoEvents::IN | IoEvents::ERR | IoEvents::HUP,
-                &mut registrations,
-            ) {
-                state_cloned.complete_request(req_id, -err.code(), 0, true);
-                let _ = guard_slot.take();
-                return Poll::Ready(());
-            }
-            if !sock.poll().is_ok_and(|p| p.readable) {
-                return Poll::Pending;
-            }
-            registrations.clear();
-        }
-
-        // Claim `Completing` ownership before popping an accepted connection from LISTEN_TABLE,
-        // and execute blocking accept + user sockaddr copy on Path 3 so `poll()` never blocks.
-        if !state_cloned.try_begin_completing_request(req_id) {
-            let _ = guard_slot.take();
-            return Poll::Ready(());
-        }
-        let Some(wk_guard) = guard_slot.take() else {
-            return Poll::Ready(());
-        };
-        let state_wk = Arc::clone(&state_cloned);
-        let ctx_wk = ctx_cloned.clone();
-        let entry_wk = entry.clone();
-        global_worker_pool().submit(state_cloned.ring_id(), req_id, move || {
-            let _guard: OwnedInflightGuard = wk_guard;
-            let sock = entry_wk
-                .object
-                .as_any()
-                .downcast_ref::<Socket>()
-                .expect("Socket");
-            let res = match &sock.inner {
-                SocketInner::Tcp(tcp) => match tcp.accept().map_err(|e| LinuxError::from(e.canonicalize())) {
-                    Ok(new_tcp) => {
-                        let remote_addr = new_tcp.peer_addr().ok();
-                        let new_sock = Socket::new(
-                            sock.domain.load(core::sync::atomic::Ordering::Acquire),
-                            SocketInner::Tcp(new_tcp),
-                        );
-                        if (accept_flags & O_NONBLOCK) != 0 {
-                            new_sock.set_nonblocking_inner(true);
-                        }
-                        let mut new_fd_flags = FdFlags::empty();
-                        if (accept_flags & O_CLOEXEC) != 0 {
-                            new_fd_flags.insert(FdFlags::CLOEXEC);
-                        }
-                        if (accept_flags & O_NONBLOCK) != 0 {
-                            new_fd_flags.insert(FdFlags::NONBLOCK);
-                        }
-                        match ctx_wk.insert_fd_entry(FdEntry::new(Arc::new(new_sock), new_fd_flags)) {
-                            Ok(new_fd) => {
-                                if addr != 0 && addrlen_ptr != 0 {
-                                    if let (Some(remote), Some(buf_len)) = (remote_addr, initial_addrlen) {
-                                        write_peer_sockaddr(&ctx_wk, remote, addr, addrlen_ptr, buf_len);
-                                    }
-                                }
-                                new_fd as i32
-                            }
-                            Err(err) => -err.code(),
-                        }
-                    }
-                    Err(err) => -err.code(),
-                },
-                _ => -LinuxError::EOPNOTSUPP.code(),
+            let readiness = PollReadiness {
+                readable: ring.has_ready_cqes_fast(),
+                writable: false,
+                rdhup: false,
+                hup: ring.is_dying(),
+                err: false,
             };
-            state_wk.finish_completing_request(req_id, res, 0, true);
-        });
-        Poll::Ready(())
-    }));
-
-    state.install_cancel_handle_or_cancel(req_id, handle);
-}
-
-fn write_peer_sockaddr(
-    ctx: &AsyncExecContext,
-    remote: core::net::SocketAddr,
-    addr: usize,
-    addrlen_ptr: usize,
-    buf_len: u32,
-) {
-    let mut encoded = [0u8; 28];
-    let needed = match remote {
-        core::net::SocketAddr::V4(v4) => {
-            encoded[0..2].copy_from_slice(&(AF_INET as u16).to_ne_bytes());
-            encoded[2..4].copy_from_slice(&v4.port().to_be_bytes());
-            encoded[4..8].copy_from_slice(&v4.ip().octets());
-            16u32
-        }
-        core::net::SocketAddr::V6(v6) => {
-            encoded[0..2].copy_from_slice(&(AF_INET6 as u16).to_ne_bytes());
-            encoded[2..4].copy_from_slice(&v6.port().to_be_bytes());
-            encoded[4..8].copy_from_slice(&v6.flowinfo().to_be_bytes());
-            encoded[8..24].copy_from_slice(&v6.ip().octets());
-            encoded[24..28].copy_from_slice(&v6.scope_id().to_be_bytes());
-            28u32
+            compute_poll_revents(mask, readiness)
         }
     };
-    let copy_len = (buf_len as usize).min(needed as usize);
-    if copy_len > 0 {
-        let _ = ctx.write_bytes(addr, &encoded[..copy_len]);
-    }
-    let _ = ctx.write_value(addrlen_ptr, &needed);
+    (rev != 0).then_some(rev)
 }

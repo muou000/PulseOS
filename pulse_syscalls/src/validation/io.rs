@@ -1,7 +1,8 @@
 use core::time::Duration;
 
 use axerrno::LinuxError;
-use linux_raw_sys::general::{POLLIN, POLLOUT, timespec};
+use linux_raw_sys::general::timespec;
+use pulse_io_uring_core::poll::{PollReadiness, compute_poll_revents};
 pub(crate) use pulse_io_uring_core::resources::{UserIoSegment, validate_direct_io};
 
 pub(crate) fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
@@ -42,14 +43,12 @@ pub(crate) fn validate_user_io_segments(
 }
 
 pub(crate) fn requested_poll_revents(events: i16, readable: bool, writable: bool) -> i16 {
-    let mut revents = 0;
-    if readable && events & POLLIN as i16 != 0 {
-        revents |= POLLIN as i16;
-    }
-    if writable && events & POLLOUT as i16 != 0 {
-        revents |= POLLOUT as i16;
-    }
-    revents
+    let readiness = PollReadiness {
+        readable,
+        writable,
+        ..PollReadiness::default()
+    };
+    (compute_poll_revents((events as u16) as u32, readiness) & 0xffff) as i16
 }
 
 pub(crate) fn ppoll_timeout(ts: timespec) -> Result<Duration, LinuxError> {
@@ -58,7 +57,7 @@ pub(crate) fn ppoll_timeout(ts: timespec) -> Result<Duration, LinuxError> {
 
 #[cfg(test)]
 mod tests {
-    use linux_raw_sys::general::{POLLPRI, POLLRDHUP};
+    use linux_raw_sys::general::{POLLIN, POLLOUT, POLLPRI, POLLRDHUP};
 
     use super::*;
 

@@ -16,7 +16,7 @@ use smoltcp::{
 use spin::RwLock;
 
 use super::{
-    LISTEN_TABLE, SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
+    LISTEN_TABLE, SOCKET_SET, SocketPollRegistration, SocketSetWrapper, SocketWaitQueues,
     addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
     block_on_socket_io, deadline_from_ticks, register_wait_queue, schedule_poll, socket_deadline,
     unregister_wait_queue,
@@ -208,33 +208,16 @@ impl TcpSocket {
     ///
     /// The local port is generated automatically.
     pub fn connect(&self, remote_addr: SocketAddr) -> AxResult {
-        let mut retries = 0;
-        let remote_is_loopback = remote_addr.ip().is_loopback();
-        loop {
-            let res = self.connect_inner(remote_addr);
-            match res {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    if remote_is_loopback && e == AxError::ConnectionRefused && retries < 10 {
-                        retries += 1;
-                        debug!("Connect to loopback refused, retrying {}...", retries);
-                        axtask::sleep(core::time::Duration::from_millis(50));
-                        self.set_state(STATE_CLOSED);
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
-        }
+        self.connect_inner(remote_addr)
     }
 
-    fn connect_inner(&self, remote_addr: SocketAddr) -> AxResult {
+    fn begin_connect_common(&self, remote_addr: SocketAddr) -> AxResult<()> {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             let handle = self.handle;
 
             let remote_endpoint = from_core_sockaddr(remote_addr);
             let mut bound_endpoint = self.bound_endpoint()?;
-            let iface = if remote_endpoint.addr.as_bytes()[0] == 127 {
+            let iface = if remote_addr.ip().is_loopback() {
                 super::LOOPBACK.get().unwrap()
             } else {
                 debug!("Use eth net");
@@ -243,7 +226,18 @@ impl TcpSocket {
 
             if bound_endpoint.addr.is_none() {
                 let iface_lock = iface.lock();
-                if let Some(cidr) = iface_lock.ip_addrs().first() {
+                if let Some(cidr) = iface_lock.ip_addrs().iter().find(|c| {
+                    matches!(
+                        (remote_endpoint.addr, c.address()),
+                        (
+                            smoltcp::wire::IpAddress::Ipv4(_),
+                            smoltcp::wire::IpAddress::Ipv4(_)
+                        ) | (
+                            smoltcp::wire::IpAddress::Ipv6(_),
+                            smoltcp::wire::IpAddress::Ipv6(_)
+                        )
+                    )
+                }) {
                     bound_endpoint.addr = Some(cidr.address());
                 }
             }
@@ -279,7 +273,11 @@ impl TcpSocket {
             drop(ep);
             Ok(())
         })
-        .unwrap_or_else(|_| ax_err!(AlreadyExists, "socket connect() failed: already connected"))?; // EISCONN
+        .unwrap_or_else(|_| ax_err!(AlreadyExists, "socket connect() failed: already connected"))
+    }
+
+    fn connect_inner(&self, remote_addr: SocketAddr) -> AxResult {
+        self.begin_connect_common(remote_addr)?;
 
         schedule_poll();
 
@@ -313,6 +311,38 @@ impl TcpSocket {
                 self.reset_endpoints_and_close();
             }
             result
+        }
+    }
+
+    /// Initiates a TCP connection without blocking or mutating socket nonblocking flags.
+    ///
+    /// Returns `Ok(true)` if the connection is already established, `Ok(false)` while
+    /// handshake is in progress, or an error if initiation/handshake fails immediately.
+    pub fn try_connect_begin(&self, remote_addr: SocketAddr) -> AxResult<bool> {
+        self.begin_connect_common(remote_addr)?;
+        schedule_poll();
+        self.try_connect_poll()
+    }
+
+    /// Polls an in-progress non-blocking TCP connection attempt without blocking.
+    ///
+    /// Returns `Ok(true)` once established, `Ok(false)` while still connecting, or
+    /// `Err(ConnectionRefused)` if the handshake failed or was reset.
+    pub fn try_connect_poll(&self) -> AxResult<bool> {
+        SOCKET_SET.poll_interfaces();
+        match self.get_state() {
+            STATE_CONNECTED => return Ok(true),
+            STATE_CLOSED => return ax_err!(ConnectionRefused, "socket connect() failed"),
+            STATE_CONNECTING => {}
+            _ => return ax_err!(InvalidInput, "socket connect() failed: invalid state"),
+        }
+        let PollState { writable, .. } = self.poll_connect()?;
+        if !writable {
+            Ok(false)
+        } else if self.get_state() == STATE_CONNECTED {
+            Ok(true)
+        } else {
+            ax_err!(ConnectionRefused, "socket connect() failed")
         }
     }
 
@@ -400,22 +430,35 @@ impl TcpSocket {
         self.block_on(
             IoEvents::IN,
             socket_deadline(self.rcv_timeout()),
-            || match LISTEN_TABLE.accept(local_port) {
-                Ok((handle, (local_addr, peer_addr))) => {
-                    debug!("TCP socket accepted a new connection {}", peer_addr);
-                    let wait_queues = Arc::new(SocketWaitQueues::new());
-                    register_wait_queue(handle, wait_queues.clone());
-                    Ok(TcpSocket::new_connected(
-                        handle,
-                        local_addr,
-                        peer_addr,
-                        wait_queues,
-                    ))
-                }
-                Err(AxError::WouldBlock) => Err(AxError::WouldBlock),
-                Err(e) => Err(e),
-            },
+            || self.accept_once_locked(local_port),
         )
+    }
+
+    fn accept_once_locked(&self, local_port: u16) -> AxResult<TcpSocket> {
+        match LISTEN_TABLE.accept(local_port) {
+            Ok((handle, (local_addr, peer_addr))) => {
+                debug!("TCP socket accepted a new connection {}", peer_addr);
+                let wait_queues = Arc::new(SocketWaitQueues::new());
+                register_wait_queue(handle, wait_queues.clone());
+                Ok(TcpSocket::new_connected(
+                    handle,
+                    local_addr,
+                    peer_addr,
+                    wait_queues,
+                ))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Attempts to accept one pending connection without blocking or mutating socket state.
+    pub fn try_accept(&self) -> AxResult<TcpSocket> {
+        if !self.is_listening() {
+            return ax_err!(InvalidInput, "socket accept() failed: not listen");
+        }
+        SOCKET_SET.poll_interfaces();
+        let local_port = self.endpoints.read().local.port;
+        self.accept_once_locked(local_port)
     }
 
     /// Close the connection.
@@ -429,6 +472,7 @@ impl TcpSocket {
             });
             self.reset_endpoints_and_close();
             SOCKET_SET.poll_interfaces();
+            self.notify_wait_queues(IoEvents::IN | IoEvents::OUT | IoEvents::HUP);
             Ok(())
         })
         .unwrap_or(Ok(()))?;
@@ -441,6 +485,7 @@ impl TcpSocket {
             let handle = self.handle;
             register_wait_queue(handle, self.wait_queues.clone());
             SOCKET_SET.poll_interfaces();
+            self.notify_wait_queues(IoEvents::IN | IoEvents::OUT | IoEvents::HUP);
             Ok(())
         })
         .unwrap_or(Ok(()))?;
@@ -459,103 +504,135 @@ impl TcpSocket {
     pub fn close(&self) {
         SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(self.handle, |socket| socket.close());
         SOCKET_SET.poll_interfaces();
+        self.notify_wait_queues(IoEvents::IN | IoEvents::OUT | IoEvents::HUP);
+    }
+
+    fn recv_once_raw(handle: SocketHandle, buf: &mut [u8], peek: bool) -> AxResult<usize> {
+        SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+            if socket.recv_queue() > 0 {
+                let res = if peek {
+                    socket.peek_slice(buf)
+                } else {
+                    socket.recv_slice(buf)
+                };
+                res.map_err(|_| ax_err_type!(BadState, "socket recv() failed"))
+            } else if !socket.is_active() || !socket.may_recv() {
+                Ok(0)
+            } else {
+                Err(AxError::WouldBlock)
+            }
+        })
+    }
+
+    /// Attempts to receive data once without blocking or mutating `self.nonblock`.
+    pub fn try_recv(&self, buf: &mut [u8]) -> AxResult<usize> {
+        self.try_recv_inner(buf, false)
+    }
+
+    /// Attempts to peek received data without consuming it or mutating `self.nonblock`.
+    pub fn try_peek(&self, buf: &mut [u8]) -> AxResult<usize> {
+        self.try_recv_inner(buf, true)
+    }
+
+    fn wait_connect_if_connecting(&self, deadline: Option<axhal::time::TimeValue>) -> AxResult {
+        if self.is_connecting() {
+            if self.is_nonblocking() {
+                if !self.try_connect_poll()? {
+                    return Err(AxError::WouldBlock);
+                }
+            } else {
+                self.block_on(IoEvents::OUT, deadline, || match self.try_connect_poll()? {
+                    true => Ok(()),
+                    false => Err(AxError::WouldBlock),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn try_recv_inner(&self, buf: &mut [u8], peek: bool) -> AxResult<usize> {
+        if self.is_connecting() && !self.try_connect_poll()? {
+            return Err(AxError::WouldBlock);
+        }
+        if !self.is_connected() {
+            return ax_err!(NotConnected, "socket recv() failed");
+        }
+        SOCKET_SET.poll_interfaces();
+        Self::recv_once_raw(self.handle, buf, peek)
     }
 
     /// Receives data from the socket, stores it in the given buffer.
     pub fn recv(&self, buf: &mut [u8]) -> AxResult<usize> {
-        if self.is_connecting() {
-            return Err(AxError::WouldBlock);
-        } else if !self.is_connected() {
+        let deadline = socket_deadline(self.rcv_timeout());
+        self.wait_connect_if_connecting(deadline)?;
+        if !self.is_connected() {
             return ax_err!(NotConnected, "socket recv() failed");
         }
 
         let handle = self.handle;
-        self.block_on(IoEvents::IN, socket_deadline(self.rcv_timeout()), || {
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                if socket.recv_queue() > 0 {
-                    // data available
-                    // TODO: use socket.recv(|buf| {...})
-                    let len = socket
-                        .recv_slice(buf)
-                        .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
-                    Ok(len)
-                } else if !socket.is_active() {
-                    // connection closed
-                    Ok(0)
-                } else if !socket.may_recv() {
-                    // connection closed
-                    Ok(0)
-                } else {
-                    // no more data
-                    Err(AxError::WouldBlock)
-                }
-            })
+        self.block_on(IoEvents::IN, deadline, || {
+            Self::recv_once_raw(handle, buf, false)
         })
     }
+
     /// Receives data from the socket, stores it in the given buffer.
     ///
     /// It will return [`Err(Timeout)`](AxError::Timeout) if expired.
     pub fn recv_timeout(&self, buf: &mut [u8], ticks: u64) -> AxResult<usize> {
-        if self.is_connecting() {
-            return Err(AxError::WouldBlock);
-        } else if !self.is_connected() {
+        let deadline = Some(deadline_from_ticks(ticks));
+        self.wait_connect_if_connecting(deadline)?;
+        if !self.is_connected() {
             return ax_err!(NotConnected, "socket recv() failed");
         }
 
         let handle = self.handle;
-        self.block_on(IoEvents::IN, Some(deadline_from_ticks(ticks)), || {
-            SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                if socket.recv_queue() > 0 {
-                    // data available
-                    // TODO: use socket.recv(|buf| {...})
-                    let len = socket
-                        .recv_slice(buf)
-                        .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
-                    Ok(len)
-                } else if !socket.is_active() {
-                    // connection closed
-                    Ok(0)
-                } else if !socket.may_recv() {
-                    // connection closed
-                    Ok(0)
-                } else {
-                    // no more data
-                    Err(AxError::WouldBlock)
-                }
-            })
+        self.block_on(IoEvents::IN, deadline, || {
+            Self::recv_once_raw(handle, buf, false)
         })
+    }
+
+    fn send_once_raw(handle: SocketHandle, buf: &[u8]) -> AxResult<usize> {
+        let result = SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+            if !socket.is_active() || !socket.may_send() {
+                ax_err!(BrokenPipe, "socket send() failed")
+            } else if socket.can_send() {
+                let len = socket
+                    .send_slice(buf)
+                    .map_err(|_| ax_err_type!(BadState, "socket send() failed"))?;
+                Ok(len)
+            } else {
+                Err(AxError::WouldBlock)
+            }
+        });
+        if result.as_ref().is_ok_and(|len| *len != 0) {
+            schedule_poll();
+        }
+        result
+    }
+
+    /// Attempts to transmit data once without blocking or mutating `self.nonblock`.
+    pub fn try_send(&self, buf: &[u8]) -> AxResult<usize> {
+        if self.is_connecting() && !self.try_connect_poll()? {
+            return Err(AxError::WouldBlock);
+        }
+        if !self.is_connected() {
+            return ax_err!(BrokenPipe, "socket send() failed");
+        }
+        SOCKET_SET.poll_interfaces();
+        Self::send_once_raw(self.handle, buf)
     }
 
     /// Transmits data in the given buffer.
     pub fn send(&self, buf: &[u8]) -> AxResult<usize> {
-        if self.is_connecting() {
-            return Err(AxError::WouldBlock);
-        } else if !self.is_connected() {
+        let deadline = socket_deadline(self.snd_timeout());
+        self.wait_connect_if_connecting(deadline)?;
+        if !self.is_connected() {
             return ax_err!(BrokenPipe, "socket send() failed");
         }
 
         let handle = self.handle;
-        self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
-            let result = SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
-                if !socket.is_active() || !socket.may_send() {
-                    // closed by remote or shutdown locally
-                    ax_err!(BrokenPipe, "socket send() failed")
-                } else if socket.can_send() {
-                    // connected, and the tx buffer is not full
-                    // TODO: use socket.send(|buf| {...})
-                    let len = socket
-                        .send_slice(buf)
-                        .map_err(|_| ax_err_type!(BadState, "socket send() failed"))?;
-                    Ok(len)
-                } else {
-                    // tx buffer is full
-                    Err(AxError::WouldBlock)
-                }
-            });
-            if result.as_ref().is_ok_and(|len| *len != 0) {
-                schedule_poll();
-            }
-            result
+        self.block_on(IoEvents::OUT, deadline, || {
+            Self::send_once_raw(handle, buf)
         })
     }
     pub fn poll(&self) -> AxResult<PollState> {
@@ -659,6 +736,38 @@ impl TcpSocket {
     pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
         &self.wait_queues.any
     }
+
+    /// Registers an RAII per-socket waker on this socket's readiness wait queues.
+    pub fn register_poll_waker(
+        &self,
+        waker: &core::task::Waker,
+        events: IoEvents,
+    ) -> SocketPollRegistration {
+        self.wait_queues.register_owned(waker, events)
+    }
+
+    /// Returns the read readiness wait queue for this socket.
+    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+        &self.wait_queues.read
+    }
+
+    /// Returns the write readiness wait queue for this socket.
+    pub fn write_wait_queue(&self) -> &axtask::WaitQueue {
+        &self.wait_queues.write
+    }
+
+    /// Wakes waiters on this socket's wait queues matching `events`.
+    pub fn notify_wait_queues(&self, events: IoEvents) {
+        self.wait_queues.notify(events);
+    }
+
+    /// Returns `true` when an established TCP connection has been torn down in both directions.
+    pub fn is_hup(&self) -> bool {
+        self.get_state() == STATE_CONNECTED
+            && SOCKET_SET.with_socket::<tcp::Socket, _, _>(self.handle, |socket| {
+                !socket.is_active() || (!socket.may_recv() && !socket.may_send())
+            })
+    }
 }
 
 /// Private methods
@@ -712,7 +821,8 @@ impl TcpSocket {
     }
 
     #[inline]
-    fn is_connecting(&self) -> bool {
+    /// Whether the socket is in the connecting handshake state.
+    pub fn is_connecting(&self) -> bool {
         self.get_state() == STATE_CONNECTING
     }
 

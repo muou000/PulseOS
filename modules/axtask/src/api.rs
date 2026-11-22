@@ -40,7 +40,9 @@ pub use crate::task::{CurrentTask, TaskId, TaskInner};
 #[doc(cfg(feature = "multitask"))]
 pub use crate::task_ext::{TaskExtMut, TaskExtRef, TaskExtSwitch};
 #[doc(cfg(feature = "multitask"))]
-pub use crate::wait_queue::{WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource};
+pub use crate::wait_queue::{
+    WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource, WakerRegistration,
+};
 
 /// The reference type of a task.
 pub type AxTaskRef = Arc<AxTask>;
