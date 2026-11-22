@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use core::{
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -11,12 +11,12 @@ use axsync::Mutex;
 use smoltcp::{
     iface::SocketHandle,
     socket::udp::{self, BindError, SendError},
-    wire::{IpEndpoint, IpListenEndpoint},
+    wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address},
 };
 use spin::RwLock;
 
 use super::{
-    SOCKET_SET, SocketSetWrapper, SocketWaitQueues,
+    SOCKET_SET, SocketPollRegistration, SocketSetWrapper, SocketWaitQueues,
     addr::{UNSPECIFIED_ENDPOINT, from_core_sockaddr, into_core_sockaddr, is_unspecified},
     block_on_socket_io, deadline_from_ticks, register_wait_queue, schedule_poll, socket_deadline,
 };
@@ -55,13 +55,69 @@ impl UdpSocket {
         }
     }
 
+    fn select_ipv4_source(dest: Ipv4Address) -> Ipv4Addr {
+        let ip4 = Ipv4Addr::from(dest.0);
+        if ip4.is_loopback() || ip4.is_unspecified() {
+            return Ipv4Addr::LOCALHOST;
+        }
+        if super::ETH0.is_inited() {
+            if let Some(addr) = super::ETH0
+                .iface
+                .lock()
+                .ip_addrs()
+                .iter()
+                .find_map(|c| match c.address() {
+                    IpAddress::Ipv4(addr) => Some(Ipv4Addr::from(addr.0)),
+                    IpAddress::Ipv6(_) => None,
+                })
+            {
+                return addr;
+            }
+        }
+        Ipv4Addr::LOCALHOST
+    }
+
     /// Returns the local address and port, or
     /// [`Err(NotConnected)`](AxError::NotConnected) if not connected.
     pub fn local_addr(&self) -> AxResult<SocketAddr> {
-        match self.local_addr.try_read() {
-            Some(addr) => addr.map(into_core_sockaddr).ok_or(AxError::NotConnected),
-            None => Err(AxError::NotConnected),
+        let local = match self.local_addr.try_read() {
+            Some(guard) => (*guard).ok_or(AxError::NotConnected)?,
+            None => return Err(AxError::NotConnected),
+        };
+        if is_unspecified(local.addr) {
+            let peer = self.peer_addr.try_read().and_then(|g| *g);
+            if let Some(peer) = peer {
+                let resolved_ip = match peer.addr {
+                    IpAddress::Ipv4(v4) => IpAddr::V4(Self::select_ipv4_source(v4)),
+                    IpAddress::Ipv6(v6) => {
+                        let ip6 = Ipv6Addr::from(v6.0);
+                        if let Some(mapped) = ip6.to_ipv4_mapped() {
+                            let src_v4 = Self::select_ipv4_source(Ipv4Address(mapped.octets()));
+                            IpAddr::V6(src_v4.to_ipv6_mapped())
+                        } else if ip6.is_loopback() || ip6.is_unspecified() {
+                            IpAddr::V6(Ipv6Addr::LOCALHOST)
+                        } else {
+                            let eth_ip6 = if super::ETH0.is_inited() {
+                                super::ETH0
+                                    .iface
+                                    .lock()
+                                    .ip_addrs()
+                                    .iter()
+                                    .find_map(|c| match c.address() {
+                                        IpAddress::Ipv6(addr) => Some(Ipv6Addr::from(addr.0)),
+                                        IpAddress::Ipv4(_) => None,
+                                    })
+                            } else {
+                                None
+                            };
+                            IpAddr::V6(eth_ip6.unwrap_or(Ipv6Addr::LOCALHOST))
+                        }
+                    }
+                };
+                return Ok(SocketAddr::new(resolved_ip, local.port));
+            }
         }
+        Ok(into_core_sockaddr(local))
     }
 
     /// Returns the remote address and port, or
@@ -184,18 +240,54 @@ impl UdpSocket {
         self.send_impl(buf, from_core_sockaddr(remote_addr))
     }
 
+    /// Attempts to send a datagram to `remote_addr` without blocking or mutating `self.nonblock`.
+    pub fn try_send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> AxResult<usize> {
+        if remote_addr.port() == 0 || remote_addr.ip().is_unspecified() {
+            return ax_err!(InvalidInput, "socket send_to() failed: invalid address");
+        }
+        self.ensure_bound_for_remote(&remote_addr)?;
+        SOCKET_SET.poll_interfaces();
+        self.try_send_endpoint(buf, from_core_sockaddr(remote_addr))
+    }
+
+    /// Attempts to send a datagram on a connected UDP socket without blocking.
+    pub fn try_send(&self, buf: &[u8]) -> AxResult<usize> {
+        let remote_endpoint = self.remote_endpoint()?;
+        let remote_addr = into_core_sockaddr(remote_endpoint);
+        self.ensure_bound_for_remote(&remote_addr)?;
+        SOCKET_SET.poll_interfaces();
+        self.try_send_endpoint(buf, remote_endpoint)
+    }
+
+    fn ensure_bound_for_remote(&self, remote_addr: &SocketAddr) -> AxResult {
+        if self.local_addr.read().is_none() {
+            let unspec = match remote_addr {
+                SocketAddr::V4(_) => SocketAddr::new(
+                    core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
+                    0,
+                ),
+                SocketAddr::V6(_) => SocketAddr::new(
+                    core::net::IpAddr::V6(core::net::Ipv6Addr::UNSPECIFIED),
+                    0,
+                ),
+            };
+            self.bind(unspec)?;
+        }
+        Ok(())
+    }
+
     /// Receives a single datagram message on the socket. On success, returns
     /// the number of bytes read and the origin.
     pub fn recv_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
         self.recv_impl(socket_deadline(self.rcv_timeout()), |socket| {
-            match socket.recv() {
-                Ok((packet_buf, meta)) => {
-                    let copied_len = core::cmp::min(buf.len(), packet_buf.len());
-                    buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
-                    Ok((copied_len, into_core_sockaddr(meta.endpoint)))
-                }
-                Err(_) => ax_err!(BadState, "socket recv_from() failed"),
-            }
+            Self::copy_datagram(socket.recv().map(|(p, m)| (p, m.endpoint)), buf)
+        })
+    }
+
+    /// Attempts to receive a single datagram without blocking or mutating `self.nonblock`.
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
+        self.try_recv_impl(|socket| {
+            Self::copy_datagram(socket.recv().map(|(p, m)| (p, m.endpoint)), buf)
         })
     }
 
@@ -219,15 +311,29 @@ impl UdpSocket {
     /// the queue. On success, returns the number of bytes read and the origin.
     pub fn peek_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
         self.recv_impl(socket_deadline(self.rcv_timeout()), |socket| {
-            match socket.peek() {
-                Ok((packet_buf, meta)) => {
-                    let copied_len = core::cmp::min(buf.len(), packet_buf.len());
-                    buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
-                    Ok((copied_len, into_core_sockaddr(meta.endpoint)))
-                }
-                Err(_) => ax_err!(BadState, "socket recv_from() failed"),
-            }
+            Self::copy_datagram(socket.peek().map(|(p, m)| (p, m.endpoint)), buf)
         })
+    }
+
+    /// Attempts to peek a single datagram without blocking or removing it from the queue.
+    pub fn try_peek_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
+        self.try_recv_impl(|socket| {
+            Self::copy_datagram(socket.peek().map(|(p, m)| (p, m.endpoint)), buf)
+        })
+    }
+
+    fn copy_datagram<E>(
+        res: Result<(&[u8], IpEndpoint), E>,
+        buf: &mut [u8],
+    ) -> AxResult<(usize, SocketAddr)> {
+        match res {
+            Ok((packet_buf, endpoint)) => {
+                let copied_len = core::cmp::min(buf.len(), packet_buf.len());
+                buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
+                Ok((copied_len, into_core_sockaddr(endpoint)))
+            }
+            Err(_) => ax_err!(BadState, "socket recv_from() failed"),
+        }
     }
 
     /// Connects this UDP socket to a remote address, allowing the `send` and
@@ -291,6 +397,35 @@ impl UdpSocket {
         }
     }
 
+    /// Attempts to receive a datagram from the connected peer without blocking.
+    pub fn try_recv(&self, buf: &mut [u8]) -> AxResult<usize> {
+        let remote_endpoint = self.remote_endpoint()?;
+        if self.local_addr.read().is_none() {
+            self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
+        }
+        SOCKET_SET.poll_interfaces();
+        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+            if !socket.is_open() {
+                return ax_err!(NotConnected, "socket recv() failed");
+            }
+            while socket.can_recv() {
+                let (packet_buf, meta) = socket
+                    .recv()
+                    .map_err(|_| ax_err_type!(BadState, "socket recv() failed"))?;
+                if (!is_unspecified(remote_endpoint.addr)
+                    && remote_endpoint.addr != meta.endpoint.addr)
+                    || (remote_endpoint.port != 0 && remote_endpoint.port != meta.endpoint.port)
+                {
+                    continue;
+                }
+                let copied_len = core::cmp::min(buf.len(), packet_buf.len());
+                buf[..copied_len].copy_from_slice(&packet_buf[..copied_len]);
+                return Ok(copied_len);
+            }
+            Err(AxError::WouldBlock)
+        })
+    }
+
     /// Close the socket.
     pub fn shutdown(&self) -> AxResult {
         SOCKET_SET.poll_interfaces();
@@ -298,6 +433,7 @@ impl UdpSocket {
             debug!("UDP socket {}: shutting down", self.handle);
             socket.close();
         });
+        self.notify_wait_queues(IoEvents::IN | IoEvents::OUT | IoEvents::HUP);
         Ok(())
     }
 
@@ -348,35 +484,60 @@ impl UdpSocket {
         }
     }
 
+    fn try_send_endpoint(&self, buf: &[u8], remote_endpoint: IpEndpoint) -> AxResult<usize> {
+        let result = SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+            if !socket.is_open() {
+                ax_err!(NotConnected, "socket send() failed")
+            } else if socket.can_send() {
+                socket
+                    .send_slice(buf, remote_endpoint)
+                    .map_err(|e| match e {
+                        SendError::BufferFull => AxError::WouldBlock,
+                        SendError::Unaddressable => {
+                            ax_err_type!(ConnectionRefused, "socket send() failed")
+                        }
+                    })?;
+                Ok(buf.len())
+            } else {
+                Err(AxError::WouldBlock)
+            }
+        });
+        if result.as_ref().is_ok_and(|len| *len != 0) {
+            schedule_poll();
+        }
+        result
+    }
+
     fn send_impl(&self, buf: &[u8], remote_endpoint: IpEndpoint) -> AxResult<usize> {
+        self.ensure_bound_for_remote(&into_core_sockaddr(remote_endpoint))?;
+        self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
+            self.try_send_endpoint(buf, remote_endpoint)
+        })
+    }
+
+    fn try_recv_impl<F, T>(&self, mut op: F) -> AxResult<T>
+    where
+        F: FnMut(&mut udp::Socket) -> AxResult<T>,
+    {
         if self.local_addr.read().is_none() {
             self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
         }
-        // info!("send to addr: {:?}", remote_endpoint);
-        self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
-            let result = SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-                if !socket.is_open() {
-                    // not connected
-                    ax_err!(NotConnected, "socket send() failed")
-                } else if socket.can_send() {
-                    socket
-                        .send_slice(buf, remote_endpoint)
-                        .map_err(|e| match e {
-                            SendError::BufferFull => AxError::WouldBlock,
-                            SendError::Unaddressable => {
-                                ax_err_type!(ConnectionRefused, "socket send() failed")
-                            }
-                        })?;
-                    Ok(buf.len())
-                } else {
-                    // tx buffer is full
-                    Err(AxError::WouldBlock)
-                }
-            });
-            if result.as_ref().is_ok_and(|len| *len != 0) {
-                schedule_poll();
+        SOCKET_SET.poll_interfaces();
+        self.recv_once_locked(&mut op)
+    }
+
+    fn recv_once_locked<F, T>(&self, op: &mut F) -> AxResult<T>
+    where
+        F: FnMut(&mut udp::Socket) -> AxResult<T>,
+    {
+        SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
+            if !socket.is_open() {
+                ax_err!(NotConnected, "socket recv() failed")
+            } else if socket.can_recv() {
+                op(socket)
+            } else {
+                Err(AxError::WouldBlock)
             }
-            result
         })
     }
 
@@ -388,20 +549,7 @@ impl UdpSocket {
             self.bind(into_core_sockaddr(UNSPECIFIED_ENDPOINT))?;
         }
 
-        self.block_on(IoEvents::IN, deadline, || {
-            SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
-                if !socket.is_open() {
-                    // not bound
-                    ax_err!(NotConnected, "socket recv() failed")
-                } else if socket.can_recv() {
-                    // data available
-                    op(socket)
-                } else {
-                    // no more data
-                    Err(AxError::WouldBlock)
-                }
-            })
-        })
+        self.block_on(IoEvents::IN, deadline, || self.recv_once_locked(&mut op))
     }
 
     fn block_on<F, T>(
@@ -448,6 +596,30 @@ impl UdpSocket {
     /// Returns the wait queue for this socket.
     pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
         &self.wait_queues.any
+    }
+
+    /// Registers an RAII per-socket waker on this socket's readiness wait queues.
+    pub fn register_poll_waker(
+        &self,
+        waker: &core::task::Waker,
+        events: IoEvents,
+    ) -> SocketPollRegistration {
+        self.wait_queues.register_owned(waker, events)
+    }
+
+    /// Returns the read readiness wait queue for this socket.
+    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+        &self.wait_queues.read
+    }
+
+    /// Returns the write readiness wait queue for this socket.
+    pub fn write_wait_queue(&self) -> &axtask::WaitQueue {
+        &self.wait_queues.write
+    }
+
+    /// Wakes waiters on this socket's wait queues matching `events`.
+    pub fn notify_wait_queues(&self, events: IoEvents) {
+        self.wait_queues.notify(events);
     }
 }
 

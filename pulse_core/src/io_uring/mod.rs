@@ -8,6 +8,7 @@
 //! or notify `eventfd`/`WaitQueue` while holding `SpinNoIrq`.
 
 pub mod context;
+mod net_ops;
 mod ops;
 pub mod worker_pool;
 
@@ -50,10 +51,14 @@ use pulse_user_abi::io_uring::{
 };
 
 use self::context::AsyncExecContext;
+use self::net_ops::{
+    execute_accept_request, execute_connect_request, execute_send_recv_request,
+    execute_sendmsg_recvmsg_request, execute_shutdown_request, execute_socket_request,
+};
 use self::ops::{
-    PreparedOpSpec, compute_monotonic_deadline, execute_fsync_request, execute_rw_request,
-    execute_sync_file_range_request, prepare_sqe, spawn_accept_future, spawn_poll_add_future,
-    spawn_timer_future,
+    PreparedOpSpec, compute_monotonic_deadline, eval_poll_target_with_context,
+    execute_fsync_request, execute_rw_request, execute_sync_file_range_request, prepare_sqe,
+    spawn_poll_add_future, spawn_timer_future,
 };
 use self::worker_pool::{alloc_ring_pool_id, global_worker_pool};
 use crate::fd_table::{EventFdObject, FdEntry, FdFlags, FdObject, PollEventSequence, PollRegistration};
@@ -651,27 +656,95 @@ impl IoUringState {
                 target,
                 mask,
                 events,
+                force_async,
             } => {
-                spawn_poll_add_future(self, req_id, target, mask, events);
+                if !force_async {
+                    if let Some(revents) = eval_poll_target_with_context(&target, ctx, mask) {
+                        if let Some(eff) = self.claim_completion_for_sync(req_id, revents as i32, false) {
+                            pending_starts.extend(eff);
+                        }
+                        return;
+                    }
+                }
+                spawn_poll_add_future(self, ctx, req_id, target, mask, events);
+            }
+            PreparedOpSpec::PollRemove { target_user_data } => {
+                let (res, eff) = {
+                    let mut inner = self.inner.lock();
+                    inner.orch.poll_remove(target_user_data)
+                };
+                pending_starts.extend(self.publish_effects(eff, false));
+                if let Some(more) = self.claim_completion_for_sync(req_id, res, false) {
+                    pending_starts.extend(more);
+                }
+            }
+            PreparedOpSpec::Socket {
+                domain,
+                raw_ty,
+                proto,
+                force_async,
+            } => {
+                execute_socket_request(self, ctx, req_id, domain, raw_ty, proto, force_async);
             }
             PreparedOpSpec::Accept {
-                entry,
-                addr,
-                addrlen_ptr,
-                initial_addrlen,
-                accept_flags,
-            } => {
-                spawn_accept_future(
-                    self,
-                    ctx,
-                    req_id,
-                    entry,
-                    addr,
-                    addrlen_ptr,
-                    initial_addrlen,
-                    accept_flags,
-                );
-            }
+                outcome,
+                force_async,
+            } => match outcome {
+                Ok(data) => execute_accept_request(self, ctx, req_id, data, force_async),
+                Err(err) => {
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            },
+            PreparedOpSpec::Connect {
+                outcome,
+                force_async,
+            } => match outcome {
+                Ok(data) => execute_connect_request(self, ctx, req_id, data, force_async),
+                Err(err) => {
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            },
+            PreparedOpSpec::SendRecv {
+                outcome,
+                is_send,
+                force_async,
+            } => match outcome {
+                Ok(data) => execute_send_recv_request(self, ctx, req_id, data, is_send, force_async),
+                Err(err) => {
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            },
+            PreparedOpSpec::SendRecvMsg {
+                outcome,
+                is_send,
+                force_async,
+            } => match outcome {
+                Ok(data) => {
+                    execute_sendmsg_recvmsg_request(self, ctx, req_id, data, is_send, force_async)
+                }
+                Err(err) => {
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            },
+            PreparedOpSpec::Shutdown {
+                outcome,
+                force_async,
+            } => match outcome {
+                Ok((entry, how)) => execute_shutdown_request(self, req_id, entry, how, force_async),
+                Err(err) => {
+                    if let Some(eff) = self.claim_completion_for_sync(req_id, -err.code(), false) {
+                        pending_starts.extend(eff);
+                    }
+                }
+            },
         }
     }
 

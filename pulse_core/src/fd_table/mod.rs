@@ -159,6 +159,57 @@ pub trait FdObject: Send + Sync {
         self.register_poll(cx, events, registrations)
     }
 
+    /// Polls readiness using an explicit submitting `process` and `thread` context.
+    fn poll_with_context(
+        &self,
+        _process: &crate::task::Process,
+        _thread: Option<&crate::task::Thread>,
+    ) -> LinuxResult<PollState> {
+        self.poll()
+    }
+
+    /// Registers a poll waker using an explicit submitting `process` and `thread` context.
+    fn register_poll_with_context(
+        self: Arc<Self>,
+        _process: &Arc<crate::task::Process>,
+        thread: Option<&Arc<crate::task::Thread>>,
+        cx: &mut core::task::Context<'_>,
+        events: axpoll::IoEvents,
+        registrations: &mut Vec<PollRegistration>,
+    ) -> LinuxResult {
+        if let Some(thread) = thread {
+            self.register_poll_for_thread(thread, cx, events, registrations)
+        } else {
+            self.register_poll(cx, events, registrations)
+        }
+    }
+
+    /// Returns `true` when `POLLHUP` condition holds on this file descriptor.
+    fn poll_hup(&self) -> bool {
+        false
+    }
+
+    /// Returns `true` when `POLLERR` condition holds on this file descriptor.
+    fn poll_err(&self) -> bool {
+        false
+    }
+
+    /// Evaluates full [`pulse_io_uring_core::poll::PollReadiness`] with explicit context.
+    fn poll_readiness_with_context(
+        &self,
+        process: &crate::task::Process,
+        thread: Option<&crate::task::Thread>,
+    ) -> LinuxResult<pulse_io_uring_core::poll::PollReadiness> {
+        let state = self.poll_with_context(process, thread)?;
+        Ok(pulse_io_uring_core::poll::PollReadiness {
+            readable: state.readable,
+            writable: state.writable,
+            rdhup: self.is_rdhup(),
+            hup: self.poll_hup(),
+            err: self.poll_err(),
+        })
+    }
+
     fn location(&self) -> Option<Location> {
         None
     }

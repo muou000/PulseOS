@@ -23,16 +23,35 @@ impl LoopbackDev {
 }
 
 fn snoop_tcp_from_ip(buffer: &[u8], sockets: &mut SocketSet) -> Result<(), smoltcp::wire::Error> {
-    use smoltcp::wire::{IpProtocol, Ipv4Packet, TcpPacket};
+    use smoltcp::wire::{IpAddress, IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet, TcpPacket};
 
     use crate::SocketAddr;
 
-    let ipv4_packet = Ipv4Packet::new_checked(buffer)?;
+    let (src_ip, dst_ip, next_header, payload) = match IpVersion::of_packet(buffer)? {
+        IpVersion::Ipv4 => {
+            let ipv4 = Ipv4Packet::new_checked(buffer)?;
+            (
+                IpAddress::from(ipv4.src_addr()),
+                IpAddress::from(ipv4.dst_addr()),
+                ipv4.next_header(),
+                ipv4.payload(),
+            )
+        }
+        IpVersion::Ipv6 => {
+            let ipv6 = Ipv6Packet::new_checked(buffer)?;
+            (
+                IpAddress::from(ipv6.src_addr()),
+                IpAddress::from(ipv6.dst_addr()),
+                ipv6.next_header(),
+                ipv6.payload(),
+            )
+        }
+    };
 
-    if ipv4_packet.next_header() == IpProtocol::Tcp {
-        let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload())?;
-        let src_addr = SocketAddr::new(ipv4_packet.src_addr().into(), tcp_packet.src_port());
-        let dst_addr = SocketAddr::new(ipv4_packet.dst_addr().into(), tcp_packet.dst_port());
+    if next_header == IpProtocol::Tcp {
+        let tcp_packet = TcpPacket::new_checked(payload)?;
+        let src_addr = SocketAddr::new(src_ip, tcp_packet.src_port());
+        let dst_addr = SocketAddr::new(dst_ip, tcp_packet.dst_port());
         let is_first = tcp_packet.syn() && !tcp_packet.ack();
         log::debug!(
             "snoop_tcp_from_ip: src={}, dst={}, syn={}, ack={}, is_first={}",

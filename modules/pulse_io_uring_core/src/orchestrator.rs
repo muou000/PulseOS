@@ -210,6 +210,10 @@ pub struct RequestOrchestrator {
     requests: BTreeMap<RequestId, RequestEntry>,
     /// Ordered set of incomplete `(submit_seq, RequestId)` for O(1) lowest-seq watermark check.
     incomplete_seqs: BTreeSet<(u64, RequestId)>,
+    /// Secondary index `(user_data, RequestId)` for O(log N) lookup by `user_data`.
+    user_data_index: BTreeSet<(u64, RequestId)>,
+    /// Ordered set of `(target_completions, RequestId)` for active count-triggered timeouts.
+    count_timeouts: BTreeSet<(u64, RequestId)>,
     /// FIFO queue of deferred chain heads waiting behind an active drain barrier.
     drain_queue: VecDeque<QueuedChainHead>,
 }
@@ -229,6 +233,8 @@ impl RequestOrchestrator {
             drain_next: false,
             requests: BTreeMap::new(),
             incomplete_seqs: BTreeSet::new(),
+            user_data_index: BTreeSet::new(),
+            count_timeouts: BTreeSet::new(),
             drain_queue: VecDeque::new(),
         }
     }
@@ -335,6 +341,7 @@ impl RequestOrchestrator {
             }
 
             self.incomplete_seqs.insert((seq, id));
+            self.user_data_index.insert((item.user_data, id));
             self.requests.insert(
                 id,
                 RequestEntry {
@@ -442,6 +449,13 @@ impl RequestOrchestrator {
                 return;
             }
             req.phase = RequestPhase::Running;
+            if let RequestKind::Timeout {
+                target_completions: Some(target),
+                ..
+            } = req.kind
+            {
+                self.count_timeouts.insert((target, id));
+            }
             effects.start_requests.push(id);
             req.attached_link_timeout
         };
@@ -549,6 +563,27 @@ impl RequestOrchestrator {
         Some(effects)
     }
 
+    fn remove_request_entry(&mut self, id: RequestId) -> Option<RequestEntry> {
+        let entry = self.requests.remove(&id)?;
+        self.incomplete_seqs.remove(&(entry.submit_seq, entry.id));
+        self.user_data_index.remove(&(entry.user_data, entry.id));
+        if let RequestKind::Timeout {
+            target_completions: Some(target),
+            ..
+        } = entry.kind
+        {
+            self.count_timeouts.remove(&(target, entry.id));
+        }
+        Some(entry)
+    }
+
+    #[inline]
+    fn ids_for_user_data(&self, user_data: u64) -> impl Iterator<Item = RequestId> + '_ {
+        self.user_data_index
+            .range((user_data, 0)..=(user_data, RequestId::MAX))
+            .map(|&(_, id)| id)
+    }
+
     fn cancel_attached_link_timeout(
         &mut self,
         lt_id: RequestId,
@@ -558,9 +593,7 @@ impl RequestOrchestrator {
             if !lt_entry.claimed {
                 lt_entry.claimed = true;
                 lt_entry.phase = RequestPhase::Completed;
-                let lt_removed = self.requests.remove(&lt_id).unwrap();
-                self.incomplete_seqs
-                    .remove(&(lt_removed.submit_seq, lt_removed.id));
+                let lt_removed = self.remove_request_entry(lt_id).unwrap();
                 effects.cancel_requests.push(lt_id);
                 self.push_cqe_and_advance(
                     IoUringCqe {
@@ -582,11 +615,10 @@ impl RequestOrchestrator {
         cqe_flags: u32,
         effects: &mut OrchestratorEffects,
     ) {
-        let Some(mut entry) = self.requests.remove(&id) else {
+        let Some(mut entry) = self.remove_request_entry(id) else {
             return;
         };
         entry.phase = RequestPhase::Completed;
-        self.incomplete_seqs.remove(&(entry.submit_seq, entry.id));
 
         // Cancel attached LINK_TIMEOUT if predecessor completed before timer expiry.
         if let Some(lt_id) = entry.attached_link_timeout.take() {
@@ -629,9 +661,7 @@ impl RequestOrchestrator {
             }
             req.claimed = true;
             req.phase = RequestPhase::Completed;
-            let removed = self.requests.remove(&id).unwrap();
-            self.incomplete_seqs
-                .remove(&(removed.submit_seq, removed.id));
+            let removed = self.remove_request_entry(id).unwrap();
             effects.cancel_requests.push(id);
 
             if let Some(lt_id) = removed.attached_link_timeout {
@@ -673,31 +703,24 @@ impl RequestOrchestrator {
 
     fn check_timeout_count_triggers(&mut self, effects: &mut OrchestratorEffects) {
         loop {
-            let triggered_id = self.requests.iter().find_map(|(&id, req)| {
-                if req.claimed || req.phase != RequestPhase::Running {
-                    return None;
-                }
-                if let RequestKind::Timeout {
-                    target_completions: Some(target),
-                    ..
-                } = req.kind
-                {
-                    if self.completion_seq >= target {
-                        return Some(id);
-                    }
-                }
-                None
-            });
-            let Some(id) = triggered_id else {
+            let Some(&(target, id)) = self.count_timeouts.first() else {
                 break;
             };
-            if let Some(req) = self.requests.get_mut(&id) {
-                req.claimed = true;
-                req.phase = RequestPhase::Completing;
-                effects.cancel_requests.push(id);
-                self.finalize_claimed_request(id, 0, 0, effects);
-                self.release_drain_waiters(effects);
+            if self.completion_seq < target {
+                break;
             }
+            self.count_timeouts.remove(&(target, id));
+            let Some(req) = self.requests.get_mut(&id) else {
+                continue;
+            };
+            if req.claimed || req.phase != RequestPhase::Running {
+                continue;
+            }
+            req.claimed = true;
+            req.phase = RequestPhase::Completing;
+            effects.cancel_requests.push(id);
+            self.finalize_claimed_request(id, 0, 0, effects);
+            self.release_drain_waiters(effects);
         }
     }
 
@@ -789,30 +812,31 @@ impl RequestOrchestrator {
         effects
     }
 
-    /// Executes `IORING_OP_TIMEOUT_REMOVE` (`flags == 0`) against active regular `TIMEOUT`s.
-    pub fn timeout_remove(
+    fn remove_matching_by_user_data(
         &mut self,
         target_user_data: u64,
+        completing_err: LinuxError,
+        matches_kind: impl Fn(&RequestKind) -> bool,
     ) -> (i32, OrchestratorEffects) {
         let mut saw_completing = false;
-        let target_id = self.requests.iter().find_map(|(&id, req)| {
-            if req.user_data != target_user_data {
-                return None;
-            }
-            if !matches!(req.kind, RequestKind::Timeout { .. }) {
-                return None;
+        let target_id = self.ids_for_user_data(target_user_data).find(|id| {
+            let Some(req) = self.requests.get(id) else {
+                return false;
+            };
+            if !matches_kind(&req.kind) {
+                return false;
             }
             if req.claimed || req.phase == RequestPhase::Completing {
                 saw_completing = true;
-                return None;
+                return false;
             }
-            Some(id)
+            true
         });
 
         let Some(id) = target_id else {
             return (
                 if saw_completing {
-                    -LinuxError::EBUSY.code()
+                    -completing_err.code()
                 } else {
                     -LinuxError::ENOENT.code()
                 },
@@ -825,6 +849,21 @@ impl RequestOrchestrator {
             .unwrap_or_default();
         effects.cancel_requests.push(id);
         (0, effects)
+    }
+
+    /// Executes `IORING_OP_TIMEOUT_REMOVE` (`flags == 0`) against active regular `TIMEOUT`s.
+    pub fn timeout_remove(&mut self, target_user_data: u64) -> (i32, OrchestratorEffects) {
+        self.remove_matching_by_user_data(target_user_data, LinuxError::EBUSY, |kind| {
+            matches!(kind, RequestKind::Timeout { .. })
+        })
+    }
+
+    /// Executes `IORING_OP_POLL_REMOVE` against active `IORING_OP_POLL_ADD` requests.
+    pub fn poll_remove(&mut self, target_user_data: u64) -> (i32, OrchestratorEffects) {
+        let poll_add_opcode = linux_raw_sys::io_uring::io_uring_op::IORING_OP_POLL_ADD as u8;
+        self.remove_matching_by_user_data(target_user_data, LinuxError::EALREADY, |kind| {
+            matches!(kind, RequestKind::Normal { opcode, .. } if *opcode == poll_add_opcode)
+        })
     }
 
     /// Executes `IORING_OP_TIMEOUT_REMOVE` with `IORING_TIMEOUT_UPDATE`.
@@ -840,10 +879,10 @@ impl RequestOrchestrator {
         let mut saw_completing = false;
         let mut matched: Option<(RequestId, u64, TimeoutClock, RequestPhase)> = None;
 
-        for (&id, req) in self.requests.iter() {
-            if req.user_data != target_user_data {
+        for id in self.ids_for_user_data(target_user_data) {
+            let Some(req) = self.requests.get(&id) else {
                 continue;
-            }
+            };
             let clock = match req.kind {
                 RequestKind::Timeout { clock, .. } if !match_link => clock,
                 RequestKind::LinkTimeout { clock, .. } if match_link => clock,
@@ -921,10 +960,9 @@ impl RequestOrchestrator {
 
         let mut matched_ids = Vec::new();
         let mut saw_completing = false;
-
-        for (&id, req) in self.requests.iter() {
+        let consider_candidate = |id: RequestId, req: &RequestEntry| -> Option<bool> {
             if caller_id == Some(id) {
-                continue;
+                return None;
             }
             let is_match = if by_fd {
                 req.fixed_file == fixed_fd
@@ -937,18 +975,36 @@ impl RequestOrchestrator {
             } else {
                 req.user_data == target_user_data
             };
+            is_match.then(|| req.claimed || req.phase == RequestPhase::Completing)
+        };
 
-            if !is_match {
-                continue;
+        if !by_fd && !any {
+            for id in self.ids_for_user_data(target_user_data) {
+                if let Some(is_completing) =
+                    self.requests.get(&id).and_then(|req| consider_candidate(id, req))
+                {
+                    if is_completing {
+                        saw_completing = true;
+                        continue;
+                    }
+                    matched_ids.push(id);
+                    if !all {
+                        break;
+                    }
+                }
             }
-
-            if req.claimed || req.phase == RequestPhase::Completing {
-                saw_completing = true;
-                continue;
-            }
-            matched_ids.push(id);
-            if !all {
-                break;
+        } else {
+            for (&id, req) in self.requests.iter() {
+                if let Some(is_completing) = consider_candidate(id, req) {
+                    if is_completing {
+                        saw_completing = true;
+                        continue;
+                    }
+                    matched_ids.push(id);
+                    if !all {
+                        break;
+                    }
+                }
             }
         }
 
@@ -1001,8 +1057,10 @@ impl RequestOrchestrator {
     /// except unlinked standalone `TIMEOUT`s which Linux detaches cleanly into the shared ring.
     pub fn cancel_requests_for_owner(&mut self, owner_pid: u64) -> OrchestratorEffects {
         let mut combined = OrchestratorEffects::default();
-        loop {
-            let next_id = self.requests.iter().find_map(|(&id, req)| {
+        let ids: Vec<RequestId> = self
+            .requests
+            .iter()
+            .filter_map(|(&id, req)| {
                 if req.owner_pid != owner_pid
                     || req.claimed
                     || req.phase == RequestPhase::Completing
@@ -1016,13 +1074,21 @@ impl RequestOrchestrator {
                     return None;
                 }
                 Some(id)
+            })
+            .collect();
+        for id in ids {
+            let claimable = self.requests.get(&id).is_some_and(|req| {
+                !req.claimed
+                    && req.phase != RequestPhase::Completing
+                    && !(matches!(req.kind, RequestKind::LinkTimeout { .. })
+                        || (matches!(req.kind, RequestKind::Timeout { .. }) && !req.in_chain))
             });
-            let Some(id) = next_id else {
-                break;
-            };
-            combined.cancel_requests.push(id);
-            if let Some(eff) = self.try_claim_completion(id, -LinuxError::ECANCELED.code(), 0) {
-                combined.merge(eff);
+            if claimable {
+                combined.cancel_requests.push(id);
+                if let Some(eff) = self.try_claim_completion(id, -LinuxError::ECANCELED.code(), 0)
+                {
+                    combined.merge(eff);
+                }
             }
         }
         combined
@@ -1627,5 +1693,150 @@ mod tests {
         assert_eq!(eff_fixed.cqes[0].user_data, 200);
         assert_eq!(eff_fixed.cqes[0].res, -LinuxError::ECANCELED.code());
         assert_eq!(orch.inflight_len(), 0);
+    }
+
+    #[test]
+    fn poll_remove_cancels_poll_add_ignores_others_and_handles_completing_and_link_timeout() {
+        let mut orch = RequestOrchestrator::new();
+
+        // Non-POLL_ADD request with matching user_data must be ignored (-ENOENT).
+        let (nop_id, _) = orch
+            .commit_chain(&mut [normal_prep(10, 0, None, None)])
+            .unwrap();
+        assert_eq!(orch.poll_remove(10).0, -LinuxError::ENOENT.code());
+        assert!(orch.try_claim_completion(nop_id, 0, 0).is_some());
+
+        // Active POLL_ADD with attached LINK_TIMEOUT.
+        let mut poll_add_with_lt = [
+            PreparedRequest {
+                user_data: 42,
+                sqe_flags: IOSQE_IO_LINK,
+                owner_pid: 0,
+                kind: RequestKind::Normal {
+                    opcode: linux_raw_sys::io_uring::io_uring_op::IORING_OP_POLL_ADD as u8,
+                    fd: Some(3),
+                    expected_min_bytes: None,
+                },
+            },
+            PreparedRequest {
+                user_data: 43,
+                sqe_flags: 0,
+                owner_pid: 0,
+                kind: RequestKind::LinkTimeout {
+                    predecessor: 0,
+                    clock: TimeoutClock::Monotonic,
+                    abs: false,
+                    generation: 1,
+                },
+            },
+        ];
+        let (poll_id, start_eff) = orch.commit_chain(&mut poll_add_with_lt).unwrap();
+        let lt_id = start_eff.start_requests[1];
+
+        let (res, eff) = orch.poll_remove(42);
+        assert_eq!(res, 0);
+        assert!(eff.cancel_requests.contains(&poll_id));
+        assert!(eff.cancel_requests.contains(&lt_id));
+        assert!(eff
+            .cqes
+            .iter()
+            .any(|c| c.user_data == 42 && c.res == -LinuxError::ECANCELED.code()));
+        assert!(eff
+            .cqes
+            .iter()
+            .any(|c| c.user_data == 43 && c.res == -LinuxError::ECANCELED.code()));
+        // 1:1 CQE guarantee: target cannot complete twice or be removed again.
+        assert!(orch.try_claim_completion(poll_id, 1, 0).is_none());
+        assert_eq!(orch.poll_remove(42).0, -LinuxError::ENOENT.code());
+
+        // Concurrent try_begin_completing -> POLL_REMOVE returns -EALREADY and preserves 1:1 CQE.
+        let (poll_busy, _) = orch
+            .commit_chain(&mut [PreparedRequest {
+                user_data: 99,
+                sqe_flags: 0,
+                owner_pid: 0,
+                kind: RequestKind::Normal {
+                    opcode: linux_raw_sys::io_uring::io_uring_op::IORING_OP_POLL_ADD as u8,
+                    fd: Some(4),
+                    expected_min_bytes: None,
+                },
+            }])
+            .unwrap();
+        assert!(orch.try_begin_completing(poll_busy));
+        assert_eq!(orch.poll_remove(99).0, -LinuxError::EALREADY.code());
+        let done_eff = orch.finish_completing(poll_busy, 0x1, 0);
+        assert_eq!(done_eff.cqes.len(), 1);
+        assert_eq!(done_eff.cqes[0].user_data, 99);
+        assert_eq!(done_eff.cqes[0].res, 0x1);
+        assert_eq!(orch.poll_remove(99).0, -LinuxError::ENOENT.code());
+        assert_eq!(orch.inflight_len(), 0);
+        assert!(orch.user_data_index.is_empty());
+        assert!(orch.count_timeouts.is_empty());
+    }
+
+    #[test]
+    fn indexed_count_timeouts_and_bulk_poll_remove_scale_cleanly() {
+        let mut orch = RequestOrchestrator::new();
+
+        // Count-triggered timeout waits for 2 non-timeout completions, then fires cleanly.
+        let (t_id, _) = orch
+            .commit_chain(&mut [PreparedRequest {
+                user_data: 5000,
+                sqe_flags: 0,
+                owner_pid: 7,
+                kind: RequestKind::Timeout {
+                    clock: TimeoutClock::Monotonic,
+                    abs: false,
+                    etime_success: false,
+                    target_completions: Some(orch.completion_seq() + 2),
+                    generation: 1,
+                },
+            }])
+            .unwrap();
+        assert_eq!(orch.count_timeouts.len(), 1);
+
+        // Bulk 2,000 POLL_ADD submissions + poll_remove maintain exact CQEs & clean indices.
+        const COUNT: u64 = 2000;
+        let poll_add_opcode = linux_raw_sys::io_uring::io_uring_op::IORING_OP_POLL_ADD as u8;
+        for i in 1..=COUNT {
+            let (_id, eff) = orch
+                .commit_chain(&mut [PreparedRequest {
+                    user_data: i,
+                    sqe_flags: 0,
+                    owner_pid: 7,
+                    kind: RequestKind::Normal {
+                        opcode: poll_add_opcode,
+                        fd: Some(3),
+                        expected_min_bytes: None,
+                    },
+                }])
+                .unwrap();
+            assert_eq!(eff.start_requests.len(), 1);
+            assert!(eff.cqes.is_empty());
+        }
+
+        // Removing the first poll request triggers the count_timeout after the 2nd removal.
+        let (res1, eff1) = orch.poll_remove(1);
+        assert_eq!(res1, 0);
+        assert_eq!(eff1.cqes.len(), 1);
+        assert_eq!(orch.request_phase(t_id), Some(RequestPhase::Running));
+
+        let (res2, eff2) = orch.poll_remove(2);
+        assert_eq!(res2, 0);
+        assert!(eff2.cqes.iter().any(|c| c.user_data == 2 && c.res == -LinuxError::ECANCELED.code()));
+        assert!(eff2.cqes.iter().any(|c| c.user_data == 5000 && c.res == 0));
+        assert!(orch.count_timeouts.is_empty());
+
+        for i in 3..=COUNT {
+            let (res, eff) = orch.poll_remove(i);
+            assert_eq!(res, 0);
+            assert_eq!(eff.cqes.len(), 1);
+            assert_eq!(eff.cqes[0].user_data, i);
+            assert_eq!(eff.cqes[0].res, -LinuxError::ECANCELED.code());
+        }
+
+        assert_eq!(orch.inflight_len(), 0);
+        assert!(orch.user_data_index.is_empty());
+        assert!(orch.count_timeouts.is_empty());
     }
 }

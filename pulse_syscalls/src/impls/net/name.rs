@@ -3,7 +3,7 @@ use axerrno::LinuxError;
 use axlog::*;
 
 use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
-use pulse_core::net::SocketInner;
+use pulse_core::net::{SocketInner, adapt_sockaddr_for_domain};
 
 use crate::impls::utils::{read_user_value, write_user_value};
 
@@ -21,17 +21,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
                 Err(e) => return -(e.code() as isize),
             }
         }
-        let path = {
-            let registry = pulse_core::net::UNIX_REGISTRY.lock();
-            registry.iter().find_map(|(k, v)| {
-                if let Some(s) = v.1.upgrade() {
-                    if alloc::sync::Arc::ptr_eq(&s, &socket) {
-                        return Some(k.clone());
-                    }
-                }
-                None
-            })
-        };
+        let path = pulse_core::net::lookup_unix_path_by_socket(&socket);
         match write_unix_addr(path, addr, addrlen) {
             Ok(()) => return 0,
             Err(e) => return -(e.code() as isize),
@@ -74,6 +64,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
             }
         }
     };
+    let local_addr = adapt_sockaddr_for_domain(domain, local_addr);
     debug!("sys_getsockname <= fd: {fd}, addr: {local_addr:?}");
 
     let net_addr = NetSocketAddr::from(local_addr);
@@ -114,16 +105,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
             Ok(a) => a,
             Err(e) => return -(e.code() as isize),
         };
-        let path = {
-            let registry = pulse_core::net::UNIX_REGISTRY.lock();
-            registry.iter().find_map(|(k, v)| {
-                if v.0 == peer_addr {
-                    Some(k.clone())
-                } else {
-                    None
-                }
-            })
-        };
+        let path = pulse_core::net::lookup_unix_path_by_addr(peer_addr);
         match write_unix_addr(path, addr, addrlen) {
             Ok(()) => return 0,
             Err(e) => return -(e.code() as isize),
@@ -153,6 +135,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
         Ok(a) => a,
         Err(e) => return -(e.code() as isize),
     };
+    let peer_addr = adapt_sockaddr_for_domain(domain, peer_addr);
     debug!("sys_getpeername <= fd: {fd}, addr: {peer_addr:?}");
 
     let net_addr = NetSocketAddr::from(peer_addr);

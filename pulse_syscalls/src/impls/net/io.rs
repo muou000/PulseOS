@@ -45,21 +45,108 @@ fn read_family(addr: usize, addrlen: u32) -> Result<u16, LinuxError> {
 
 fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAddr, LinuxError> {
     let path = read_unix_path(addr, addrlen)?;
-    let mut registry = pulse_core::net::UNIX_REGISTRY.lock();
-    let target_addr = match registry.get(&path) {
-        Some(&(a, ref weak_sock)) => {
-            if weak_sock.upgrade().is_some() {
-                a
+    let fs =
+        crate::impls::utils::with_process(|process| process.fs_context_handle().lock().clone())?;
+    let key = pulse_core::net::resolve_unix_path_sync(&fs, &path)?;
+    let (target_addr, _) = pulse_core::net::lookup_unix_socket_by_key(&key)?;
+    Ok(target_addr)
+}
+
+fn send_socket_data(
+    socket: &Socket,
+    data: &[u8],
+    dest_addr: Option<core::net::SocketAddr>,
+    flags: usize,
+) -> Result<usize, LinuxError> {
+    let dont_wait = (flags & (linux_raw_sys::net::MSG_DONTWAIT as usize)) != 0;
+    if dont_wait || socket.is_nonblocking() {
+        let pid = pulse_core::task::current_process()
+            .map(|p| p.pid() as u32)
+            .unwrap_or(0);
+        return socket.try_send_to(data, dest_addr, flags as u32, pid);
+    }
+
+    if socket.tx_shutdown.load(core::sync::atomic::Ordering::Acquire) {
+        return Err(LinuxError::EPIPE);
+    }
+    match &socket.inner {
+        SocketInner::Tcp(s) => s.send(data).map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Udp(s) => {
+            if (flags & (linux_raw_sys::net::MSG_OOB as usize)) != 0 {
+                Err(LinuxError::EOPNOTSUPP)
+            } else if data.len() > 65507 {
+                Err(LinuxError::EMSGSIZE)
+            } else if let Some(daddr) = dest_addr {
+                s.send_to(data, daddr)
+                    .map_err(|e| LinuxError::from(e.canonicalize()))
             } else {
-                registry.remove(&path);
-                return Err(LinuxError::ECONNREFUSED);
+                s.send(data).map_err(|e| LinuxError::from(e.canonicalize()))
             }
         }
-        None => {
-            return Err(LinuxError::ECONNREFUSED);
+        SocketInner::Icmp(s) => {
+            if (flags & (linux_raw_sys::net::MSG_OOB as usize)) != 0 {
+                Err(LinuxError::EOPNOTSUPP)
+            } else if let Some(destination) = dest_addr {
+                s.send_to(data, destination)
+                    .map_err(|e| LinuxError::from(e.canonicalize()))
+            } else {
+                Err(LinuxError::EDESTADDRREQ)
+            }
         }
-    };
-    Ok(target_addr)
+        SocketInner::Local(s) => s.write(data),
+        SocketInner::Packet(_) => Ok(data.len()),
+        SocketInner::Netlink(s) => s.write(data),
+    }
+}
+
+fn recv_socket_data(
+    socket: &Socket,
+    buf: &mut [u8],
+    flags: usize,
+) -> Result<(usize, Option<core::net::SocketAddr>), LinuxError> {
+    let msg_flags = flags as u32;
+    let dont_wait = (flags & (linux_raw_sys::net::MSG_DONTWAIT as usize)) != 0;
+    let peek = (flags & (linux_raw_sys::net::MSG_PEEK as usize)) != 0;
+    if dont_wait || socket.is_nonblocking() {
+        return socket.try_recv_from(buf, msg_flags);
+    }
+    if peek {
+        loop {
+            match socket.try_recv_from(buf, msg_flags) {
+                Err(LinuxError::EAGAIN) => {
+                    let _ = pulse_core::fd_table::FdObject::wait_ready(
+                        socket,
+                        linux_raw_sys::general::POLLIN as i16,
+                        None,
+                    )?;
+                    if pulse_core::task::current_have_signals() {
+                        return Err(LinuxError::EINTR);
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+    if socket.rx_shutdown.load(core::sync::atomic::Ordering::Acquire) {
+        return Ok((0, None));
+    }
+    match &socket.inner {
+        SocketInner::Tcp(s) => s
+            .recv(buf)
+            .map(|n| (n, None))
+            .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Udp(s) => s
+            .recv_from(buf)
+            .map(|(n, src)| (n, Some(src)))
+            .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Icmp(s) => s
+            .recv_from(buf)
+            .map(|(n, src)| (n, Some(src)))
+            .map_err(|e| LinuxError::from(e.canonicalize())),
+        SocketInner::Local(s) => s.read(buf).map(|n| (n, None)),
+        SocketInner::Packet(_) => Ok((0, None)),
+        SocketInner::Netlink(s) => s.read(buf).map(|n| (n, None)),
+    }
 }
 
 pub fn sys_sendto(
@@ -89,31 +176,6 @@ pub fn sys_sendto(
         Ok(s) => s,
         Err(e) => return -(e.code() as isize),
     };
-
-    // Handle MSG_DONTWAIT (0x40)
-    let originally_nonblocking = socket.is_nonblocking();
-    let dont_wait = (flags & 0x40) != 0;
-    struct TemporaryNonblocking<'a> {
-        socket: &'a Socket,
-        originally_nonblocking: bool,
-        active: bool,
-    }
-    impl<'a> Drop for TemporaryNonblocking<'a> {
-        fn drop(&mut self) {
-            if self.active {
-                self.socket
-                    .set_nonblocking_inner(self.originally_nonblocking);
-            }
-        }
-    }
-    let _guard = TemporaryNonblocking {
-        socket: &socket,
-        originally_nonblocking,
-        active: dont_wait,
-    };
-    if dont_wait {
-        socket.set_nonblocking_inner(true);
-    }
 
     // Resolve destination address if provided
     let mut dest_addr = None;
@@ -188,35 +250,7 @@ pub fn sys_sendto(
 
     let final_dest_addr = dest_addr.or_else(|| socket.pending_addr.lock().take());
 
-    let result = match &socket.inner {
-        SocketInner::Tcp(s) => s.send(data).map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Udp(s) => {
-            if (flags & 1) != 0 {
-                // MSG_OOB
-                Err(LinuxError::EOPNOTSUPP)
-            } else if data.len() > 65507 {
-                Err(LinuxError::EMSGSIZE)
-            } else if let Some(daddr) = final_dest_addr {
-                s.send_to(data, daddr)
-                    .map_err(|e| LinuxError::from(e.canonicalize()))
-            } else {
-                s.send(data).map_err(|e| LinuxError::from(e.canonicalize()))
-            }
-        }
-        SocketInner::Icmp(s) => {
-            if (flags & 1) != 0 {
-                Err(LinuxError::EOPNOTSUPP)
-            } else if let Some(destination) = final_dest_addr {
-                s.send_to(data, destination)
-                    .map_err(|e| LinuxError::from(e.canonicalize()))
-            } else {
-                Err(LinuxError::EDESTADDRREQ)
-            }
-        }
-        SocketInner::Local(s) => s.write(data),
-        SocketInner::Packet(_) => Ok(data.len()),
-        SocketInner::Netlink(s) => s.write(data),
-    };
+    let result = send_socket_data(&socket, data, final_dest_addr, flags);
 
     match result {
         Ok(n) => {
@@ -276,48 +310,7 @@ pub fn sys_recvfrom(
         Err(e) => return -(e.code() as isize),
     };
 
-    // Handle MSG_DONTWAIT (0x40)
-    let originally_nonblocking = socket.is_nonblocking();
-    let dont_wait = (flags & 0x40) != 0;
-    struct TemporaryNonblocking<'a> {
-        socket: &'a Socket,
-        originally_nonblocking: bool,
-        active: bool,
-    }
-    impl<'a> Drop for TemporaryNonblocking<'a> {
-        fn drop(&mut self) {
-            if self.active {
-                self.socket
-                    .set_nonblocking_inner(self.originally_nonblocking);
-            }
-        }
-    }
-    let _guard = TemporaryNonblocking {
-        socket: &socket,
-        originally_nonblocking,
-        active: dont_wait,
-    };
-    if dont_wait {
-        socket.set_nonblocking_inner(true);
-    }
-
-    let result = match &socket.inner {
-        SocketInner::Tcp(s) => s
-            .recv(&mut tmp)
-            .map(|n| (n, None))
-            .map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Udp(s) => s
-            .recv_from(&mut tmp)
-            .map(|(n, src)| (n, Some(src)))
-            .map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Icmp(s) => s
-            .recv_from(&mut tmp)
-            .map(|(n, src)| (n, Some(src)))
-            .map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Local(s) => s.read(&mut tmp).map(|n| (n, None)),
-        SocketInner::Packet(_) => Ok((0, None)),
-        SocketInner::Netlink(s) => s.read(&mut tmp).map(|n| (n, None)),
-    };
+    let result = recv_socket_data(&socket, &mut tmp, flags);
 
     match result {
         Ok((n, maybe_src)) => {
@@ -368,7 +361,7 @@ fn do_sendmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
     }
 
     let iovlen = msg_hdr.msg_iovlen as i32;
-    if iovlen <= 0 || msg_hdr.msg_iovlen > 1024 {
+    if iovlen < 0 || msg_hdr.msg_iovlen > 1024 {
         return Err(LinuxError::EMSGSIZE);
     }
 
@@ -376,8 +369,11 @@ fn do_sendmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
         warn!("sys_sendmsg: ancillary data (cmsg) is not supported, ignoring");
     }
 
-    let iovecs =
-        crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?;
+    let iovecs = if msg_hdr.msg_iovlen == 0 {
+        Vec::new()
+    } else {
+        crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?
+    };
 
     // Flatten iov segments without allowing the user supplied lengths to wrap
     // or force an infallible allocation.
@@ -462,38 +458,7 @@ fn do_sendmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
     }
     let final_dest_addr = resolved_addr.or_else(|| socket.pending_addr.lock().take());
 
-    let result = match &socket.inner {
-        SocketInner::Tcp(s) => s
-            .send(&combined_data)
-            .map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Udp(s) => {
-            if (flags & 1) != 0 {
-                // MSG_OOB
-                Err(LinuxError::EOPNOTSUPP)
-            } else if combined_data.len() > 65507 {
-                Err(LinuxError::EMSGSIZE)
-            } else if let Some(daddr) = final_dest_addr {
-                s.send_to(&combined_data, daddr)
-                    .map_err(|e| LinuxError::from(e.canonicalize()))
-            } else {
-                s.send(&combined_data)
-                    .map_err(|e| LinuxError::from(e.canonicalize()))
-            }
-        }
-        SocketInner::Icmp(s) => {
-            if (flags & 1) != 0 {
-                Err(LinuxError::EOPNOTSUPP)
-            } else if let Some(destination) = final_dest_addr {
-                s.send_to(&combined_data, destination)
-                    .map_err(|e| LinuxError::from(e.canonicalize()))
-            } else {
-                Err(LinuxError::EDESTADDRREQ)
-            }
-        }
-        SocketInner::Local(s) => s.write(&combined_data),
-        SocketInner::Packet(_) => Ok(combined_data.len()),
-        SocketInner::Netlink(s) => s.write(&combined_data),
-    };
+    let result = send_socket_data(socket, &combined_data, final_dest_addr, flags);
 
     let pending_len = combined_data.len() - flat_len;
     match result {
@@ -515,31 +480,6 @@ pub fn sys_sendmsg(fd: usize, msg: usize, flags: usize) -> isize {
         Ok(s) => s,
         Err(e) => return -(e.code() as isize),
     };
-
-    // Handle MSG_DONTWAIT (0x40)
-    let originally_nonblocking = socket.is_nonblocking();
-    let dont_wait = (flags & 0x40) != 0;
-    struct TemporaryNonblocking<'a> {
-        socket: &'a Socket,
-        originally_nonblocking: bool,
-        active: bool,
-    }
-    impl<'a> Drop for TemporaryNonblocking<'a> {
-        fn drop(&mut self) {
-            if self.active {
-                self.socket
-                    .set_nonblocking_inner(self.originally_nonblocking);
-            }
-        }
-    }
-    let _guard = TemporaryNonblocking {
-        socket: &socket,
-        originally_nonblocking,
-        active: dont_wait,
-    };
-    if dont_wait {
-        socket.set_nonblocking_inner(true);
-    }
 
     match do_sendmsg_core(&socket, msg, flags) {
         Ok(n) => n as isize,
@@ -622,7 +562,7 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
     }
 
     let iovlen = msg_hdr.msg_iovlen as i32;
-    if iovlen <= 0 || msg_hdr.msg_iovlen > 1024 {
+    if iovlen < 0 || msg_hdr.msg_iovlen > 1024 {
         return Err(LinuxError::EMSGSIZE);
     }
 
@@ -631,8 +571,11 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
         msg_hdr.msg_controllen = 0;
     }
 
-    let iovecs =
-        crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?;
+    let iovecs = if msg_hdr.msg_iovlen == 0 {
+        Vec::new()
+    } else {
+        crate::impls::utils::read_user_iovec_array(msg_hdr.msg_iov as usize, msg_hdr.msg_iovlen)?
+    };
 
     // Compute total capacity.
     let mut total_len: usize = 0;
@@ -649,23 +592,7 @@ fn do_recvmsg_core(socket: &Socket, msg: usize, flags: usize) -> Result<usize, L
 
     let mut flat = crate::impls::utils::alloc_zeroed_bytes(total_len, "sys_recvmsg.flat")?;
 
-    let result = match &socket.inner {
-        SocketInner::Tcp(s) => s
-            .recv(&mut flat)
-            .map(|n| (n, None))
-            .map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Udp(s) => s
-            .recv_from(&mut flat)
-            .map(|(n, src)| (n, Some(src)))
-            .map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Icmp(s) => s
-            .recv_from(&mut flat)
-            .map(|(n, src)| (n, Some(src)))
-            .map_err(|e| LinuxError::from(e.canonicalize())),
-        SocketInner::Local(s) => s.read(&mut flat).map(|n| (n, None)),
-        SocketInner::Packet(_) => Ok((0, None)),
-        SocketInner::Netlink(s) => s.read(&mut flat).map(|n| (n, None)),
-    };
+    let result = recv_socket_data(socket, &mut flat, flags);
 
     match result {
         Ok((recv, maybe_src)) => {
@@ -728,31 +655,6 @@ pub fn sys_recvmsg(fd: usize, msg: usize, flags: usize) -> isize {
         Err(e) => return -(e.code() as isize),
     };
 
-    // Handle MSG_DONTWAIT (0x40)
-    let originally_nonblocking = socket.is_nonblocking();
-    let dont_wait = (flags & 0x40) != 0;
-    struct TemporaryNonblocking<'a> {
-        socket: &'a Socket,
-        originally_nonblocking: bool,
-        active: bool,
-    }
-    impl<'a> Drop for TemporaryNonblocking<'a> {
-        fn drop(&mut self) {
-            if self.active {
-                self.socket
-                    .set_nonblocking_inner(self.originally_nonblocking);
-            }
-        }
-    }
-    let _guard = TemporaryNonblocking {
-        socket: &socket,
-        originally_nonblocking,
-        active: dont_wait,
-    };
-    if dont_wait {
-        socket.set_nonblocking_inner(true);
-    }
-
     match do_recvmsg_core(&socket, msg, flags) {
         Ok(n) => n as isize,
         Err(e) => -(e.code() as isize),
@@ -797,26 +699,6 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
 
     let originally_nonblocking = socket.is_nonblocking();
 
-    struct TemporaryNonblocking<'a> {
-        socket: &'a Socket,
-        originally_nonblocking: bool,
-    }
-
-    impl<'a> Drop for TemporaryNonblocking<'a> {
-        fn drop(&mut self) {
-            self.socket
-                .set_nonblocking_inner(self.originally_nonblocking);
-        }
-    }
-
-    let _guard = TemporaryNonblocking {
-        socket: &socket,
-        originally_nonblocking,
-    };
-
-    // Temporarily set socket to nonblocking so that we handle yield/timeouts here at syscall level.
-    socket.set_nonblocking_inner(true);
-
     const MSG_WAITFORONE: usize = 0x10000;
 
     let mut received_count = 0;
@@ -833,11 +715,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
             }
         };
 
-        let current_flags = if received_count > 0 && (flags & MSG_WAITFORONE) != 0 {
-            flags | (linux_raw_sys::net::MSG_DONTWAIT as usize)
-        } else {
-            flags
-        };
+        let current_flags = flags | (linux_raw_sys::net::MSG_DONTWAIT as usize);
 
         match do_recvmsg_core(&socket, msg_addr, current_flags) {
             Ok(bytes_received) => {

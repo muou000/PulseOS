@@ -35,8 +35,8 @@ pub use self::net_impl::{run_tcp_endpoint_concurrency_checks, TcpSocket};
 pub use self::net_impl::UdpSocket;
 pub use self::net_impl::IcmpSocket;
 pub use self::net_impl::{
-    NET_WAIT_QUEUE, add_membership, dns_query, from_core_sockaddr, interface_ipv4_address,
-    interface_mac_address, into_core_sockaddr, is_local_ip, poll_interfaces,
+    NET_WAIT_QUEUE, SocketPollRegistration, add_membership, dns_query, from_core_sockaddr,
+    interface_ipv4_address, interface_mac_address, into_core_sockaddr, is_local_ip, poll_interfaces,
 };
 pub use self::net_impl::{bench_receive, bench_transmit};
 pub use smoltcp::time::Duration;

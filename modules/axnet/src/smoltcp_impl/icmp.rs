@@ -15,8 +15,8 @@ use smoltcp::{
 };
 
 use super::{
-    SOCKET_SET, SocketSetWrapper, SocketWaitQueues, block_on_socket_io, interface_ipv4_address,
-    register_wait_queue, schedule_poll, socket_deadline,
+    SOCKET_SET, SocketPollRegistration, SocketSetWrapper, SocketWaitQueues, block_on_socket_io,
+    interface_ipv4_address, register_wait_queue, schedule_poll, socket_deadline,
 };
 
 const IPV4_HEADER_LEN: usize = 20;
@@ -85,8 +85,7 @@ impl IcmpSocket {
         });
     }
 
-    /// Sends an ICMP Echo packet. The socket is bound lazily to its wire identifier.
-    pub fn send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> AxResult<usize> {
+    fn prepare_send(&self, buf: &[u8], remote_addr: SocketAddr) -> AxResult<IpAddress> {
         if !matches!(remote_addr.ip(), IpAddr::V4(addr) if !addr.is_unspecified()) {
             return ax_err!(InvalidInput, "ICMP send_to() failed: invalid IPv4 address");
         }
@@ -96,68 +95,113 @@ impl IcmpSocket {
 
         let ident = u16::from_be_bytes([buf[4], buf[5]]);
         self.bind_identifier(ident)?;
-        let remote_ip = match remote_addr.ip() {
+        Ok(match remote_addr.ip() {
             IpAddr::V4(addr) => IpAddress::Ipv4(smoltcp::wire::Ipv4Address(addr.octets())),
             IpAddr::V6(_) => unreachable!(),
-        };
-
-        self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
-            let result = SOCKET_SET.with_socket_mut::<icmp::Socket, _, _>(self.handle, |socket| {
-                if !socket.is_open() {
-                    ax_err!(NotConnected, "ICMP send_to() failed")
-                } else if socket.can_send() {
-                    socket
-                        .send_slice(buf, remote_ip)
-                        .map_err(|error| match error {
-                            SendError::BufferFull => AxError::WouldBlock,
-                            SendError::Unaddressable => {
-                                ax_err_type!(InvalidInput, "ICMP send_to() failed")
-                            }
-                        })?;
-                    Ok(buf.len())
-                } else {
-                    Err(AxError::WouldBlock)
-                }
-            });
-            if result.is_ok() {
-                schedule_poll();
-            }
-            result
         })
+    }
+
+    fn send_once_raw(&self, buf: &[u8], remote_ip: IpAddress) -> AxResult<usize> {
+        let result = SOCKET_SET.with_socket_mut::<icmp::Socket, _, _>(self.handle, |socket| {
+            if !socket.is_open() {
+                ax_err!(NotConnected, "ICMP send_to() failed")
+            } else if socket.can_send() {
+                socket
+                    .send_slice(buf, remote_ip)
+                    .map_err(|error| match error {
+                        SendError::BufferFull => AxError::WouldBlock,
+                        SendError::Unaddressable => {
+                            ax_err_type!(InvalidInput, "ICMP send_to() failed")
+                        }
+                    })?;
+                Ok(buf.len())
+            } else {
+                Err(AxError::WouldBlock)
+            }
+        });
+        if result.is_ok() {
+            schedule_poll();
+        }
+        result
+    }
+
+    fn recv_once_raw(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
+        SOCKET_SET.with_socket_mut::<icmp::Socket, _, _>(self.handle, |socket| {
+            if !socket.is_open() {
+                return ax_err!(NotConnected, "ICMP recv_from() failed");
+            }
+            if !socket.can_recv() {
+                return Err(AxError::WouldBlock);
+            }
+
+            let (packet, source) = socket.recv().map_err(|error| match error {
+                RecvError::Exhausted => AxError::WouldBlock,
+                RecvError::Truncated => {
+                    ax_err_type!(BadState, "ICMP recv_from() failed: truncated packet")
+                }
+            })?;
+            let source = match source {
+                IpAddress::Ipv4(address) => Ipv4Addr::from(address.0),
+                IpAddress::Ipv6(_) => {
+                    return ax_err!(Unsupported, "ICMP recv_from() received IPv6 packet");
+                }
+            };
+            let destination = if source.is_loopback() {
+                Ipv4Addr::LOCALHOST
+            } else {
+                Ipv4Addr::from(interface_ipv4_address().0)
+            };
+            let copied = copy_raw_ipv4_packet(buf, packet, source, destination);
+            Ok((copied, SocketAddr::V4(SocketAddrV4::new(source, 0))))
+        })
+    }
+
+    /// Sends an ICMP Echo packet. The socket is bound lazily to its wire identifier.
+    pub fn send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> AxResult<usize> {
+        let remote_ip = self.prepare_send(buf, remote_addr)?;
+        self.block_on(IoEvents::OUT, socket_deadline(self.snd_timeout()), || {
+            self.send_once_raw(buf, remote_ip)
+        })
+    }
+
+    /// Attempts to send an ICMP Echo packet without blocking or mutating `self.nonblock`.
+    pub fn try_send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> AxResult<usize> {
+        let remote_ip = self.prepare_send(buf, remote_addr)?;
+        SOCKET_SET.poll_interfaces();
+        self.send_once_raw(buf, remote_ip)
     }
 
     /// Receives a Linux-style IPv4 raw packet, including the IPv4 header.
     pub fn recv_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
         self.block_on(IoEvents::IN, socket_deadline(self.rcv_timeout()), || {
-            SOCKET_SET.with_socket_mut::<icmp::Socket, _, _>(self.handle, |socket| {
-                if !socket.is_open() {
-                    return ax_err!(NotConnected, "ICMP recv_from() failed");
-                }
-                if !socket.can_recv() {
-                    return Err(AxError::WouldBlock);
-                }
-
-                let (packet, source) = socket.recv().map_err(|error| match error {
-                    RecvError::Exhausted => AxError::WouldBlock,
-                    RecvError::Truncated => {
-                        ax_err_type!(BadState, "ICMP recv_from() failed: truncated packet")
-                    }
-                })?;
-                let source = match source {
-                    IpAddress::Ipv4(address) => Ipv4Addr::from(address.0),
-                    IpAddress::Ipv6(_) => {
-                        return ax_err!(Unsupported, "ICMP recv_from() received IPv6 packet");
-                    }
-                };
-                let destination = if source.is_loopback() {
-                    Ipv4Addr::LOCALHOST
-                } else {
-                    Ipv4Addr::from(interface_ipv4_address().0)
-                };
-                let copied = copy_raw_ipv4_packet(buf, packet, source, destination);
-                Ok((copied, SocketAddr::V4(SocketAddrV4::new(source, 0))))
-            })
+            self.recv_once_raw(buf)
         })
+    }
+
+    /// Attempts to receive one ICMP packet without blocking or mutating `self.nonblock`.
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> AxResult<(usize, SocketAddr)> {
+        SOCKET_SET.poll_interfaces();
+        self.recv_once_raw(buf)
+    }
+
+    pub fn register_poll_waker(
+        &self,
+        waker: &core::task::Waker,
+        events: IoEvents,
+    ) -> SocketPollRegistration {
+        self.wait_queues.register_owned(waker, events)
+    }
+
+    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+        &self.wait_queues.read
+    }
+
+    pub fn write_wait_queue(&self) -> &axtask::WaitQueue {
+        &self.wait_queues.write
+    }
+
+    pub fn notify_wait_queues(&self, events: IoEvents) {
+        self.wait_queues.notify(events);
     }
 
     pub fn poll(&self) -> AxResult<PollState> {
@@ -181,6 +225,7 @@ impl IcmpSocket {
 
     pub fn shutdown(&self) {
         // smoltcp ICMP sockets have no close operation; removal happens in Drop.
+        self.notify_wait_queues(IoEvents::IN | IoEvents::OUT | IoEvents::HUP);
     }
 
     fn bind_identifier(&self, ident: u16) -> AxResult {

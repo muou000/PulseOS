@@ -2126,6 +2126,7 @@ name = "pulse_io_uring_core"
 version = "0.1.0"
 dependencies = [
  "axerrno",
+ "axpoll",
  "linux-raw-sys",
  "pulse_user_abi",
 ]
