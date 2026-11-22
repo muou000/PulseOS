@@ -114,6 +114,8 @@ version = "0.52"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies.x86_64]
 version = "0.15.2"
+default-features = false
+features = ["instructions", "abi_x86_interrupt", "const_fn", "asm_const"]
 
 [lints.clippy]
 new_without_default = "allow"

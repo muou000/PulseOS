@@ -10,7 +10,7 @@ use core::{future::poll_fn, task::Poll, time::Duration};
 
 use axerrno::{LinuxError, LinuxResult};
 use axhal::time::{monotonic_time, wall_time};
-use axio::IoBuf;
+use axio::{IoBuf, IoBufMut, Write};
 use axpoll::IoEvents;
 use axtask::future::{global_executor, sleep_until};
 use linux_raw_sys::{
@@ -1098,21 +1098,141 @@ fn validate_stream_rw_len(obj: &dyn FdObject, is_write: bool, len: usize) -> Lin
     Ok(())
 }
 
+fn try_read_with_staging<W: Write + IoBufMut>(
+    file_obj: &FileObject,
+    opt_offset: Option<u64>,
+    dst: &mut W,
+    mut staging_cache: Option<&mut Vec<u8>>,
+    terminal_error: impl FnOnce(&W) -> Option<LinuxError>,
+) -> Option<i32> {
+    let mut io = file_obj.try_begin_read_io(opt_offset)?.ok()?;
+    if let Some(cache) = staging_cache.as_deref_mut() {
+        let _ = io.replace_staging(core::mem::take(cache));
+    }
+    let maybe_res = io.try_read(dst);
+    if let Some(cache) = staging_cache {
+        *cache = io.replace_staging(Vec::new());
+    }
+    let res = maybe_res?;
+    Some(match res {
+        Ok(0) => match terminal_error(dst) {
+            Some(err) => -err.code(),
+            None => 0,
+        },
+        Ok(n) => n as i32,
+        Err(err) => -LinuxError::from(err).code(),
+    })
+}
+
 fn try_path1_regular_read(
     file_obj: &FileObject,
     opt_offset: Option<u64>,
     buffer: &mut PreparedRwBuffer,
-) -> Option<LinuxResult<usize>> {
-    let mut io = match file_obj.try_begin_read_io(opt_offset)? {
-        Ok(io) => io,
-        Err(err) => return Some(Err(err)),
-    };
-    let res = match buffer {
-        PreparedRwBuffer::SingleWindow(win) => io.try_read(win.as_mut())?,
-        PreparedRwBuffer::Fixed(fixed) => io.try_read(fixed)?,
+) -> Option<i32> {
+    match buffer {
+        PreparedRwBuffer::SingleWindow(win) => try_read_with_staging(
+            file_obj,
+            opt_offset,
+            win.as_mut(),
+            None,
+            |w| w.terminal_error(),
+        ),
+        PreparedRwBuffer::Fixed(fixed) => {
+            try_read_with_staging(file_obj, opt_offset, fixed, None, |_| None)
+        }
+        _ => None,
+    }
+}
+
+/// Attempts a zero-future Path 1 cached read directly inside `submit_sqes` without
+/// allocating orchestrator nodes or staging buffers per SQE.
+///
+/// Validation failures, non-resident pages, and lock contention return `None` so the
+/// caller falls back cleanly to `prepare_sqe` and preserves exact error/drain semantics.
+pub(crate) fn try_inline_fast_path_read(
+    state: &Arc<IoUringState>,
+    sqe: &IoUringSqe,
+    ctx: &AsyncExecContext,
+    batch_staging: &mut Vec<u8>,
+    cached_fixed_fd: &mut Option<(u32, u64, FdEntry)>,
+) -> Option<i32> {
+    if (sqe.flags & !IOSQE_FIXED_FILE) != 0 || sqe.op_flags != 0 || sqe.len == 0 {
+        return None;
+    }
+    let is_fixed_op = match sqe.opcode {
+        op if op == io_uring_op::IORING_OP_READ_FIXED as u8 => true,
+        op if op == io_uring_op::IORING_OP_READ as u8 => false,
         _ => return None,
     };
-    Some(res.map_err(LinuxError::from))
+    validate_sqe_v1(sqe).ok()?;
+    if is_fixed_op {
+        validate_rw_fixed_sqe(sqe).ok()?;
+    } else {
+        validate_rw_sqe(sqe).ok()?;
+    }
+
+    let is_fixed_file = (sqe.flags & IOSQE_FIXED_FILE) != 0;
+    let file_obj_storage: FdEntry;
+    let file_obj: &FileObject = if is_fixed_file {
+        let index = u32::try_from(sqe.fd).ok()?;
+        let current_gen = state.fixed_files_generation();
+        let cache_hit = cached_fixed_fd
+            .as_ref()
+            .is_some_and(|(idx, cached_gen, _)| *idx == index && *cached_gen == current_gen);
+        if !cache_hit {
+            let (entry, files_gen) = state.get_fixed_fd_entry_with_gen(index).ok()?;
+            if entry.flags.contains(FdFlags::PATH)
+                || !entry.object.is_read_open()
+                || entry.object.as_any().is::<DirObject>()
+            {
+                return None;
+            }
+            *cached_fixed_fd = Some((index, files_gen, entry));
+        }
+        let (_, _, entry) = cached_fixed_fd.as_ref()?;
+        entry.object.as_any().downcast_ref::<FileObject>()?
+    } else {
+        file_obj_storage = open_rw_fd_entry(state, ctx, sqe, false).ok()?;
+        file_obj_storage.object.as_any().downcast_ref::<FileObject>()?
+    };
+    if !file_obj.supports_file_io() || file_obj.is_direct_regular_file() {
+        return None;
+    }
+    let opt_offset =
+        rw_offset_to_option(resolve_rw_offset(sqe.off, sqe.len as usize, true).ok()?);
+
+    if is_fixed_op {
+        let mut fixed_io = state
+            .resolve_fixed_buffer(sqe.buf_index, sqe.addr, sqe.len, true)
+            .ok()?;
+        return try_read_with_staging(
+            file_obj,
+            opt_offset,
+            &mut fixed_io,
+            Some(batch_staging),
+            |_| None,
+        );
+    }
+
+    let len = sqe.len as usize;
+    let addr = sqe.addr as usize;
+    if !ctx.is_user_range(addr, len) {
+        return None;
+    }
+    let segs = [UserIoSegment::new(addr, len)];
+    if !fits_single_pin_window(&segs) {
+        return None;
+    }
+    let mut cursor = UserBufferCursor::default();
+    let mut win =
+        PinnedUserBuffers::pin_with_process(&ctx.process, &segs, &mut cursor, true).ok()?;
+    try_read_with_staging(
+        file_obj,
+        opt_offset,
+        &mut win,
+        Some(batch_staging),
+        |w| w.terminal_error(),
+    )
 }
 
 async fn transfer_file_io_buf(
@@ -1332,14 +1452,7 @@ fn execute_regular_file_rw(
             state.complete_request(req_id, 0, 0, false);
             return;
         }
-        if let Some(res) = try_path1_regular_read(file_obj, params.opt_offset, &mut buffer) {
-            let code = match res {
-                Ok(0) if buffer.terminal_error().is_some() => {
-                    -buffer.terminal_error().unwrap().code()
-                }
-                Ok(n) => n as i32,
-                Err(err) => -err.code(),
-            };
+        if let Some(code) = try_path1_regular_read(file_obj, params.opt_offset, &mut buffer) {
             state.complete_request(req_id, code, 0, false);
             return;
         }

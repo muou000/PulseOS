@@ -80,6 +80,11 @@ struct RingInner {
     inline_deferred_starts: Vec<(RequestId, Vec<RequestId>)>,
 }
 
+struct SubmitSlot {
+    sq: SubmitRingState,
+    staging_cache: Vec<u8>,
+}
+
 /// Shared kernel state for an `io_uring` instance.
 ///
 /// Kept behind `Arc<IoUringState>` and separated from `IoUringObject` (`FdObject`) so
@@ -94,12 +99,14 @@ pub struct IoUringState {
     shared: SharedRingMemory,
     rings_frame: Arc<SharedFrame>,
     sqes_frame: Arc<SharedFrame>,
-    submit_lock: Mutex<SubmitRingState>,
+    submit_lock: Mutex<SubmitSlot>,
     register_lock: Mutex<()>,
     inner: SpinNoIrq<RingInner>,
     fixed_buffers: SpinNoIrq<(FixedBufferRegistry<FixedBufferPages>, Option<Weak<Process>>)>,
     fixed_files: SpinNoIrq<FixedFileRegistry<FdEntry>>,
+    fixed_files_gen: AtomicU64,
     eventfd: SpinNoIrq<Option<RegisteredEventFd>>,
+    eventfd_registered: AtomicBool,
     dying: AtomicBool,
     inflight_count: AtomicUsize,
     pub cq_wait_queue: WaitQueue,
@@ -171,7 +178,10 @@ impl IoUringState {
             shared,
             rings_frame,
             sqes_frame,
-            submit_lock: Mutex::new(SubmitRingState::new(layout.sq_entries, submit_all)),
+            submit_lock: Mutex::new(SubmitSlot {
+                sq: SubmitRingState::new(layout.sq_entries, submit_all),
+                staging_cache: Vec::new(),
+            }),
             register_lock: Mutex::new(()),
             inner: SpinNoIrq::new(RingInner {
                 cq: CompletionRingState::new(layout.cq_entries),
@@ -182,7 +192,9 @@ impl IoUringState {
             }),
             fixed_buffers: SpinNoIrq::new((FixedBufferRegistry::new(), None)),
             fixed_files: SpinNoIrq::new(FixedFileRegistry::new()),
+            fixed_files_gen: AtomicU64::new(0),
             eventfd: SpinNoIrq::new(None),
+            eventfd_registered: AtomicBool::new(false),
             dying: AtomicBool::new(false),
             inflight_count: AtomicUsize::new(0),
             cq_wait_queue: WaitQueue::new(),
@@ -288,7 +300,7 @@ impl IoUringState {
         self.readable_sequence.fetch_add(1, Ordering::Release);
         self.cq_wait_queue.notify_all(true);
 
-        if self.dying.load(Ordering::Acquire) {
+        if self.dying.load(Ordering::Acquire) || !self.eventfd_registered.load(Ordering::Acquire) {
             return;
         }
         let cq_flags = self.shared.load_cq_flags();
@@ -329,6 +341,22 @@ impl IoUringState {
             }
         }
         self.notify_cqe_consumers(cqes.len(), from_async);
+    }
+
+    fn flush_inline_fast_path_cqes(&self, cqes: &mut [IoUringCqe; 64], batch_len: &mut usize) {
+        let count = *batch_len;
+        if count == 0 {
+            return;
+        }
+        *batch_len = 0;
+        {
+            let mut inner = self.inner.lock();
+            inner.orch.record_inline_completions(count as u64);
+            for cqe in &cqes[..count] {
+                let _ = inner.cq.post_cqe(&self.shared, *cqe);
+            }
+        }
+        self.notify_cqe_consumers(count, false);
     }
 
     /// Publishes CQEs and cancellation side-effects outside `SpinNoIrq`, returning
@@ -885,15 +913,30 @@ impl IoUringState {
 
     /// Consumes and dispatches up to `to_submit` SQEs under `submit_lock`.
     ///
-    /// Returns `(submitted, stopped_on_inline_error)`.
-    pub fn submit_sqes(self: &Arc<Self>, to_submit: u32, exec_ctx: &AsyncExecContext) -> (u32, bool) {
+    /// Returns `(submitted, stopped_on_inline_error, all_inline_fast_path)`.
+    pub fn submit_sqes(
+        self: &Arc<Self>,
+        to_submit: u32,
+        exec_ctx: &AsyncExecContext,
+    ) -> (u32, bool, bool) {
         if to_submit == 0 || self.is_dying() {
-            return (0, false);
+            return (0, false, false);
         }
 
-        let mut sq = self.submit_lock.lock();
+        const ZERO_CQE: IoUringCqe = IoUringCqe {
+            user_data: 0,
+            res: 0,
+            flags: 0,
+        };
+        let mut submit_slot = self.submit_lock.lock();
+        let SubmitSlot { sq, staging_cache } = &mut *submit_slot;
         let submit_all = sq.is_submit_all();
         let mut open_chain: Vec<(PreparedRequest, PreparedOpSpec)> = Vec::new();
+        let mut batch_cqes = [ZERO_CQE; 64];
+        let mut batch_len: usize = 0;
+        let mut cached_fixed_fd: Option<(u32, u64, FdEntry)> = None;
+        let mut can_fast_path = self.inner.lock().orch.can_bypass_inline_fast_path();
+        let mut used_slow_path = false;
         let mut chain_broken_by_prep = false;
         let mut last_was_link_timeout = false;
         let mut stopped_on_error = false;
@@ -917,6 +960,32 @@ impl IoUringState {
                 stopped_on_error = !submit_all;
                 return Err(());
             }
+
+            if open_chain.is_empty()
+                && !has_link
+                && can_fast_path
+                && let Some(res) = ops::try_inline_fast_path_read(
+                    self,
+                    sqe,
+                    exec_ctx,
+                    staging_cache,
+                    &mut cached_fixed_fd,
+                )
+            {
+                batch_cqes[batch_len] = IoUringCqe {
+                    user_data: sqe.user_data,
+                    res,
+                    flags: 0,
+                };
+                batch_len += 1;
+                if batch_len == batch_cqes.len() {
+                    self.flush_inline_fast_path_cqes(&mut batch_cqes, &mut batch_len);
+                }
+                return Ok(());
+            }
+            used_slow_path = true;
+            cached_fixed_fd = None;
+            self.flush_inline_fast_path_cqes(&mut batch_cqes, &mut batch_len);
 
             let cur_cqe_seq = self.inner.lock().orch.completion_seq();
             match prepare_sqe(
@@ -974,6 +1043,7 @@ impl IoUringState {
                     if !has_link {
                         last_was_link_timeout = false;
                         self.commit_assembled_chain(&mut open_chain, exec_ctx);
+                        can_fast_path = self.inner.lock().orch.can_bypass_inline_fast_path();
                     }
                     Ok(())
                 }
@@ -982,10 +1052,15 @@ impl IoUringState {
 
         // If the batch ended with a dangling link bit on the last SQE, close and commit the chain.
         if !open_chain.is_empty() {
+            used_slow_path = true;
+            cached_fixed_fd = None;
+            self.flush_inline_fast_path_cqes(&mut batch_cqes, &mut batch_len);
             self.commit_assembled_chain(&mut open_chain, exec_ctx);
         }
+        drop(cached_fixed_fd);
+        self.flush_inline_fast_path_cqes(&mut batch_cqes, &mut batch_len);
 
-        (submitted, stopped_on_error)
+        (submitted, stopped_on_error, submitted > 0 && !used_slow_path)
     }
 
     fn commit_assembled_chain(
@@ -1044,6 +1119,7 @@ impl IoUringState {
             fd_object: Arc::clone(&entry.object),
             async_only,
         });
+        self.eventfd_registered.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -1052,6 +1128,7 @@ impl IoUringState {
         if guard.take().is_none() {
             return Err(LinuxError::EINVAL);
         }
+        self.eventfd_registered.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -1167,7 +1244,11 @@ impl IoUringState {
             }
         }
 
-        let install_res = { self.fixed_files.lock().install(slots) };
+        let install_res = {
+            let mut files = self.fixed_files.lock();
+            self.fixed_files_gen.fetch_add(1, Ordering::AcqRel);
+            files.install(slots)
+        };
         if let Err((err, rejected)) = install_res {
             drop(rejected);
             return Err(err);
@@ -1177,7 +1258,12 @@ impl IoUringState {
 
     pub fn unregister_files(&self, arg: usize, nr_args: u32) -> LinuxResult<()> {
         let _reg_guard = self.register_lock.lock();
-        let old_slots = { self.fixed_files.lock().unregister(arg, nr_args)? };
+        let old_slots = {
+            let mut files = self.fixed_files.lock();
+            let old = files.unregister(arg, nr_args)?;
+            self.fixed_files_gen.fetch_add(1, Ordering::AcqRel);
+            old
+        };
         drop(old_slots);
         Ok(())
     }
@@ -1219,12 +1305,23 @@ impl IoUringState {
         }
 
         let (res, replaced) = {
-            self.fixed_files
-                .lock()
-                .apply_resolved_update(start, resolved, first_err)
+            let mut files = self.fixed_files.lock();
+            self.fixed_files_gen.fetch_add(1, Ordering::AcqRel);
+            files.apply_resolved_update(start, resolved, first_err)
         };
         drop(replaced);
         res
+    }
+
+    #[inline]
+    pub(crate) fn fixed_files_generation(&self) -> u64 {
+        self.fixed_files_gen.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn get_fixed_fd_entry_with_gen(&self, index: u32) -> LinuxResult<(FdEntry, u64)> {
+        let files = self.fixed_files.lock();
+        let files_gen = self.fixed_files_gen.load(Ordering::Acquire);
+        files.get_cloned(index).map(|entry| (entry, files_gen))
     }
 
     pub fn get_fixed_fd_entry(&self, index: u32) -> LinuxResult<FdEntry> {
@@ -1318,6 +1415,8 @@ impl Drop for IoUringObject {
             .wait_until(|| self.state.inflight_count.load(Ordering::Acquire) == 0);
 
         // Step 4: Take under SpinNoIrq, then uncharge & drop resources outside SpinNoIrq.
+        self.state.eventfd_registered.store(false, Ordering::Release);
+        self.state.fixed_files_gen.fetch_add(1, Ordering::Release);
         let ev = { self.state.eventfd.lock().take() };
         let old_files = { self.state.fixed_files.lock().take_for_drop() };
         let (old_buffers, old_buf_owner) = {
@@ -1332,6 +1431,10 @@ impl Drop for IoUringObject {
         }
         drop(old_files);
         drop(ev);
+        {
+            let mut slot = self.state.submit_lock.lock();
+            slot.staging_cache = Vec::new();
+        }
         // Step 5: Shared frames are released when `self.state` (`Arc<IoUringState>`) drops.
     }
 }
@@ -1606,6 +1709,122 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     let _ = process.remove_fd_entry(r_fd);
     drop(ring);
     let _ = aspace_handle.unmap(VirtAddr::from(test_va), map_size);
+
+    // 4. Inflight munmap + close(ring_fd) five-step teardown physical frame refcount balance.
+    let test_va_teardown = 0x2201_0000usize;
+    {
+        let mut aspace = aspace_handle.write();
+        aspace
+            .map_alloc(
+                VirtAddr::from(test_va_teardown),
+                map_size,
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                true,
+            )
+            .map_err(LinuxError::from)?;
+    }
+
+    let mut td_frames = Vec::with_capacity(total_pages);
+    let mut td_baseline = Vec::with_capacity(total_pages);
+    {
+        let aspace = aspace_handle.read();
+        for idx in 0..total_pages {
+            let vaddr = VirtAddr::from(test_va_teardown + idx * PAGE_SIZE_4K);
+            let paddr = aspace
+                .pin_user_frame(vaddr, MappingFlags::READ | MappingFlags::WRITE)
+                .map_err(LinuxError::from)?;
+            let after_probe = axalloc::frame_table()
+                .try_get_ref(paddr)
+                .expect("teardown test page in frame_table");
+            crate::mm::release_pinned_user_frame(paddr);
+            assert_eq!(after_probe - 1, 1, "PTE should initially own the mapped page");
+            td_frames.push(paddr);
+            td_baseline.push(after_probe - 1);
+        }
+    }
+
+    let mut td_params: io_uring_params = unsafe { core::mem::zeroed() };
+    let td_ring = Arc::new(IoUringObject::new(8, &mut td_params)?);
+    td_ring
+        .state()
+        .register_buffers(&process, &[UserIoSegment::new(test_va_teardown, map_size)])?;
+    assert_eq!(
+        process.memlock_pinned_bytes(),
+        baseline_pinned + map_size,
+        "memlock charged before teardown"
+    );
+
+    let mut td_fixed_io =
+        td_ring
+            .state()
+            .resolve_fixed_buffer(0, test_va_teardown as u64, map_size as u32, true)?;
+    let td_segs = [UserIoSegment::new(test_va_teardown, map_size)];
+    let mut td_cursor = crate::mm::UserBufferCursor::default();
+    let mut td_pinned =
+        crate::mm::PinnedUserBuffers::pin_with_process(&process, &td_segs, &mut td_cursor, true)?;
+
+    for (paddr, &base) in td_frames.iter().zip(&td_baseline) {
+        assert_eq!(
+            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            base + 2,
+            "PTE + FixedBufferSlot + PinnedUserBuffers should hold 3 refs"
+        );
+    }
+
+    // Unmap user VMA while both PinnedUserBuffers and FixedBufferIo remain inflight.
+    aspace_handle
+        .unmap(VirtAddr::from(test_va_teardown), map_size)
+        .map_err(LinuxError::from)?;
+    for (paddr, &base) in td_frames.iter().zip(&td_baseline) {
+        assert_eq!(
+            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            base + 1,
+            "unmap drops only PTE ref while inflight buffers remain pinned"
+        );
+    }
+    td_pinned.copy_to_user_exact(&alloc::vec![0x3Cu8; map_size])?;
+    let mut td_read_prefix = alloc::vec![0u8; PAGE_SIZE_4K];
+    td_fixed_io.copy_from_user_exact(&mut td_read_prefix)?;
+    assert!(td_read_prefix.iter().all(|&b| b == 0x3C));
+
+    // Close the final IoUringObject FD reference (5-step teardown) while inflight buffers remain.
+    let td_ring_fd =
+        process.insert_fd_entry(FdEntry::new(td_ring as Arc<dyn FdObject>, FdFlags::empty()))?;
+    let _ = process.remove_fd_entry(td_ring_fd)?;
+    assert_eq!(
+        process.memlock_pinned_bytes(),
+        baseline_pinned,
+        "memlock uncharged immediately on ring FD close"
+    );
+    for (paddr, &base) in td_frames.iter().zip(&td_baseline) {
+        assert_eq!(
+            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            base + 1,
+            "inflight FixedBufferIo + PinnedUserBuffers survive ring close"
+        );
+    }
+
+    drop(td_pinned);
+    for &paddr in &td_frames {
+        assert_eq!(
+            axalloc::frame_table().try_get_ref(paddr).unwrap(),
+            1,
+            "only inflight FixedBufferIo retains the final frame ref"
+        );
+    }
+    td_fixed_io.copy_to_user_exact(&alloc::vec![0x7Eu8; PAGE_SIZE_4K])?;
+
+    drop(td_fixed_io);
+    for &paddr in &td_frames {
+        assert_eq!(
+            axalloc::frame_table().try_get_ref(paddr).unwrap(),
+            0,
+            "frames 100% balanced to zero after final inflight buffer drops"
+        );
+    }
+    axlog::ax_println!(
+        "[IO_URING_RSRC_GUEST] Inflight munmap + close five-step teardown frame balance: PASS"
+    );
 
     axlog::ax_println!("[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS");
     Ok(())

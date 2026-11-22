@@ -1,0 +1,378 @@
+{
+  "issue": 240,
+  "parent_issue": 224,
+  "spec_issues": [234, 228],
+  "date": "2026-11-22",
+  "base_commit": "5115fe37b845d2e2489229f56c6c3761888f5706",
+  "kernel_source_tree_sha256": "7ab7bc54863aec6b2a6ccd9457275f956a1d3410cbc288769b28a77a942dea49",
+  "environment": {
+    "qemu_riscv64": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+    "qemu_loongarch64": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+    "qemu_flags": "-machine virt -m 8G -smp 8 -nographic -no-reboot snapshot=on",
+    "perf": "perf version 6.8.12",
+    "liburing_commit": "08468cc3",
+    "fio_commit": "a6e474c9",
+    "flamegraph_commit": "41fee1f99f9276008b7cd112fca19dc3ea84ac32",
+    "tool_sha256": {
+      "bpf_analyzer": "027ffe799b545ea0ac1eb4397a782400a97e657c06e44370dd4772fd55f24fa7",
+      "bpf_record_riscv64": "056834ae23e66c9488d5f0c657086889e4d20280c76da6b06705e8163cbe0a71",
+      "bpf_record_loongarch64": "ebee05cc0ab59aefbff2f5e8fe960a1b7e7a31a2aa7113d5138e21855de10b8b",
+      "scripts_build_iouring_tests_sh": "8a8f71ee3f8b98a4938af598df94bb0386248e3bee29570a3e68295b0219ba27",
+      "scripts_perf_pipeline_py": "a90eeeb1982a0a58f02409d8f1363e15b52a40872911fc030a8effe86dc2a210",
+      "flamegraph_stackcollapse_perf_pl": "74faa47a29d8df07cb06731dfd8bb94dc4c165b9d811ac6b4c9449eea2ac25d8",
+      "flamegraph_pl": "088f82e6848a4f12a56e1e8e8170ee6761fccf12e5615cd64630f6b087c99ea7"
+    }
+  },
+  "host_and_build_gates": {
+    "pulse_user_abi": "36 unit tests passed",
+    "axtask_lib_test_multitask": "14 passed, 0 failed (--lib; 2 pre-existing unrelated doctests in task_ext.rs:188 and wait_queue.rs:20 fail when --lib omitted)",
+    "pulse_io_uring_core": "35 passed, 0 failed",
+    "pulse_syscalls_lib": "235 passed, 0 failed (--lib -- --test-threads=1)",
+    "targets_built": ["make vf2", "make ls2k1000", "make test"],
+    "guest_checks_matrix_note": "Earlier pre-optimization tests/guest_checks/build.py passed 7/8 (loongarch64: qemu bpf-trace guest-checks failed in external loongArch64 crate); not re-run after final edits"
+  },
+  "guest_checks": {
+    "riscv64": {
+      "run_id": "issue-240-guest-checks-riscv64-20261122-161704-ad8198",
+      "qemu_exit": 0,
+      "passed": true,
+      "markers": [
+        "[IO_URING_RSRC_GUEST] PinnedUserBuffers balance & direct copy: PASS",
+        "[IO_URING_RSRC_GUEST] FixedBufferRegistry pin/inflight/memlock accounting: PASS",
+        "[IO_URING_RSRC_GUEST] FixedFileRegistry sparse slots & partial update: PASS",
+        "[IO_URING_RSRC_GUEST] Inflight munmap + close five-step teardown frame balance: PASS",
+        "[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS"
+      ]
+    },
+    "loongarch64": {
+      "run_id": "issue-240-guest-checks-loongarch64-20261122-161717-6eb810",
+      "qemu_exit": 0,
+      "passed": true,
+      "markers": [
+        "[IO_URING_RSRC_GUEST] PinnedUserBuffers balance & direct copy: PASS",
+        "[IO_URING_RSRC_GUEST] FixedBufferRegistry pin/inflight/memlock accounting: PASS",
+        "[IO_URING_RSRC_GUEST] FixedFileRegistry sparse slots & partial update: PASS",
+        "[IO_URING_RSRC_GUEST] Inflight munmap + close five-step teardown frame balance: PASS",
+        "[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS"
+      ]
+    }
+  },
+  "functional": {
+    "riscv64": {
+      "run_id": "issue-240-functional-riscv64-20261122-164602-d3d80e",
+      "qemu_exit": 0,
+      "ltp_rc": {"io_uring01": 0, "io_uring02": 0, "io_uring03": 0, "io_uring04": 32},
+      "liburing": {"passed": 53, "skipped": 1, "failed": 0, "total": 54, "skipped_tests": ["ooo-file-unreg.t(rc=77)"]},
+      "smp_stress": "PASS",
+      "meminfo_kb": {"before_free": 8311192, "after_free": 8208024, "delta": -103168},
+      "passed": true
+    },
+    "loongarch64": {
+      "run_id": "issue-240-functional-loongarch64-20261122-164718-fe6e3e",
+      "qemu_exit": 0,
+      "ltp_rc": {"io_uring01": 0, "io_uring02": 0, "io_uring03": 0, "io_uring04": 32},
+      "liburing": {"passed": 53, "skipped": 1, "failed": 0, "total": 54, "skipped_tests": ["ooo-file-unreg.t(rc=77)"]},
+      "smp_stress": "PASS",
+      "meminfo_kb": {"before_free": 8307736, "after_free": 8178432, "delta": -129304},
+      "passed": true
+    }
+  },
+  "fio_uninstrumented": {
+    "optimization_and_tcg_variance": {
+      "riscv64_baseline_64mib_cache_eviction_954ee4": {
+        "cached_psync_mib_s": 29.815,
+        "cached_uring_qd32_mib_s": 12.182,
+        "speedup_pct": -59.14
+      },
+      "riscv64_post_opt_prior_run_9d3ed9": {
+        "cached_psync_mib_s": 148.555,
+        "cached_uring_qd32_mib_s": 180.175,
+        "speedup_pct": 21.28
+      },
+      "loongarch64_4mib_before_inline_fast_path_40cbdc": {
+        "cached_psync_mib_s": 221.632,
+        "cached_uring_qd32_mib_s": 262.672,
+        "speedup_pct": 18.52
+      },
+      "loongarch64_post_opt_tcg_variance": {
+        "e5e0a0_cached_speedup_pct": 24.44,
+        "b0653e_cached_speedup_pct_transient_fail": 16.86,
+        "363844_cached_speedup_pct": 32.85
+      }
+    },
+    "riscv64": {
+      "run_id": "issue-240-fio-riscv64-20261122-164819-9c173d",
+      "qemu_exit": 0,
+      "syscall_bench_16384_4k_ios": {
+        "direct_psync_randread": {"syscalls": 16384, "io_per_syscall": 1.0, "wall_ms": 9780.709, "bw_mib_s": 6.54},
+        "direct_uring_qd1_randread": {"syscalls": 16384, "io_per_syscall": 1.0, "wall_ms": 15703.219, "bw_mib_s": 4.08},
+        "direct_uring_qd16_randread": {"syscalls": 1066, "io_per_syscall": 15.37, "wall_ms": 7918.502, "bw_mib_s": 8.08},
+        "cached_psync_read": {"syscalls": 16384, "io_per_syscall": 1.0, "wall_ms": 281.845, "bw_mib_s": 227.08},
+        "cached_uring_qd32_read": {"syscalls": 512, "io_per_syscall": 32.0, "wall_ms": 214.028, "bw_mib_s": 299.03}
+      },
+      "fio": {
+        "direct_psync": {"bw_mib_s": 5.411, "iops": 1385.2, "total_ios": 6926, "clat_p50_us": 618.496, "clat_p99_us": 1613.824, "iodepth_ge8_pct": 0.0},
+        "direct_uring_qd1": {"bw_mib_s": 4.202, "iops": 1075.78, "total_ios": 5380, "clat_p50_us": 26.752, "clat_p99_us": 995.328, "iodepth_ge8_pct": 0.0},
+        "direct_uring_qd16": {"bw_mib_s": 9.388, "iops": 2403.36, "total_ios": 12024, "clat_p50_us": 3194.88, "clat_p99_us": 7176.192, "iodepth_ge8_pct": 100.03},
+        "cached_psync": {"bw_mib_s": 136.366, "iops": 34909.8, "total_ios": 174549, "clat_p50_us": 17.792, "clat_p99_us": 122.368, "iodepth_ge8_pct": 0.0},
+        "cached_uring_qd32": {"bw_mib_s": 187.063, "iops": 47888.02, "total_ios": 239488, "clat_p50_us": 21.376, "clat_p99_us": 66.048, "iodepth_ge8_pct": 100.0, "iodepth_32_pct": 100.0}
+      },
+      "cached_qd32_speedup_pct": 37.18,
+      "passed": true
+    },
+    "loongarch64": {
+      "run_id": "issue-240-fio-loongarch64-20261122-165111-363844",
+      "qemu_exit": 0,
+      "syscall_bench_16384_4k_ios": {
+        "direct_psync_randread": {"syscalls": 16384, "io_per_syscall": 1.0, "wall_ms": 8682.691, "bw_mib_s": 7.37},
+        "direct_uring_qd1_randread": {"syscalls": 16384, "io_per_syscall": 1.0, "wall_ms": 14354.915, "bw_mib_s": 4.46},
+        "direct_uring_qd16_randread": {"syscalls": 1213, "io_per_syscall": 13.51, "wall_ms": 4294.545, "bw_mib_s": 14.9},
+        "cached_psync_read": {"syscalls": 16384, "io_per_syscall": 1.0, "wall_ms": 214.549, "bw_mib_s": 298.3},
+        "cached_uring_qd32_read": {"syscalls": 512, "io_per_syscall": 32.0, "wall_ms": 129.479, "bw_mib_s": 494.29}
+      },
+      "fio": {
+        "direct_psync": {"bw_mib_s": 6.799, "iops": 1740.65, "total_ios": 8705, "clat_p50_us": 501.76, "clat_p99_us": 1171.456, "iodepth_ge8_pct": 0.0},
+        "direct_uring_qd1": {"bw_mib_s": 4.524, "iops": 1158.17, "total_ios": 5792, "clat_p50_us": 350.208, "clat_p99_us": 1220.608, "iodepth_ge8_pct": 0.0},
+        "direct_uring_qd16": {"bw_mib_s": 12.223, "iops": 3128.97, "total_ios": 15648, "clat_p50_us": 2899.968, "clat_p99_us": 6586.368, "iodepth_ge8_pct": 100.0},
+        "cached_psync": {"bw_mib_s": 209.665, "iops": 53674.27, "total_ios": 268425, "clat_p50_us": 12.992, "clat_p99_us": 71.168, "iodepth_ge8_pct": 0.0},
+        "cached_uring_qd32": {"bw_mib_s": 278.544, "iops": 71307.34, "total_ios": 356608, "clat_p50_us": 18.048, "clat_p99_us": 56.064, "iodepth_ge8_pct": 100.0, "iodepth_32_pct": 100.0}
+      },
+      "cached_qd32_speedup_pct": 32.85,
+      "passed": true
+    }
+  },
+  "bpf_captures": {
+    "riscv64": {
+      "run_id": "issue-240-bpf-riscv64-20261122-155253-4deac0",
+      "kernel_elf_sha256": "e460f1b68f43e9875bc9bba1be3d5526abea895e377b2d50662aecf22b1c90ac",
+      "kernel_binary_sha256": "ba4604ab3757f2a75a7355cc7bc37f477c01458190db027404139bb2be4fe67a",
+      "kernel_provenance_sha256": "3815c2257028e6809f84a22d483cf6c3b66e837d32a8bfc54ac858f973b1dc7c",
+      "cases": {
+        "cached_psync": {
+          "selected_task": {"pid": 66, "tid": 88, "raw_cpu_samples": 396, "non_idle_samples": 525},
+          "exported_samples": 266,
+          "partial_chain_count": 266,
+          "syscall_handler_leaf_samples": 91,
+          "syscall_handler_leaf_pct": 34.21,
+          "path1_inline_inc_pct": 0.0,
+          "path2_spawn_inc_pct": 0.0,
+          "sched_tid_blocked_waits": 1,
+          "sched_tid_blocked_sum_ns": 102225600,
+          "sched_tid_wake_count": 1,
+          "fio": {"bw_mib_s": 100.218, "iops": 25655.75, "total_ios": 102623, "iodepth_ge8_pct": 0.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 10040, "timer_dequeued": 10039, "timer_full": 0, "timer_busy": 285,
+            "trace_enqueued": 36869, "trace_full": 0, "retained_records": 40878,
+            "src_observed": 46573, "src_delivered": 40878, "src_skipped": 72, "src_cancelled": 7, "src_invalid": 0,
+            "src_emission_gap": 0, "sink_transport_lost": 0, "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "1a66923fa98854433ae5ccf2b8405c3b844fa088422856630dae2b6505430043",
+            "perf_data": "6e5bd19a0598a2985e6a2b67f731cd648e210df1f8d732a63630778e9fe85bee",
+            "period_svg": "ac5af19c9ef6ca41ce3cd6ca18e15ce5cb8ea78d677eff578122abea18cad0a3",
+            "samples_svg": "790212aa66288bf73e5b9f508f9cedd68f88dedc2f5d29ce06dbb010c71b0e45"
+          }
+        },
+        "cached_uring_qd32": {
+          "selected_task": {"pid": 115, "tid": 139, "raw_cpu_samples": 400, "non_idle_samples": 478},
+          "exported_samples": 263,
+          "partial_chain_count": 263,
+          "syscall_handler_leaf_samples": 4,
+          "syscall_handler_leaf_pct": 1.52,
+          "path1_inline_inc_pct": 73.76,
+          "path2_spawn_inc_pct": 0.0,
+          "sched_tid_blocked_waits": 1,
+          "sched_tid_blocked_sum_ns": 100701900,
+          "sched_tid_wake_count": 1,
+          "fio": {"bw_mib_s": 186.11, "iops": 47644.09, "total_ios": 190624, "iodepth_ge8_pct": 100.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 10704, "timer_dequeued": 10705, "timer_full": 0, "timer_busy": 230,
+            "trace_enqueued": 40262, "trace_full": 0, "retained_records": 44217,
+            "src_observed": 50696, "src_delivered": 44217, "src_skipped": 52, "src_cancelled": 7, "src_invalid": 1,
+            "src_emission_gap": 0, "sink_transport_lost": 0, "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "6090f466861a56a3f176ae27dc86d4b74efe7e5652ed31dbb6509dc34519609d",
+            "perf_data": "2185518349ecd8013fe41701492150e118af12bfc1b51b8b6379bb4de514dc15",
+            "period_svg": "d545427c7c95318d783c9fbab704d546d124b4e1238ec04ecd0c9eecde22e170",
+            "samples_svg": "bcece6b7e6f2b1facf7a6b3eec7c73dbf719e8b608277b0f2ef34eeed7f965a2"
+          }
+        },
+        "direct_psync": {
+          "selected_task": {"pid": 167, "tid": 191, "raw_cpu_samples": 392, "non_idle_samples": 493},
+          "exported_samples": 371,
+          "partial_chain_count": 371,
+          "syscall_handler_leaf_samples": 4,
+          "syscall_handler_leaf_pct": 1.08,
+          "path1_inline_inc_pct": 0.0,
+          "path2_spawn_inc_pct": 0.0,
+          "sched_tid_blocked_waits": 1272,
+          "sched_tid_blocked_sum_ns": 343433600,
+          "sched_tid_wake_count": 1115,
+          "fio": {"bw_mib_s": 4.139, "iops": 1059.49, "total_ios": 4239, "iodepth_ge8_pct": 0.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 11293, "timer_dequeued": 11296, "timer_full": 0, "timer_busy": 338,
+            "trace_enqueued": 42121, "trace_full": 0, "retained_records": 45892,
+            "src_observed": 53079, "src_delivered": 45892, "src_skipped": 108, "src_cancelled": 4, "src_invalid": 0,
+            "src_emission_gap": 0, "sink_transport_lost": 0, "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "19cc4c613d9151b1cf36debfd2587fe306263788f071125e4fa901cfb3812d15",
+            "perf_data": "1c00bbac6c8f43e1e9e9211323df700f157e28707772611d6655aa3144219c9f",
+            "period_svg": "248d15fe1c6e78a3cf999aa2aab0fea18fb3df832fca70687fb37b1c5129ba1f",
+            "samples_svg": "0f920079ff46302d393bf57c11682c00319bdfd21e296196552347397eefb25c"
+          }
+        },
+        "direct_uring_qd16": {
+          "selected_task": {"pid": 218, "tid": 242, "raw_cpu_samples": 405, "non_idle_samples": 517},
+          "exported_samples": 389,
+          "partial_chain_count": 389,
+          "syscall_handler_leaf_samples": 1,
+          "syscall_handler_leaf_pct": 0.26,
+          "path1_inline_inc_pct": 0.0,
+          "path2_spawn_inc_pct": 68.38,
+          "sched_tid_blocked_waits": 33,
+          "sched_tid_blocked_sum_ns": 102553400,
+          "sched_tid_wake_count": 6,
+          "fio": {"bw_mib_s": 6.971, "iops": 1784.66, "total_ios": 7144, "iodepth_ge8_pct": 100.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 10523, "timer_dequeued": 10523, "timer_full": 0, "timer_busy": 247,
+            "trace_enqueued": 61596, "trace_full": 9395, "retained_records": 65353,
+            "src_observed": 71821, "src_delivered": 65353, "src_skipped": 135, "src_cancelled": 9, "src_invalid": 0,
+            "src_emission_gap": 0, "sink_transport_lost": 0, "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "4494a66ca5d7a53d4d865eafdff0de1750fd59dfbf0b055bd3e3004df11c9612",
+            "perf_data": "c9767c33ff3222667c19b62d758b6141738c0225cd9030ecbee107392b5c8d5e",
+            "period_svg": "41a115790248ce7ca46a54cfd54b0bb465f15fe5abd9e413d1c0ed7789eb3bc5",
+            "samples_svg": "7562d32c181fbe2255d195251ae6140baa9b17b83e9681ca3f73e5fa37f64f84"
+          }
+        }
+      }
+    },
+    "loongarch64": {
+      "run_id": "issue-240-bpf-loongarch64-20261122-155935-771283",
+      "kernel_elf_sha256": "b30a6d473bb6e6f68343d95c4173b9d507c876fe149e54b6de6e9770b8176343",
+      "kernel_binary_sha256": "d13458b898283a7f0d1cb1072bb32635c94b65d97f06ebf796741c28a7aee9fd",
+      "kernel_provenance_sha256": "9f9b26a744d0ca0353f6091b0333c4f931b65b20e13b464d97648f786443822c",
+      "cases": {
+        "cached_psync": {
+          "selected_task": {"pid": 98, "tid": 108, "raw_cpu_samples": 406, "non_idle_samples": 569},
+          "exported_samples": 275,
+          "partial_chain_count": 275,
+          "syscall_handler_leaf_samples": 129,
+          "syscall_handler_leaf_pct": 46.91,
+          "path1_inline_inc_pct": 0.0,
+          "path2_spawn_inc_pct": 0.0,
+          "sched_tid_blocked_waits": 4,
+          "sched_tid_blocked_sum_ns": 102782450,
+          "sched_tid_wake_count": 3,
+          "fio": {"bw_mib_s": 226.858, "iops": 58075.75, "total_ios": 232303, "iodepth_ge8_pct": 0.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 12015, "timer_dequeued": 12018, "timer_full": 0, "timer_busy": 164,
+            "trace_enqueued": 54028, "trace_full": 0, "retained_records": 58052,
+            "src_observed": 65762, "src_delivered": 58052, "src_skipped": 38, "src_cancelled": 5, "src_invalid": 0,
+            "src_emission_gap": 0, "sink_transport_lost": 0, "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "f11830c53e4af14073883c130d691f5fc057b28df29bfa7398af5137a6d58736",
+            "perf_data": "6a13ab907b800d47cc802722407f8352ce0096a3ce850d97985a258313ed4698",
+            "period_svg": "b6ee31f862cc2693b9fb0bae996fa0b6feae1e529ebb3211654f40e8bacd3598",
+            "samples_svg": "ed2553f587e2d493b9a2b0891dc104a10ab03c2818205b8e1ded82532469827"
+          }
+        },
+        "cached_uring_qd32": {
+          "selected_task": {"pid": 152, "tid": 158, "raw_cpu_samples": 409, "non_idle_samples": 526},
+          "exported_samples": 265,
+          "partial_chain_count": 264,
+          "syscall_handler_leaf_samples": 2,
+          "syscall_handler_leaf_pct": 0.75,
+          "path1_inline_inc_pct": 76.6,
+          "path2_spawn_inc_pct": 0.0,
+          "sched_tid_blocked_waits": 1,
+          "sched_tid_blocked_sum_ns": 100886270,
+          "sched_tid_wake_count": 1,
+          "fio": {"bw_mib_s": 329.886, "iops": 84450.89, "total_ios": 337888, "iodepth_ge8_pct": 100.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 11377, "timer_dequeued": 11377, "timer_full": 0, "timer_busy": 174,
+            "trace_enqueued": 51412, "trace_full": 0, "retained_records": 55271,
+            "src_observed": 62535, "src_delivered": 55271, "src_skipped": 38, "src_cancelled": 6, "src_invalid": 0,
+            "src_emission_gap": 0, "sink_transport_lost": 0, "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "e035c7b9f7031a64d9862bdd8aa438bd673a407b918a06390b0e0074174b23db",
+            "perf_data": "553682803ceeb1ab7df459fa2595a69c8456e62420dbb05e575370a2bba46472",
+            "period_svg": "9aa0792fce2e35d575bbb1b565972913c6f93f4b6d9e70ed099d036455c6d694",
+            "samples_svg": "4c41c459944168bef9201336444230ca2ae7f4d2ef6a07583f2660b738d8578f"
+          }
+        },
+        "direct_psync": {
+          "selected_task": {"pid": 196, "tid": 204, "raw_cpu_samples": 295, "non_idle_samples": 472},
+          "exported_samples": 240,
+          "partial_chain_count": 240,
+          "syscall_handler_leaf_samples": 3,
+          "syscall_handler_leaf_pct": 1.25,
+          "path1_inline_inc_pct": 0.0,
+          "path2_spawn_inc_pct": 0.0,
+          "sched_tid_blocked_waits": 5071,
+          "sched_tid_blocked_sum_ns": 663932120,
+          "sched_tid_wake_count": 4171,
+          "fio": {"bw_mib_s": 6.071, "iops": 1554.11, "total_ios": 6218, "iodepth_ge8_pct": 0.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 11668, "timer_dequeued": 11668, "timer_full": 0, "timer_busy": 223,
+            "trace_enqueued": 72403, "trace_full": 0, "retained_records": 76120,
+            "src_observed": 83836, "src_delivered": 76120, "src_skipped": 75, "src_cancelled": 5, "src_invalid": 0,
+            "src_emission_gap": 0, "sink_transport_lost": 0, "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "23d3955f568d123ca3a9c4de7e530d347830a9e45189ea58d4dfa12de58f09ea",
+            "perf_data": "2eefcfa0cd5406148c594d554c112bbcd1204a877cccb761c6fc00756c2a743a",
+            "period_svg": "eb8fbeb7bfa60490d40c20a8c56c370caaa1033bda2fca7d7b12d65eb4b07e43",
+            "samples_svg": "e0802f7c4bde6457eda8d996a8a4eab55f672315cc2c3a4ba7dd6c5a3e05f895"
+          }
+        },
+        "direct_uring_qd16": {
+          "selected_task": {"pid": 241, "tid": 247, "raw_cpu_samples": 391, "non_idle_samples": 620},
+          "exported_samples": 359,
+          "partial_chain_count": 359,
+          "syscall_handler_leaf_samples": 9,
+          "syscall_handler_leaf_pct": 2.51,
+          "path1_inline_inc_pct": 0.0,
+          "path2_spawn_inc_pct": 61.56,
+          "sched_tid_blocked_waits": 72,
+          "sched_tid_blocked_sum_ns": 120807140,
+          "sched_tid_wake_count": 36,
+          "fio": {"bw_mib_s": 11.166, "iops": 2858.57, "total_ios": 11440, "iodepth_ge8_pct": 100.0},
+          "capture_status": "IncompleteError",
+          "attribution_claim": "Disallowed",
+          "loss_layers": {
+            "timer_enqueued": 10191, "timer_dequeued": 10188, "timer_full": 0, "timer_busy": 210,
+            "trace_enqueued": 101496, "trace_full": 0, "retained_records": 103570,
+            "src_observed": 111415, "src_delivered": 105082, "src_skipped": 160, "src_cancelled": 12, "src_invalid": 0,
+            "src_emission_gap": 1512, "sink_transport_lost": 1512, "sink_transport_lost_detail": "sink:0=1512", "export_discarded": 0
+          },
+          "sha256": {
+            "pbcapture": "d79a6bb8c6e3856b0635d6925c4cb0bb8b7495cb0c09338917fc63a2a0a3f273",
+            "perf_data": "273f3a1a03fdddc4ec40104bca124607c3c3b4784a0265eccc0468ed4e5d027e",
+            "period_svg": "21796d39494495154ddea30720a649aa6eedf64a6d71a4fe981881250f945e44",
+            "samples_svg": "d2b25f4d7f59877827f1c7f4f9c11023a2dae949b8d06ff76c4ff0f70b3a7f3c"
+          }
+        }
+      }
+    }
+  }
+}

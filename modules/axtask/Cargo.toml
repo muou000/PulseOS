@@ -37,7 +37,7 @@ sched-cfs = ["multitask", "preempt"]
 sched-eevdf = ["multitask", "preempt"]
 sched-load-balance = ["multitask"]
 
-test = ["percpu?/sp-naive"]
+test = ["percpu?/sp-naive", "axalloc?/tlsf", "axalloc?/page-alloc-64g"]
 
 [dependencies]
 cfg-if.workspace = true

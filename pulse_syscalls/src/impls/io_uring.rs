@@ -134,7 +134,16 @@ pub(crate) fn sys_io_uring_enter(
         Err(e) => return -e.code() as isize,
     };
 
-    let (submitted, stopped_on_inline_error) = state.submit_sqes(to_submit, &exec_ctx);
+    let (submitted, stopped_on_inline_error, all_inline_fast_path) =
+        state.submit_sqes(to_submit, &exec_ctx);
+    if all_inline_fast_path
+        && temporary_mask.is_none()
+        && (stopped_on_inline_error
+            || (flags & IORING_ENTER_GETEVENTS) == 0
+            || submitted >= min_complete.min(state.cq_entries()))
+    {
+        return submitted as isize;
+    }
     axtask::future::drive_ready(64);
 
     if (flags & IORING_ENTER_GETEVENTS) == 0 || stopped_on_inline_error {
