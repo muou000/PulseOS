@@ -706,7 +706,7 @@ impl IoUringState {
                     if let Some(guard) = self.try_enter_inflight_owned() {
                         let state_wk = Arc::clone(self);
                         let ctx_wk = ctx.clone();
-                        global_worker_pool().submit(self.ring_id(), req_id, move || {
+                        global_worker_pool().submit(self, req_id, move || {
                             let _guard = guard;
                             if !state_wk.is_request_active(req_id) {
                                 return;

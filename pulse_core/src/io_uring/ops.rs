@@ -884,7 +884,7 @@ fn spawn_file_sync_op(
     };
     let state_cloned = Arc::clone(state);
     if force_async || is_blocking {
-        global_worker_pool().submit(state.ring_id(), req_id, move || {
+        global_worker_pool().submit(state, req_id, move || {
             let _guard: OwnedInflightGuard = guard;
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;
@@ -1461,15 +1461,13 @@ fn execute_regular_file_rw(
         return;
     }
 
-    // Reserve before handing off to either executor so later implicit-offset I/O
-    // cannot overtake this request while its first poll is queued on another CPU.
-    let pos_ticket = params
-        .opt_offset
-        .is_none()
-        .then(|| file_obj.reserve_position_ticket())
-        .flatten();
     if !force_async && !matches!(buffer, PreparedRwBuffer::MultiWindow { .. }) {
-        // Path 2: native multi-Future execution on KernelExecutor.
+        // Path 2: reserve the shared offset before the first native poll.
+        let pos_ticket = params
+            .opt_offset
+            .is_none()
+            .then(|| file_obj.reserve_position_ticket())
+            .flatten();
         let Some(guard) = state.try_enter_inflight_owned() else {
             return;
         };
@@ -1520,7 +1518,11 @@ fn execute_regular_file_rw(
     let state_wk = Arc::clone(state);
     let ctx_wk = ctx.clone();
 
-    global_worker_pool().submit_ordered(state.ring_id(), req_id, serial_key, move || {
+    let position_owner = params.opt_offset.is_none().then(|| Arc::clone(&entry.object));
+    let position_file = position_owner.as_deref().map(|obj| {
+        obj.as_any().downcast_ref::<FileObject>().expect("FileObject")
+    });
+    global_worker_pool().submit_with_position(state, req_id, serial_key, position_file, move |pos_ticket| {
         let _guard: OwnedInflightGuard = guard;
         if !state_wk.is_request_active(req_id) || state_wk.is_dying() {
             drop(pos_ticket);
@@ -1719,7 +1721,7 @@ fn spawn_worker_rw(
     };
     let state_wk = Arc::clone(state);
     let ctx_wk = ctx.clone();
-    global_worker_pool().submit_ordered(state.ring_id(), req_id, serial_key, move || {
+    global_worker_pool().submit_ordered(state, req_id, serial_key, move || {
         let _guard: OwnedInflightGuard = guard;
         if !state_wk.is_request_active(req_id) {
             return;
