@@ -58,6 +58,7 @@ GUEST_CHECK_MARKERS = (
     "[IO_URING_RSRC_GUEST] FixedFileRegistry sparse slots & partial update: PASS",
     "[IO_URING_RSRC_GUEST] Inflight munmap + close five-step teardown frame balance: PASS",
     "[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS",
+    "WORKER_OVERLAPPING_FINISH_PASS",
 )
 
 BPF_WORKLOADS: dict[str, dict[str, str | int]] = {

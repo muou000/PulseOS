@@ -1636,6 +1636,7 @@ pub fn cancel_requests_for_process(owner_pid: u64) {
 pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     use memory_addr::VirtAddr;
 
+    worker_pool::check_overlapping_worker_finishes();
     axlog::ax_println!("[IO_URING_RSRC_GUEST] Starting fixed resources & frame refcount checks...");
 
     let process = crate::task::current_process()?;

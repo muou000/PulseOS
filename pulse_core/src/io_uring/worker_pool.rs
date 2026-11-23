@@ -142,6 +142,53 @@ impl PoolInner {
         })
     }
 
+    fn enqueue(
+        &mut self,
+        ring_id: u64,
+        job: WorkerJob,
+        max_workers: usize,
+        per_ring_limit: usize,
+    ) -> WorkerDispatch {
+        if job.position_ticket.is_some() {
+            let key = job.serial_key.expect("file-position ordering key");
+            self.position_jobs
+                .entry(key)
+                .or_default()
+                .push_back((ring_id, job.req_id));
+        }
+        let eligible = self.job_eligible(ring_id, &job);
+        if !self.rings.contains_key(&ring_id) {
+            self.rings.insert(ring_id, RingWorkerQueue::new());
+            self.ring_order.push_back(ring_id);
+        }
+        let entry = self.rings.get_mut(&ring_id).unwrap();
+        let runnable = eligible && entry.in_flight < per_ring_limit;
+        entry.jobs.push_back(job);
+        self.queued_jobs += 1;
+        self.plan_dispatch(usize::from(runnable), max_workers)
+    }
+
+    fn finish_job(
+        &mut self,
+        ring_id: u64,
+        serial_key: Option<u64>,
+        max_workers: usize,
+    ) -> WorkerDispatch {
+        if let Some(key) = serial_key {
+            self.in_flight_keys.remove(&key);
+        }
+        let entry = self.rings.get_mut(&ring_id).expect("running ring");
+        let ring_has_backlog = !entry.jobs.is_empty();
+        entry.in_flight -= 1;
+        self.available_workers += 1;
+        self.remove_empty_ring(ring_id);
+        // This worker can cover one job. Each additional ring slot can
+        // overlap a job released by the key on another ring, even when
+        // earlier finishers haven't claimed their replacement jobs yet.
+        let extra = ring_has_backlog && serial_key.is_some() && self.queued_jobs > 1;
+        self.plan_dispatch(usize::from(extra), max_workers)
+    }
+
     /// Pops the next eligible job using Per-Ring Round-Robin fairness.
     fn pop_next_job(&mut self, per_ring_limit: usize) -> Option<(u64, WorkerJob)> {
         let len = self.ring_order.len();
@@ -244,15 +291,6 @@ impl BoundedWorkerPool {
 
         let (max_workers, per_ring_limit) = Self::limits();
         let enqueue = move |position_ticket: Option<FilePositionTicket>| {
-            let mut inner = self.inner.lock();
-            if position_ticket.is_some() {
-                let key = serial_key.expect("file-position ordering key");
-                inner
-                    .position_jobs
-                    .entry(key)
-                    .or_default()
-                    .push_back((ring_id, req_id));
-            }
             let job = WorkerJob {
                 req_id,
                 serial_key,
@@ -260,16 +298,9 @@ impl BoundedWorkerPool {
                 position_ticket,
                 task,
             };
-            let eligible = inner.job_eligible(ring_id, &job);
-            if !inner.rings.contains_key(&ring_id) {
-                inner.rings.insert(ring_id, RingWorkerQueue::new());
-                inner.ring_order.push_back(ring_id);
-            }
-            let entry = inner.rings.get_mut(&ring_id).unwrap();
-            let runnable = eligible && entry.in_flight < per_ring_limit;
-            entry.jobs.push_back(job);
-            inner.queued_jobs += 1;
-            inner.plan_dispatch(usize::from(runnable), max_workers)
+            self.inner
+                .lock()
+                .enqueue(ring_id, job, max_workers, per_ring_limit)
         };
         // The file-position lock precedes the pool lock. Enqueue only
         // transfers the ticket and the pre-boxed job into the bounded pool.
@@ -355,23 +386,11 @@ impl BoundedWorkerPool {
     }
 
     fn finish_ring_job(&'static self, ring_id: u64, serial_key: Option<u64>) {
-        let (max_workers, per_ring_limit) = Self::limits();
-        let dispatch = {
-            let mut inner = self.inner.lock();
-            if let Some(key) = serial_key {
-                inner.in_flight_keys.remove(&key);
-            }
-            let entry = inner.rings.get_mut(&ring_id).expect("running ring");
-            let released_quota = entry.in_flight == per_ring_limit && !entry.jobs.is_empty();
-            entry.in_flight -= 1;
-            inner.available_workers += 1;
-            inner.remove_empty_ring(ring_id);
-            // The finishing worker takes the next job. Only releasing *both*
-            // a ring quota and a shared key could enable a second job, in a
-            // different ring, before that worker blocks again.
-            let extra = released_quota && serial_key.is_some() && inner.queued_jobs > 1;
-            inner.plan_dispatch(usize::from(extra), max_workers)
-        };
+        let (max_workers, _) = Self::limits();
+        let dispatch = self
+            .inner
+            .lock()
+            .finish_job(ring_id, serial_key, max_workers);
         self.dispatch(dispatch);
     }
 
@@ -431,6 +450,62 @@ impl BoundedWorkerPool {
             }
         }
     }
+}
+
+/// Two workers from a saturated ring finish before either claims its next job.
+#[cfg(feature = "guest-checks")]
+pub(super) fn check_overlapping_worker_finishes() {
+    const MAX: usize = 4;
+    const LIMIT: usize = 2;
+    let mut pool = PoolInner::new();
+    let submit = |pool: &mut PoolInner, ring, req_id, serial_key| {
+        let job = WorkerJob {
+            req_id,
+            serial_key,
+            service_cpu: None,
+            position_ticket: None,
+            task: Box::new(|_| {}),
+        };
+        pool.enqueue(ring, job, MAX, LIMIT)
+    };
+
+    let ring_a = 1;
+    let ring_b = 2;
+    let ring_c = 3;
+    let first_key = Some(10);
+    let second_key = Some(20);
+    assert_eq!(submit(&mut pool, ring_a, 1, first_key).spawn, 1);
+    assert_eq!(submit(&mut pool, ring_a, 2, second_key).spawn, 1);
+    let (first_ring, first) = pool.pop_next_job(LIMIT).unwrap();
+    let (second_ring, second) = pool.pop_next_job(LIMIT).unwrap();
+    let waiting = [
+        (ring_a, 3, None),
+        (ring_a, 4, None),
+        (ring_b, 5, first_key),
+        (ring_c, 6, second_key),
+    ];
+    for (ring, req_id, key) in waiting {
+        let dispatch = submit(&mut pool, ring, req_id, key);
+        assert_eq!(dispatch.spawn + dispatch.wake, 0);
+    }
+    assert!(pool.pop_next_job(LIMIT).is_none());
+
+    let first = pool.finish_job(first_ring, first.serial_key, MAX);
+    let second = pool.finish_job(second_ring, second.serial_key, MAX);
+    assert_eq!(
+        first.spawn + second.spawn,
+        2,
+        "overlapping completions must supply two more workers"
+    );
+    assert_eq!(pool.available_workers, 4);
+    let mut claimed = BTreeSet::new();
+    for _ in waiting {
+        let (ring, job) = pool.pop_next_job(LIMIT).expect("eligible successor");
+        claimed.insert((ring, job.req_id, job.serial_key));
+    }
+    assert_eq!(claimed, BTreeSet::from(waiting));
+    assert_eq!(pool.available_workers, 0);
+    axlog::ax_println!("WORKER_OVERLAPPING_FINISH_PASS");
 }
 
 #[cfg(feature = "guest-checks")]
