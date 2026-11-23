@@ -1,17 +1,21 @@
 #[cfg(test)]
+extern crate alloc;
+
+#[cfg(test)]
 #[path = "../../../modules/axfs/src/highlevel/file/position.rs"]
 mod position;
 
 #[cfg(test)]
 mod tests {
-    use super::position::{FilePosition, IoPosition};
     use futures_lite::future::block_on;
+
+    use super::position::{FilePosition, IoPosition};
 
     #[test]
     fn one_operation_keeps_position_exclusive_across_completed_windows() {
         block_on(async {
             let position = FilePosition::new(7);
-            let mut operation = IoPosition::begin(Some(&position), None).await;
+            let mut operation = IoPosition::begin_with_ticket(Some(&position), None, None).await;
             assert_eq!(operation.offset(), 7);
             operation.advance(3).unwrap();
             assert_eq!(operation.offset(), 10);
@@ -27,7 +31,7 @@ mod tests {
         block_on(async {
             let position = FilePosition::new(19);
             let shared = position.lock().await;
-            let mut operation = IoPosition::begin(Some(&position), Some(3)).await;
+            let mut operation = IoPosition::begin_with_ticket(Some(&position), None, Some(3)).await;
             operation.select_append(100);
             assert_eq!(operation.validation_offset(), 3);
             operation.advance(8).unwrap();
@@ -40,7 +44,7 @@ mod tests {
     fn append_with_no_progress_preserves_old_shared_offset() {
         block_on(async {
             let position = FilePosition::new(7);
-            let mut operation = IoPosition::begin(Some(&position), None).await;
+            let mut operation = IoPosition::begin_with_ticket(Some(&position), None, None).await;
             operation.select_append(100);
             assert_eq!(operation.validation_offset(), 7);
             operation.advance(0).unwrap();
@@ -53,7 +57,7 @@ mod tests {
     fn overflow_does_not_publish_an_uncompleted_position() {
         block_on(async {
             let position = FilePosition::new(u64::MAX - 3);
-            let mut operation = IoPosition::begin(Some(&position), None).await;
+            let mut operation = IoPosition::begin_with_ticket(Some(&position), None, None).await;
             operation.advance(2).unwrap();
             assert!(operation.advance(2).is_none());
             drop(operation);
@@ -67,8 +71,13 @@ mod tests {
             let position = FilePosition::new(0);
             let shared = position.lock().await;
             {
-                let mut pending = core::pin::pin!(IoPosition::begin(Some(&position), None));
-                assert!(futures_lite::future::poll_once(&mut pending).await.is_none());
+                let mut pending =
+                    core::pin::pin!(IoPosition::begin_with_ticket(Some(&position), None, None));
+                assert!(
+                    futures_lite::future::poll_once(&mut pending)
+                        .await
+                        .is_none()
+                );
             }
             drop(shared);
             assert_eq!(*position.try_lock().unwrap(), 0);
@@ -93,7 +102,7 @@ mod tests {
         block_on(async {
             let position = FilePosition::new(7);
             let held = position.lock().await;
-            let mut queued = Box::pin(IoPosition::begin(Some(&position), None));
+            let mut queued = Box::pin(IoPosition::begin_with_ticket(Some(&position), None, None));
             assert!(futures_lite::future::poll_once(&mut queued).await.is_none());
             drop(held);
             assert!(IoPosition::try_begin(Some(&position), None).is_none());
@@ -113,6 +122,59 @@ mod tests {
             operation.advance(4).unwrap();
             assert_eq!(operation.offset(), 94);
             assert_eq!(*held, 7);
+        });
+    }
+
+    #[test]
+    fn deferred_native_io_keeps_its_place_ahead_of_cached_and_worker_io() {
+        block_on(async {
+            let position = FilePosition::new(7);
+            let native = position.reserve();
+            let mut worker = Box::pin(IoPosition::begin_with_ticket(
+                Some(&position),
+                Some(position.reserve()),
+                None,
+            ));
+            assert!(IoPosition::try_begin(Some(&position), None).is_none());
+            assert!(futures_lite::future::poll_once(&mut worker).await.is_none());
+
+            let mut native =
+                IoPosition::begin_with_ticket(Some(&position), Some(native), None).await;
+            native.advance(3).unwrap();
+            drop(native);
+            assert_eq!(
+                futures_lite::future::poll_once(&mut worker)
+                    .await
+                    .unwrap()
+                    .offset(),
+                10
+            );
+        });
+    }
+
+    #[test]
+    fn cancelling_before_first_poll_releases_the_ticket_to_the_waiting_worker() {
+        block_on(async {
+            let position = FilePosition::new(7);
+            let native =
+                IoPosition::begin_with_ticket(Some(&position), Some(position.reserve()), None);
+            let mut worker = Box::pin(IoPosition::begin_with_ticket(
+                Some(&position),
+                Some(position.reserve()),
+                None,
+            ));
+            assert!(futures_lite::future::poll_once(&mut worker).await.is_none());
+            drop(native);
+            let mut resumed = futures_lite::future::poll_once(&mut worker).await.unwrap();
+            assert_eq!(resumed.offset(), 7);
+            resumed.advance(1).unwrap();
+            drop(resumed);
+            assert_eq!(
+                IoPosition::try_begin(Some(&position), None)
+                    .unwrap()
+                    .offset(),
+                8
+            );
         });
     }
 }

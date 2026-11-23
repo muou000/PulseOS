@@ -833,6 +833,7 @@ dependencies = [
  "percpu",
  "pulse_bpf_schema",
  "rand 0.9.5",
+ "spin 0.10.0",
  "timer_list",
 ]
 

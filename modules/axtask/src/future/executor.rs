@@ -12,10 +12,12 @@ use core::{
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
+use axerrno::{AxError, AxResult};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
+use spin::Once;
 
-use crate::{WaitQueue, api::spawn_raw};
+use crate::{AxCpuMask, TaskInner, WaitQueue, spawn_raw, spawn_task};
 
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
@@ -36,20 +38,27 @@ struct TaskSlot {
 struct ExecutorInner {
     ready_queue: SpinNoIrq<VecDeque<Arc<TaskSlot>>>,
     driver_wq: WaitQueue,
-    drivers_started: AtomicBool,
-    spawn_drivers: bool,
     pending_count: AtomicUsize,
 }
 
 impl ExecutorInner {
-    fn new(spawn_drivers: bool) -> Arc<Self> {
+    fn new() -> Arc<Self> {
         Arc::new(Self {
             ready_queue: SpinNoIrq::new(VecDeque::new()),
             driver_wq: WaitQueue::new(),
-            drivers_started: AtomicBool::new(false),
-            spawn_drivers,
             pending_count: AtomicUsize::new(0),
         })
+    }
+
+    fn new_handle(self: &Arc<Self>, state: u8, future: Option<BoxFuture>) -> CancelHandle {
+        let slot = Arc::new(TaskSlot {
+            state: AtomicU8::new(state),
+            cancelled: AtomicBool::new(false),
+            future: SpinNoIrq::new(future),
+            executor: Arc::downgrade(self),
+        });
+        self.pending_count.fetch_add(1, Ordering::AcqRel);
+        CancelHandle { slot }
     }
 
     fn enqueue(&self, slot: Arc<TaskSlot>) {
@@ -62,31 +71,6 @@ impl ExecutorInner {
 
     fn pop_ready(&self) -> Option<Arc<TaskSlot>> {
         self.ready_queue.lock().pop_front()
-    }
-
-    fn ensure_background_drivers(self: &Arc<Self>) {
-        if !self.spawn_drivers || self.drivers_started.load(Ordering::Acquire) {
-            return;
-        }
-        if self
-            .drivers_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-
-        let num_drivers = axhal::cpu_num().clamp(1, 4);
-        for idx in 0..num_drivers {
-            let inner = Arc::clone(self);
-            spawn_raw(
-                move || {
-                    driver_loop(inner);
-                },
-                format!("async-exec-{idx}"),
-                axconfig::TASK_STACK_SIZE,
-            );
-        }
     }
 }
 
@@ -183,7 +167,7 @@ unsafe fn raw_waker_drop(ptr: *const ()) {
     drop(unsafe { Arc::from_raw(ptr as *const TaskSlot) });
 }
 
-/// Cancellation handle for a task spawned onto [`KernelExecutor`].
+/// Cancellation handle for a task spawned onto a [`KernelExecutor`] or [`CpuExecutor`].
 #[derive(Clone)]
 pub struct CancelHandle {
     slot: Arc<TaskSlot>,
@@ -263,6 +247,8 @@ impl CancelHandle {
 /// background driver threads.
 pub struct KernelExecutor {
     inner: Arc<ExecutorInner>,
+    drivers_started: AtomicBool,
+    spawn_drivers: bool,
 }
 
 impl KernelExecutor {
@@ -275,7 +261,9 @@ impl KernelExecutor {
     /// Creates a new executor explicitly controlling background driver spawning.
     pub fn with_background_drivers(spawn_drivers: bool) -> Self {
         Self {
-            inner: ExecutorInner::new(spawn_drivers),
+            inner: ExecutorInner::new(),
+            drivers_started: AtomicBool::new(false),
+            spawn_drivers,
         }
     }
 
@@ -291,22 +279,34 @@ impl KernelExecutor {
 
     /// Boxed variant of [`Self::spawn_and_poll_once`].
     pub fn spawn_boxed_and_poll_once(&self, fut: BoxFuture) -> CancelHandle {
-        let slot = Arc::new(TaskSlot {
-            state: AtomicU8::new(STATE_POLLING),
-            cancelled: AtomicBool::new(false),
-            future: SpinNoIrq::new(None),
-            executor: Arc::downgrade(&self.inner),
-        });
-        let handle = CancelHandle {
-            slot: Arc::clone(&slot),
-        };
-        self.inner.pending_count.fetch_add(1, Ordering::AcqRel);
-
-        let pending = poll_owned_future(&self.inner, &slot, fut);
-        if pending {
-            self.inner.ensure_background_drivers();
+        let handle = self.inner.new_handle(STATE_POLLING, None);
+        if poll_owned_future(&self.inner, &handle.slot, fut) {
+            self.ensure_background_drivers();
         }
         handle
+    }
+
+    fn ensure_background_drivers(&self) {
+        if !self.spawn_drivers || self.drivers_started.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .drivers_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let num_drivers = axhal::cpu_num().clamp(1, 4);
+        for idx in 0..num_drivers {
+            let inner = self.inner.clone();
+            spawn_raw(
+                move || driver_loop(inner),
+                format!("async-exec-{idx}"),
+                axconfig::TASK_STACK_SIZE,
+            );
+        }
     }
 
     /// Cooperatively polls up to `budget` ready tasks in the caller's task
@@ -338,6 +338,52 @@ impl KernelExecutor {
 impl Default for KernelExecutor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A shared ready queue driven exclusively by one task pinned to its logical CPU.
+pub struct CpuExecutor {
+    cpu: usize,
+    inner: Arc<ExecutorInner>,
+}
+
+impl CpuExecutor {
+    /// Obtains the executor for an online CPU, starting its driver on first use.
+    /// Call this in task context before dispatching work.
+    pub fn get(cpu: usize) -> AxResult<&'static Self> {
+        static EXECUTORS: [Once<CpuExecutor>; axconfig::plat::MAX_CPU_NUM] =
+            [const { Once::new() }; axconfig::plat::MAX_CPU_NUM];
+        if !axhal::is_cpu_online(cpu) {
+            return Err(AxError::InvalidInput);
+        }
+        EXECUTORS[cpu].try_call_once(|| {
+            let inner = ExecutorInner::new();
+            let queue = inner.clone();
+            let task = TaskInner::try_new(
+                move || driver_loop(queue),
+                format!("async-exec-cpu-{cpu}"),
+                axconfig::TASK_STACK_SIZE,
+            )?;
+            task.set_cpumask(AxCpuMask::one_shot(cpu));
+            spawn_task(task);
+            Ok(Self { cpu, inner })
+        })
+    }
+
+    /// Returns the logical CPU that polls this executor's futures.
+    pub fn cpu(&self) -> usize {
+        self.cpu
+    }
+
+    /// Enqueues the first poll on the bound driver. Subsequent wakes retain
+    /// this queue through the slot, including wakes originating on other CPUs.
+    pub fn spawn<F>(&self, fut: F) -> CancelHandle
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let handle = self.inner.new_handle(STATE_QUEUED, Some(Box::pin(fut)));
+        self.inner.enqueue(handle.slot.clone());
+        handle
     }
 }
 

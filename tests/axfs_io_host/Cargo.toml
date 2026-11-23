@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dev-dependencies]
-async-lock = { version = "3.4", default-features = false }
+kspin = { version = "0.1", features = ["smp"] }
 futures-lite = "2"
 
 [lints.rust]

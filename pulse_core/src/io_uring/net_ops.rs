@@ -11,7 +11,6 @@ use core::{
 
 use axerrno::{LinuxError, LinuxResult};
 use axpoll::IoEvents;
-use axtask::future::global_executor;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, SIGPIPE, iovec},
     net::{AF_INET, AF_INET6, AF_UNIX, MSG_DONTWAIT, MSG_NOSIGNAL, MSG_PEEK, MSG_WAITALL, UNIX_PATH_MAX},
@@ -1193,7 +1192,7 @@ pub fn execute_accept_request(
         return;
     }
 
-    let handle = global_executor().spawn_and_poll_once(async move {
+    state.spawn_native(req_id, async move {
         let _guard = guard;
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
             return;
@@ -1221,7 +1220,6 @@ pub fn execute_accept_request(
             }
         }
     });
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 async fn finish_connect_async(
@@ -1278,7 +1276,7 @@ pub fn execute_connect_request(
         };
         let state_cloned = Arc::clone(state);
         let ctx_cloned = ctx.clone();
-        let handle = global_executor().spawn_and_poll_once(async move {
+        state.spawn_native(req_id, async move {
             let _guard = guard;
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;
@@ -1297,7 +1295,6 @@ pub fn execute_connect_request(
             let code = res.map(|()| 0).unwrap_or_else(|e| -e.code());
             state_cloned.complete_request(req_id, code, 0, true);
         });
-        state.install_cancel_handle_or_cancel(req_id, handle);
         return;
     }
 
@@ -1325,7 +1322,7 @@ pub fn execute_connect_request(
         return;
     }
 
-    let handle = global_executor().spawn_and_poll_once(async move {
+    state.spawn_native(req_id, async move {
         let _guard = guard;
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
             return;
@@ -1335,7 +1332,6 @@ pub fn execute_connect_request(
         let code = res.map(|()| 0).unwrap_or_else(|e| -e.code());
         state_cloned.complete_request(req_id, code, 0, true);
     });
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 struct RecvMsgWriteback {
@@ -1428,7 +1424,7 @@ fn spawn_socket_transfer(
         return;
     }
 
-    let handle = global_executor().spawn_and_poll_once(async move {
+    state.spawn_native(req_id, async move {
         let _guard = guard;
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
             return;
@@ -1455,7 +1451,6 @@ fn spawn_socket_transfer(
         let code = complete_transfer_result(res, writeback);
         state_cloned.complete_request(req_id, code, 0, true);
     });
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 pub fn execute_send_recv_request(

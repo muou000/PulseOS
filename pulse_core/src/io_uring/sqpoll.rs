@@ -8,6 +8,7 @@ use core::{
 
 use axerrno::{LinuxError, LinuxResult};
 use axhal::time::monotonic_time;
+use axtask::future::CpuExecutor;
 use axtask::{AxCpuMask, AxTaskWeak, TaskInner, WaitQueue};
 use kspin::SpinNoIrq;
 use linux_raw_sys::io_uring::{IORING_SETUP_SQ_AFF, io_uring_params};
@@ -19,7 +20,7 @@ use crate::task::{current_have_signals, current_thread};
 enum SqPollTarget {
     Unbound,
     CreatorAllowed(usize),
-    ReservedService(usize),
+    ReservedService(&'static CpuExecutor),
 }
 
 impl SqPollTarget {
@@ -32,7 +33,7 @@ impl SqPollTarget {
             return Err(LinuxError::EINVAL);
         }
         if axtask::is_sqpoll_service_cpu(cpu) {
-            Ok(Self::ReservedService(cpu))
+            Ok(Self::ReservedService(CpuExecutor::get(cpu)?))
         } else if axtask::current().cpumask().get(cpu) {
             Ok(Self::CreatorAllowed(cpu))
         } else {
@@ -43,7 +44,8 @@ impl SqPollTarget {
     fn cpu(self) -> Option<usize> {
         match self {
             Self::Unbound => None,
-            Self::CreatorAllowed(cpu) | Self::ReservedService(cpu) => Some(cpu),
+            Self::CreatorAllowed(cpu) => Some(cpu),
+            Self::ReservedService(executor) => Some(executor.cpu()),
         }
     }
 }
@@ -83,8 +85,12 @@ impl SqPoll {
 impl IoUringState {
     /// Reserved CPU explicitly selected by this ring for SQPOLL service.
     pub fn sqpoll_service_cpu(&self) -> Option<usize> {
+        self.service_executor().map(CpuExecutor::cpu)
+    }
+
+    pub(super) fn service_executor(&self) -> Option<&'static CpuExecutor> {
         match self.sqpoll.as_ref()?.target {
-            SqPollTarget::ReservedService(cpu) => Some(cpu),
+            SqPollTarget::ReservedService(executor) => Some(executor),
             _ => None,
         }
     }
