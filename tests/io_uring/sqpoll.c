@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/io_uring.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -399,6 +400,223 @@ static uint64_t monotonic_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
 
+/* The host acknowledges scheduler events over the guest console. A delay cannot
+ * distinguish a sleeping or retired worker from a worker still waiting to run. */
+static void worker_ack(const char *word)
+{
+    struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN };
+    char line[24];
+    CHECK(poll(&input, 1, 12000) == 1 && (input.revents & POLLIN));
+    CHECK(fgets(line, sizeof(line), stdin) && strcmp(line, word) == 0);
+}
+
+static void worker_submit(struct ring *r, struct io_uring_sqe sqe)
+{
+    submit(r, &sqe, 1);
+    if (r->p.flags & IORING_SETUP_SQPOLL)
+        kick_if_asleep(r);
+    else
+        enter(r, 1, 0, 0);
+}
+
+static struct io_uring_sqe worker_read(int fd, void *dst, unsigned len, uint64_t id)
+{
+    return (struct io_uring_sqe){ .opcode = IORING_OP_READ, .flags = IOSQE_ASYNC,
+        .fd = fd, .addr = (uintptr_t)dst, .len = len, .user_data = id };
+}
+
+static int worker_result(struct ring *r, uint64_t id)
+{
+    uint64_t deadline = monotonic_ns() + 8000000000ULL;
+    while (load(CQ(r, head)) == load(CQ(r, tail))) {
+        CHECK(monotonic_ns() < deadline);
+        usleep(1000);
+    }
+    struct io_uring_cqe cqe = reap(r);
+    CHECK(cqe.user_data == id);
+    return cqe.res;
+}
+
+static void *worker_connector(void *arg)
+{
+    const struct sockaddr_in *address = arg;
+    pin_to_cpu(1);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(fd >= 0);
+    CHECK(connect(fd, (const struct sockaddr *)address, sizeof(*address)) == 0);
+    CHECK(close(fd) == 0);
+    return NULL;
+}
+
+static void accept_while_reading(struct ring *a, struct ring *b, struct ring *ordinary, int fd)
+{
+    struct sockaddr_in address = { .sin_family = AF_INET,
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t len = sizeof(address);
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(listener >= 0 && bind(listener, (struct sockaddr *)&address, len) == 0);
+    CHECK(listen(listener, 4) == 0);
+    CHECK(getsockname(listener, (struct sockaddr *)&address, &len) == 0 && address.sin_port);
+    worker_submit(a, (struct io_uring_sqe){ .opcode = IORING_OP_ACCEPT, .flags = IOSQE_ASYNC,
+        .fd = listener, .user_data = 1001 });
+    worker_ack("blocked\n");
+
+    char selected[sizeof(contents)] = {}, other[sizeof(contents)] = {};
+    worker_submit(b, worker_read(fd, selected, sizeof(selected), 2001));
+    worker_submit(ordinary, worker_read(fd, other, sizeof(other), 3001));
+    CHECK(worker_result(b, 2001) == sizeof(selected) && !memcmp(selected, contents, sizeof(selected)));
+    CHECK(worker_result(ordinary, 3001) == sizeof(other) && !memcmp(other, contents, sizeof(other)));
+    CHECK(load(CQ(a, head)) == load(CQ(a, tail)));
+
+    pthread_t connector;
+    CHECK(pthread_create(&connector, NULL, worker_connector, &address) == 0);
+    int accepted = worker_result(a, 1001);
+    CHECK(accepted >= 0 && pthread_join(connector, NULL) == 0);
+    CHECK(close(accepted) == 0 && close(listener) == 0);
+}
+
+static void worker_file_position(struct ring *b, struct ring *ordinary)
+{
+    enum { size = 128 * 1024 + 1 };
+    static char source[size + 1], result[size];
+    for (unsigned i = 0; i < sizeof(source); i++)
+        source[i] = i % 127;
+    char path[] = "/root/worker-offset-XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0 && unlink(path) == 0 && write(fd, source, sizeof(source)) == sizeof(source));
+    CHECK(lseek(fd, 0, SEEK_SET) == 0);
+
+    char first = -1;
+    struct io_uring_sqe head = worker_read(fd, &first, 1, 3002);
+    head.off = UINT64_MAX;
+    worker_submit(ordinary, head); /* enter has reserved the first position ticket */
+    struct io_uring_sqe rest = worker_read(fd, result, size, 2002);
+    rest.off = UINT64_MAX;
+    rest.flags = 0; /* The transfer size alone must select the multi-window worker path. */
+    worker_submit(b, rest);
+    CHECK(worker_result(ordinary, 3002) == 1 && first == source[0]);
+    CHECK(worker_result(b, 2002) == size && !memcmp(result, source + 1, size));
+    CHECK(lseek(fd, 0, SEEK_CUR) == sizeof(source) && close(fd) == 0);
+}
+
+static void cancel_and_close_queued_reads(struct ring *b, struct ring *ordinary)
+{
+    int stream[2], sentinel[2];
+    char first = 0, cancelled = 0, abandoned = 0;
+    CHECK(pipe(stream) == 0 && pipe2(sentinel, O_NONBLOCK) == 0);
+    CHECK(syscall(SYS_io_uring_register, ordinary->fd, IORING_REGISTER_FILES, sentinel + 1, 1) == 0);
+    CHECK(close(sentinel[1]) == 0);
+
+    worker_submit(b, worker_read(stream[0], &first, 1, 2003));
+    worker_ack("pipe\n"); /* The selected worker now owns the pipe's serial key. */
+    worker_submit(ordinary, worker_read(stream[0], &cancelled, 1, 3003));
+    worker_submit(ordinary, (struct io_uring_sqe){ .opcode = IORING_OP_ASYNC_CANCEL,
+        .fd = -1, .addr = 3003, .user_data = 3004 });
+    CHECK(worker_result(ordinary, 3003) == -ECANCELED && worker_result(ordinary, 3004) == 0);
+    worker_submit(ordinary, worker_read(stream[0], &abandoned, 1, 3005));
+    CHECK(load(CQ(ordinary, head)) == load(CQ(ordinary, tail)));
+    destroy(ordinary);
+    char byte;
+    CHECK(read(sentinel[0], &byte, 1) == 0 && close(sentinel[0]) == 0);
+    CHECK(write(stream[1], "x", 1) == 1 && worker_result(b, 2003) == 1);
+    CHECK(first == 'x' && cancelled == 0 && abandoned == 0);
+    CHECK(close(stream[0]) == 0 && close(stream[1]) == 0);
+}
+
+static void reserved_workers(void)
+{
+    pin_to_cpu(0);
+    puts("WORKER_CPU_BEGIN");
+    unsigned flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+    struct ring a = setup(flags, 1, 7), b = setup(flags, 1, 7);
+    struct ring ordinary = setup(0, 0, 0);
+    int fd = known_file();
+    accept_while_reading(&a, &b, &ordinary, fd);
+    worker_file_position(&b, &ordinary);
+
+    /* Read the ext4 root disk's superblock magic. Its devfs block node routes
+     * even a two-byte, single-window read without IOSQE_ASYNC to Path 3. */
+    int disk = open("/dev/vda", O_RDONLY);
+    unsigned char magic[2] = {};
+    CHECK(disk >= 0);
+    struct io_uring_sqe block_read = worker_read(disk, magic, sizeof(magic), 1002);
+    block_read.flags = 0;
+    block_read.off = 1024 + 56;
+    worker_submit(&a, block_read);
+    CHECK(worker_result(&a, 1002) == 2 && magic[0] == 0x53 && magic[1] == 0xef);
+    CHECK(close(disk) == 0);
+
+    cancel_and_close_queued_reads(&b, &ordinary);
+    worker_ack("idle\n");
+    /* Report the connector's checked affinity once the serial port is quiet. */
+    puts("WORKER_CPU_CONNECT cpu=1");
+    char buf[sizeof(contents)] = {};
+    worker_submit(&b, worker_read(fd, buf, sizeof(buf), 2004));
+    CHECK(worker_result(&b, 2004) == sizeof(buf) && !memcmp(buf, contents, sizeof(buf)));
+    CHECK(load(CQ(&a, head)) == load(CQ(&a, tail)) && load(CQ(&b, head)) == load(CQ(&b, tail)));
+    destroy(&a);
+    destroy(&b);
+    CHECK(close(fd) == 0);
+    worker_ack("finished\n");
+    puts("WORKER_CPU_PASS");
+}
+
+/* With eight CPUs the shared pool permits 16 workers and eight jobs per ring.
+ * Keep each pipe empty until a specific permit should become available. */
+static void worker_limits(void)
+{
+    enum { per_ring = 8, selected_count = per_ring + 3, pipe_count = selected_count + per_ring };
+    unsigned flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+    struct ring a = setup(flags, 1, 7), b = setup(0, 0, 0), c = setup(flags, 1, 6);
+    int pipes[pipe_count][2], fd = known_file();
+    char bytes[pipe_count] = {}, positions[3] = {}, probe = 0;
+    CHECK(lseek(fd, 0, SEEK_SET) == 0);
+    puts("WORKER_LIMITS_BEGIN");
+    for (unsigned i = 0; i < pipe_count; i++) {
+        struct ring *r = i < selected_count ? &a : &b;
+        CHECK(pipe(pipes[i]) == 0);
+        while (load(SQ(r, tail)) - load(SQ(r, head)) == r->p.sq_entries)
+            sched_yield();
+        worker_submit(r, worker_read(pipes[i][0], bytes + i, 1, 5001 + i));
+    }
+    worker_ack("full\n");
+
+    /* B is at its quota. Later work on A must not take the same file's
+     * serial key while waiting for either of B's earlier position tickets. */
+    for (unsigned i = 0; i < 3; i++) {
+        struct io_uring_sqe read = worker_read(fd, positions + i, 1, 5100 + i);
+        read.off = UINT64_MAX;
+        worker_submit(i == 2 ? &a : &b, read);
+    }
+    worker_submit(&c, worker_read(fd, &probe, 1, 6001));
+    worker_submit(&c, (struct io_uring_sqe){ .opcode = IORING_OP_NOP, .user_data = 6002 });
+    CHECK(worker_result(&c, 6002) == 0);
+    puts("WORKER_LIMITS_RELEASE");
+    for (unsigned i = 0; i < selected_count; i++) {
+        CHECK(write(pipes[i][1], "a", 1) == 1 && worker_result(&a, 5001 + i) == 1);
+        if (i == 1)
+            CHECK(worker_result(&c, 6001) == 1 && probe == contents[0]);
+    }
+    CHECK(load(CQ(&a, head)) == load(CQ(&a, tail)));
+
+    /* Releasing one B permit lets it consume both consecutive tickets.
+     * A must then finish without any further pipe wakeup. */
+    CHECK(write(pipes[selected_count][1], "a", 1) == 1);
+    CHECK(worker_result(&b, 5001 + selected_count) == 1);
+    CHECK(worker_result(&b, 5100) == 1 && worker_result(&b, 5101) == 1);
+    CHECK(worker_result(&a, 5102) == 1);
+    CHECK(!memcmp(positions, contents, sizeof(positions)) && lseek(fd, 0, SEEK_CUR) == 3);
+    for (unsigned i = selected_count + 1; i < pipe_count; i++)
+        CHECK(write(pipes[i][1], "a", 1) == 1 && worker_result(&b, 5001 + i) == 1);
+    for (unsigned i = 0; i < pipe_count; i++)
+        CHECK(bytes[i] == 'a' && close(pipes[i][0]) == 0 && close(pipes[i][1]) == 0);
+    destroy(&a);
+    destroy(&b);
+    destroy(&c);
+    CHECK(close(fd) == 0);
+    puts("WORKER_LIMITS_PASS");
+}
+
 static void measure_reads(int sqpoll)
 {
     struct ring r = sqpoll ? setup(IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF, 2000, 1) :
@@ -645,6 +863,10 @@ int main(int argc, char **argv)
 {
     alarm(40);
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && strcmp(argv[1], "--reserved-workers") == 0) {
+        reserved_workers();
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "--reserved-cpu") == 0) {
         reserved_cpu();
         return 0;
@@ -657,6 +879,10 @@ int main(int argc, char **argv)
         reserved_file_position(&r);
         destroy(&r);
         puts("FUTURE_CPU socket recv, timeout and shared offset write/read PASS");
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "--worker-limits") == 0) {
+        worker_limits();
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "--ordinary-baseline") == 0) {

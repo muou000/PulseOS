@@ -1,0 +1,22 @@
+--- a/modules/axtask/src/run_queue.rs
++++ b/modules/axtask/src/run_queue.rs
+@@ -876,8 +876,19 @@
+         crate::bpf_trace::task_block(&curr, trace_sequence, _context);
+         drop(woke);
+
++        // The ACCEPT worker reaches this point only after committing to Blocked.
++        // Returning from resched runs on its restored stack on the sampled CPU.
++        let observe = curr.name().starts_with("io-uring-wk-");
++        if observe {
++            info!("io_uring worker wait task={} phase=block cpu={}",
++                curr.id().as_u64(), axhal::percpu::this_cpu_id());
++        }
+         trace!("task block woke: {}", curr.id_name());
+         self.resched();
++        if observe {
++            info!("io_uring worker wait task={} phase=resume cpu={}",
++                curr.id().as_u64(), axhal::percpu::this_cpu_id());
++        }
+     }
+
+     /// Block the current task and reschedule without a specific wait queue guard.
