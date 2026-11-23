@@ -10,8 +10,10 @@
 pub mod context;
 mod net_ops;
 mod ops;
+mod sqpoll;
 pub mod worker_pool;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -61,7 +63,7 @@ use self::ops::{
     spawn_poll_add_future, spawn_timer_future,
 };
 use self::worker_pool::{alloc_ring_pool_id, global_worker_pool};
-use crate::fd_table::{EventFdObject, FdEntry, FdFlags, FdObject, PollEventSequence, PollRegistration};
+use crate::fd_table::{EventFdObject, FdEntry, FdFlags, FdObject, PollEventSequence, PollRegistration, SharedFdTable};
 use crate::mm::{FixedBufferIo, FixedBufferPages, pin_fixed_buffer_pages};
 use crate::task::Process;
 
@@ -99,6 +101,7 @@ pub struct IoUringState {
     shared: SharedRingMemory,
     rings_frame: Arc<SharedFrame>,
     sqes_frame: Arc<SharedFrame>,
+    sqpoll: Option<Box<sqpoll::SqPoll>>,
     submit_lock: Mutex<SubmitSlot>,
     register_lock: Mutex<()>,
     inner: SpinNoIrq<RingInner>,
@@ -150,7 +153,7 @@ fn alloc_zeroed_shared_frame(byte_len: usize) -> LinuxResult<Arc<SharedFrame>> {
 }
 
 impl IoUringState {
-    pub fn new(entries: u32, params: &mut io_uring_params) -> LinuxResult<Arc<Self>> {
+    fn new(entries: u32, params: &mut io_uring_params) -> LinuxResult<Arc<Self>> {
         let layout = validate_and_compute_ring_geometry(entries, params)?;
         let rings_frame = alloc_zeroed_shared_frame(layout.rings_alloc_bytes)?;
         let sqes_frame = alloc_zeroed_shared_frame(layout.sqes_alloc_bytes)?;
@@ -173,7 +176,13 @@ impl IoUringState {
         let submit_all = (layout.flags & linux_raw_sys::io_uring::IORING_SETUP_SUBMIT_ALL) != 0;
         let ring_id = alloc_ring_pool_id();
 
+        let owner = (params.flags & linux_raw_sys::io_uring::IORING_SETUP_SQPOLL != 0)
+            .then(AsyncExecContext::capture_current)
+            .transpose()?;
         let state = Arc::new(Self {
+            sqpoll: owner
+                .as_ref()
+                .map(|ctx| Box::new(sqpoll::SqPoll::new(ctx.process.pid()))),
             ring_id,
             shared,
             rings_frame,
@@ -202,6 +211,9 @@ impl IoUringState {
             readable_sequence: AtomicU64::new(0),
             timeout_expiries: AtomicU64::new(0),
         });
+        if let Some(owner) = owner {
+            state.start_sqpoll(params, owner)?;
+        }
         {
             let mut active = ACTIVE_RINGS.lock();
             active.retain(|w| w.strong_count() > 0);
@@ -669,12 +681,12 @@ impl IoUringState {
                             if !state_wk.is_request_active(req_id) {
                                 return;
                             }
-                            let res = state_wk.execute_files_update(&ctx_wk.process, outcome);
+                            let res = state_wk.execute_files_update(&ctx_wk, outcome);
                             state_wk.complete_request(req_id, res, 0, true);
                         });
                     }
                 } else {
-                    let res = self.execute_files_update(&ctx.process, outcome);
+                    let res = self.execute_files_update(ctx, outcome);
                     if let Some(eff) = self.claim_completion_for_sync(req_id, res, false) {
                         pending_starts.extend(eff);
                     }
@@ -1050,6 +1062,10 @@ impl IoUringState {
             }
         });
 
+        if let Some(poll) = &self.sqpoll {
+            poll.publish_consumed_head(sq.kernel_sq_head());
+        }
+
         // If the batch ended with a dangling link bit on the last SQE, close and commit the chain.
         if !open_chain.is_empty() {
             used_slow_path = true;
@@ -1227,14 +1243,14 @@ impl IoUringState {
         self.fixed_files.lock().check_can_register(nr_args)
     }
 
-    pub fn register_files(&self, process: &Process, raw_fds: &[i32]) -> LinuxResult<()> {
+    pub fn register_files(&self, files: &SharedFdTable, raw_fds: &[i32]) -> LinuxResult<()> {
         let _reg_guard = self.register_lock.lock();
         self.fixed_files.lock().check_can_register(raw_fds.len())?;
 
         let mut slots = Vec::with_capacity(raw_fds.len());
         for &fd in raw_fds {
             match FixedFileRegistry::resolve_slot_fd(fd, &mut |u| {
-                resolve_process_fd_for_fixed(process, u)
+                resolve_fd_for_fixed(files, u)
             }) {
                 Ok(slot) => slots.push(slot),
                 Err(err) => {
@@ -1279,7 +1295,7 @@ impl IoUringState {
 
     pub fn update_fixed_files(
         &self,
-        process: &Process,
+        files: &SharedFdTable,
         offset: u32,
         raw_fds: &[i32],
         resv: u32,
@@ -1294,7 +1310,7 @@ impl IoUringState {
         let mut first_err = None;
         for &fd in raw_fds {
             match FixedFileRegistry::resolve_slot_fd(fd, &mut |u| {
-                resolve_process_fd_for_fixed(process, u)
+                resolve_fd_for_fixed(files, u)
             }) {
                 Ok(slot) => resolved.push(slot),
                 Err(err) => {
@@ -1330,18 +1346,18 @@ impl IoUringState {
 
     fn execute_files_update(
         &self,
-        process: &Process,
+        ctx: &AsyncExecContext,
         outcome: LinuxResult<(u32, Vec<i32>)>,
     ) -> i32 {
-        match outcome.and_then(|(offset, fds)| self.update_fixed_files(process, offset, &fds, 0)) {
+        match outcome.and_then(|(offset, fds)| self.update_fixed_files(&ctx.files()?, offset, &fds, 0)) {
             Ok(done) => done as i32,
             Err(err) => -err.code(),
         }
     }
 }
 
-fn resolve_process_fd_for_fixed(process: &Process, fd: usize) -> LinuxResult<FdEntry> {
-    let entry = process.get_fd_entry(fd)?;
+fn resolve_fd_for_fixed(files: &SharedFdTable, fd: usize) -> LinuxResult<FdEntry> {
+    let entry = files.read().get_entry_cloned(fd)?;
     if entry.object.as_any().is::<IoUringObject>() {
         return Err(LinuxError::EBADF);
     }
@@ -1353,7 +1369,7 @@ fn resolve_process_fd_for_fixed(process: &Process, fd: usize) -> LinuxResult<FdE
 /// File descriptor wrapper around `Arc<IoUringState>`.
 ///
 /// Closing the final `IoUringObject` runs the 5-step deterministic teardown protocol:
-/// 1. Set `dying = true` and wake `cq_wait_queue`.
+/// 1. Set `dying = true`, wake waiters and join the SQ poller before cancelling requests.
 /// 2. Cancel all queued/running requests (`RequestOrchestrator` + `CancelHandle` + Path 3 queue)
 ///    outside `SpinNoIrq`.
 /// 3. Wait until `inflight_count == 0` (all futures & workers have exited).
@@ -1382,12 +1398,26 @@ impl Drop for IoUringObject {
         self.state.dying.store(true, Ordering::Release);
         self.state.cq_wait_queue.notify_all(true);
 
+        // A request can release the final transient ring FD from inside its poller's
+        // submission. Finish on another stack before joining or taking submit_lock.
+        if self.state.is_sqpoll() && crate::task::current_thread().is_err() {
+            let state = self.state.clone();
+            axtask::spawn(move || state.finish_teardown());
+        } else {
+            self.state.finish_teardown();
+        }
+    }
+}
+
+impl IoUringState {
+    fn finish_teardown(&self) {
+        self.stop_sqpoll();
         // Step 2: Claim and cancel all active/queued requests and drop handles/specs outside SpinNoIrq.
         let (handles, dropped_specs, cqe_count) = {
-            let mut inner = self.state.inner.lock();
+            let mut inner = self.inner.lock();
             let effects = inner.orch.cancel_all_for_teardown();
             for cqe in &effects.cqes {
-                let _ = inner.cq.post_cqe(&self.state.shared, *cqe);
+                let _ = inner.cq.post_cqe(&self.shared, *cqe);
             }
             let handles: Vec<CancelHandle> = inner
                 .cancel_handles
@@ -1400,27 +1430,26 @@ impl Drop for IoUringObject {
             (handles, specs, effects.cqes.len())
         };
         if cqe_count > 0 {
-            self.state.readable_sequence.fetch_add(1, Ordering::Release);
-            self.state.cq_wait_queue.notify_all(true);
+            self.readable_sequence.fetch_add(1, Ordering::Release);
+            self.cq_wait_queue.notify_all(true);
         }
-        global_worker_pool().cancel_ring_queued(self.state.ring_id);
+        global_worker_pool().cancel_ring_queued(self.ring_id);
         for h in handles {
             h.cancel();
         }
         drop(dropped_specs);
 
         // Step 3: Drain until all spawned futures and active workers have exited.
-        self.state
-            .teardown_wait_queue
-            .wait_until(|| self.state.inflight_count.load(Ordering::Acquire) == 0);
+        self.teardown_wait_queue
+            .wait_until(|| self.inflight_count.load(Ordering::Acquire) == 0);
 
         // Step 4: Take under SpinNoIrq, then uncharge & drop resources outside SpinNoIrq.
-        self.state.eventfd_registered.store(false, Ordering::Release);
-        self.state.fixed_files_gen.fetch_add(1, Ordering::Release);
-        let ev = { self.state.eventfd.lock().take() };
-        let old_files = { self.state.fixed_files.lock().take_for_drop() };
+        self.eventfd_registered.store(false, Ordering::Release);
+        self.fixed_files_gen.fetch_add(1, Ordering::Release);
+        let ev = { self.eventfd.lock().take() };
+        let old_files = { self.fixed_files.lock().take_for_drop() };
         let (old_buffers, old_buf_owner) = {
-            let mut guard = self.state.fixed_buffers.lock();
+            let mut guard = self.fixed_buffers.lock();
             (guard.0.take_for_drop(), guard.1.take())
         };
         if let Some(table) = old_buffers {
@@ -1432,10 +1461,10 @@ impl Drop for IoUringObject {
         drop(old_files);
         drop(ev);
         {
-            let mut slot = self.state.submit_lock.lock();
+            let mut slot = self.submit_lock.lock();
             slot.staging_cache = Vec::new();
         }
-        // Step 5: Shared frames are released when `self.state` (`Arc<IoUringState>`) drops.
+        // Step 5: Shared frames are released when `self` (`Arc<IoUringState>`) drops.
     }
 }
 
@@ -1555,6 +1584,7 @@ pub fn cancel_requests_for_process(owner_pid: u64) {
         live
     };
     for ring in live_rings {
+        ring.stop_sqpoll_for_owner(owner_pid);
         if !ring.is_dying() {
             ring.cancel_requests_for_owner(owner_pid);
         }
@@ -1692,13 +1722,13 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     let w_fd = process.insert_fd_entry(FdEntry::new(Arc::new(w_end), FdFlags::empty()))?;
     let ring_fd = process.insert_fd_entry(FdEntry::new(Arc::clone(&ring) as Arc<dyn FdObject>, FdFlags::empty()))?;
     assert_eq!(
-        state.register_files(&process, &[ring_fd as i32]).err(),
+        state.register_files(&process.fd_table(), &[ring_fd as i32]).err(),
         Some(LinuxError::EBADF)
     );
-    state.register_files(&process, &[r_fd as i32, -1, -1])?;
+    state.register_files(&process.fd_table(), &[r_fd as i32, -1, -1])?;
     assert!(state.get_fixed_fd_entry(0).is_ok());
     assert_eq!(state.get_fixed_fd_entry(1).err(), Some(LinuxError::EBADF));
-    let done = state.update_fixed_files(&process, 1, &[w_fd as i32, -2], 0)?;
+    let done = state.update_fixed_files(&process.fd_table(), 1, &[w_fd as i32, -2], 0)?;
     assert_eq!(done, 1);
     assert!(state.get_fixed_fd_entry(1).is_ok());
     state.unregister_files(0, 0)?;

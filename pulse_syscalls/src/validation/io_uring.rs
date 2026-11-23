@@ -5,7 +5,7 @@ use core::time::Duration;
 use axerrno::LinuxError;
 use linux_raw_sys::io_uring::{__kernel_timespec, io_uring_getevents_arg};
 
-use pulse_io_uring_core::whitelist::validate_enter_flags_v1;
+use pulse_io_uring_core::whitelist::validate_enter_flags;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EnterArgKind {
@@ -19,7 +19,7 @@ pub(crate) fn validate_enter_args(
     argp: usize,
     argsz: usize,
 ) -> Result<EnterArgKind, LinuxError> {
-    validate_enter_flags_v1(flags)?;
+    validate_enter_flags(flags)?;
     if flags & linux_raw_sys::io_uring::IORING_ENTER_EXT_ARG != 0 {
         if argsz != core::mem::size_of::<io_uring_getevents_arg>() {
             return Err(LinuxError::EINVAL);
@@ -127,7 +127,7 @@ mod tests {
         );
         assert_eq!(
             validate_enter_args(IORING_ENTER_SQ_WAKEUP, 0, 0),
-            Err(LinuxError::EINVAL)
+            Ok(EnterArgKind::None)
         );
     }
 

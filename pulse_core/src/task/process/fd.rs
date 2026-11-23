@@ -37,9 +37,16 @@ impl Process {
         &self,
         entry: crate::fd_table::FdEntry,
     ) -> Result<usize, axerrno::LinuxError> {
+        self.insert_fd_entry_into(&self.fd_table(), entry)
+    }
+
+    pub(crate) fn insert_fd_entry_into(
+        &self,
+        files: &SharedFdTable,
+        entry: crate::fd_table::FdEntry,
+    ) -> Result<usize, axerrno::LinuxError> {
         let limit = self.resources.lock().rlimit_state.nofile_soft as usize;
-        let binding = self.fd_table();
-        let mut table = binding.write();
+        let mut table = files.write();
         let fd = table.insert_next(entry)?;
         if fd >= limit {
             table.remove(fd);

@@ -497,8 +497,8 @@ fn prepare_sqe_inner(
                 let pin_inline = fits_single_pin_window(&segments);
                 let buffer = if pin_inline {
                     let mut cursor = UserBufferCursor::default();
-                    let window = PinnedUserBuffers::pin_with_process(
-                        &ctx.process,
+                    let window = PinnedUserBuffers::pin_with_aspace(
+                        &ctx.aspace,
                         &segments,
                         &mut cursor,
                         !is_write,
@@ -976,7 +976,7 @@ pub fn execute_rw_request(
     } = *data;
 
     if entry.object.as_any().is::<EpollObject>() {
-        let res = run_sync_rw(ctx, &entry.object, is_write, buffer, offset.unwrap_or(u64::MAX), false);
+        let res = run_sync_rw((state, req_id), ctx, &entry.object, is_write, buffer, offset.unwrap_or(u64::MAX), false);
         state.complete_request(req_id, res, 0, false);
         return;
     }
@@ -1065,6 +1065,7 @@ pub fn execute_rw_request(
     }
 
     let res = run_sync_rw(
+        (state, req_id),
         ctx,
         &entry.object,
         is_write,
@@ -1225,7 +1226,7 @@ pub(crate) fn try_inline_fast_path_read(
     }
     let mut cursor = UserBufferCursor::default();
     let mut win =
-        PinnedUserBuffers::pin_with_process(&ctx.process, &segs, &mut cursor, true).ok()?;
+        PinnedUserBuffers::pin_with_aspace(&ctx.aspace, &segs, &mut cursor, true).ok()?;
     try_read_with_staging(
         file_obj,
         opt_offset,
@@ -1315,8 +1316,8 @@ async fn transfer_regular_file_buffer(
                     }
                     break;
                 }
-                let window = match PinnedUserBuffers::pin_with_process(
-                    &ctx.process,
+                let window = match PinnedUserBuffers::pin_with_aspace(
+                    &ctx.aspace,
                     &segments,
                     &mut cursor,
                     !is_write,
@@ -1723,7 +1724,7 @@ fn spawn_worker_rw(
         if !state_wk.is_request_active(req_id) {
             return;
         }
-        let res = run_sync_rw(&ctx_wk, &entry.object, is_write, buffer, offset, nowait);
+        let res = run_sync_rw((&state_wk, req_id), &ctx_wk, &entry.object, is_write, buffer, offset, nowait);
         state_wk.complete_request(req_id, res, 0, true);
     });
 }
@@ -1992,7 +1993,8 @@ fn execute_stream_rw(
 
 #[inline]
 fn transfer_obj_chunk(
-    thread: Option<&Arc<crate::task::Thread>>,
+    request: (&IoUringState, RequestId),
+    ctx: &AsyncExecContext,
     obj: &Arc<dyn FdObject>,
     is_write: bool,
     base_offset: u64,
@@ -2001,24 +2003,43 @@ fn transfer_obj_chunk(
     nowait: bool,
 ) -> LinuxResult<usize> {
     if is_stream_ready_fd(obj.as_ref()) {
-        let wait_event = if is_write {
-            linux_raw_sys::general::POLLOUT as i16
-        } else {
-            linux_raw_sys::general::POLLIN as i16
-        };
-        loop {
-            match try_stream_rw_once(thread, obj, is_write, buf) {
-                Err(LinuxError::EAGAIN) if !nowait => {
-                    if let Some(sigfd) = obj.as_any().downcast_ref::<SignalFdObject>() {
-                        let th = thread.ok_or(LinuxError::EINVAL)?;
-                        let _ = sigfd.wait_ready_for_thread(th, wait_event, None)?;
-                    } else {
-                        let _ = obj.wait_ready(wait_event, None)?;
-                    }
-                }
-                other => return other,
-            }
+        let thread = ctx.thread.as_ref();
+        match try_stream_rw_once(thread, obj, is_write, buf) {
+            Err(LinuxError::EAGAIN) if !nowait => {}
+            result => return result,
         }
+        let (ring, id) = request;
+        let interest = if is_write {
+            IoEvents::OUT | IoEvents::ERR | IoEvents::HUP
+        } else {
+            IoEvents::IN | IoEvents::RDHUP | IoEvents::ERR | IoEvents::HUP
+        };
+        let mut registrations = Vec::new();
+        let mut wake_on_completion = None;
+        // A pending worker holds an inflight guard. Teardown must be able to wake it
+        // even when no peer ever makes the stream ready (for example a linked write).
+        let result = axtask::future::block_on(poll_fn(|cx| {
+            registrations.clear();
+            if let Some(reg) = wake_on_completion.take() {
+                ring.cq_wait_queue.unregister_waker(reg);
+            }
+            wake_on_completion = Some(ring.cq_wait_queue.register_owned_waker(cx.waker()));
+            obj.clone().register_poll_with_context(
+                &ctx.process, thread, cx, interest, &mut registrations,
+            )?;
+            // Register both sources before rechecking to avoid losing a readiness or cancel wake.
+            if ring.is_dying() || !ring.is_request_active(id) {
+                return Poll::Ready(Err(LinuxError::ECANCELED));
+            }
+            match try_stream_rw_once(thread, obj, is_write, buf) {
+                Err(LinuxError::EAGAIN) => Poll::Pending,
+                result => Poll::Ready(result),
+            }
+        }));
+        if let Some(reg) = wake_on_completion {
+            ring.cq_wait_queue.unregister_waker(reg);
+        }
+        return result;
     }
     if is_write {
         if base_offset != u64::MAX {
@@ -2041,7 +2062,8 @@ fn transfer_obj_chunk(
 
 #[allow(clippy::too_many_arguments)]
 fn run_sync_rw_window(
-    thread: Option<&Arc<crate::task::Thread>>,
+    request: (&IoUringState, RequestId),
+    ctx: &AsyncExecContext,
     buffer: &mut PreparedRwBuffer,
     obj: &Arc<dyn FdObject>,
     is_write: bool,
@@ -2059,7 +2081,8 @@ fn run_sync_rw_window(
             buffer.copy_from_user_exact(&mut kbuf[..chunk])?;
         }
         let n = transfer_obj_chunk(
-            thread,
+            request,
+            ctx,
             obj,
             is_write,
             base_offset,
@@ -2095,6 +2118,7 @@ fn rw_progress_or_error(total_done: usize, err: LinuxError) -> i32 {
 }
 
 fn run_sync_rw(
+    request: (&IoUringState, RequestId),
     ctx: &AsyncExecContext,
     obj: &Arc<dyn FdObject>,
     is_write: bool,
@@ -2110,13 +2134,12 @@ fn run_sync_rw(
     let mut cur_off = offset;
     let mut kbuf = vec![0u8; total_len.min(RW_CHUNK_CAP)];
     let mut total_done = 0usize;
-    let thread = ctx.thread.as_ref();
-
     match &buffer {
         PreparedRwBuffer::Empty => 0,
         PreparedRwBuffer::SingleWindow(_) | PreparedRwBuffer::Fixed(_) => {
             match run_sync_rw_window(
-                thread,
+                request,
+                ctx,
                 &mut buffer,
                 obj,
                 is_write,
@@ -2136,8 +2159,8 @@ fn run_sync_rw(
             };
             let mut cursor = UserBufferCursor::default();
             loop {
-                let window = match PinnedUserBuffers::pin_with_process(
-                    &ctx.process,
+                let window = match PinnedUserBuffers::pin_with_aspace(
+                    &ctx.aspace,
                     &segments,
                     &mut cursor,
                     !is_write,
@@ -2150,7 +2173,8 @@ fn run_sync_rw(
                 }
                 let mut win_buf = PreparedRwBuffer::SingleWindow(Box::new(window));
                 match run_sync_rw_window(
-                    thread,
+                    request,
+                    ctx,
                     &mut win_buf,
                     obj,
                     is_write,

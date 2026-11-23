@@ -4,7 +4,7 @@ use axerrno::{AxError, AxResult};
 use axhal::trap::PageFaultFlags;
 use axmm::{AddrSpace, MappingPlacement, MappingWait, PreparedMapping};
 use kernel_guard::NoPreempt;
-use memory_addr::{PAGE_SIZE_4K, VirtAddr};
+use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A preemption-safe address-space lock.
@@ -51,6 +51,75 @@ impl AddressSpaceLock {
                 .handle_prepared_cow_page(address, flags, prepared),
             axmm::PageFaultWork::WriteLock => self.write().handle_page_fault_write(address, flags),
         })
+    }
+
+    pub(crate) fn fault_in_user_range(
+        &self,
+        user_addr: usize,
+        len: usize,
+        access: PageFaultFlags,
+    ) -> AxResult<()> {
+        super::uaccess::validate_user_range(user_addr, len)?;
+        if len == 0 {
+            return Ok(());
+        }
+        let end = user_addr.checked_add(len).ok_or(AxError::BadAddress)?;
+        let start_page = VirtAddr::from(user_addr).align_down_4k();
+        let end_page = VirtAddr::from(end).align_up_4k();
+        let access = access | PageFaultFlags::USER;
+
+        let mut page = start_page;
+        while page < end_page {
+            {
+                let aspace = self.read();
+                while page < end_page {
+                    let already_resident = aspace
+                        .query_vaddr(page)
+                        .is_ok_and(|(paddr, flags, _)| {
+                            paddr.as_usize() != 0 && flags.contains(access)
+                        });
+                    if !already_resident {
+                        break;
+                    }
+                    page += PAGE_SIZE_4K;
+                }
+            }
+
+            if page >= end_page {
+                break;
+            }
+            if !self.resolve_page_fault(page, access)? {
+                return Err(AxError::BadAddress);
+            }
+            page += PAGE_SIZE_4K;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_user_bytes_partial(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<usize> {
+        super::uaccess::validate_user_range(user_addr, bytes.len())?;
+        let start = VirtAddr::from(user_addr);
+        if self.read().read(start, bytes).is_ok() {
+            return Ok(bytes.len());
+        }
+        self.fault_in_user_range(user_addr, bytes.len(), PageFaultFlags::READ)?;
+        self.read()
+            .read(start, bytes)
+            .map(|()| bytes.len())
+            .map_err(AxError::from)
+    }
+
+    pub(crate) fn write_user_bytes_partial(&self, user_addr: usize, bytes: &[u8]) -> AxResult<usize> {
+        super::uaccess::validate_user_range(user_addr, bytes.len())?;
+        let start = VirtAddr::from(user_addr);
+        if self.read().write(start, bytes).is_ok() {
+            return Ok(bytes.len());
+        }
+        self.fault_in_user_range(user_addr, bytes.len(), PageFaultFlags::WRITE)?;
+        self.read()
+            .write(start, bytes)
+            .map(|()| bytes.len())
+            .map_err(AxError::from)
     }
 
     fn wait_for_mapping(wait: MappingWait) {

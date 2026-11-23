@@ -159,6 +159,9 @@ impl Process {
             return Ok(());
         }
 
+        // Stop the submission thread before detaching its files and address space.
+        crate::io_uring::cancel_requests_for_process(self.pid());
+
         let new_handle = ZOMBIE_ASPACE_HANDLE.clone();
         let new_pt_root = new_handle.read().page_table_root();
         let new_asid = new_handle.read().asid();
@@ -186,7 +189,6 @@ impl Process {
             crate::ipc::sem::exit_sem_undos(self.pid() as i32, undos);
         }
 
-        crate::io_uring::cancel_requests_for_process(self.pid());
         self.close_all_files();
         self.futex_table.clear();
         self.memlock_unlock_all();

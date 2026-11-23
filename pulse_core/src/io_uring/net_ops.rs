@@ -40,7 +40,7 @@ use crate::net::{
     lookup_unix_socket_by_key, normalize_connect_addr, resolve_unix_path_async,
     resolve_unix_path_sync,
 };
-use crate::task::{Process, queue_signal_to_process, queue_signal_to_thread};
+use crate::task::{queue_signal_to_process, queue_signal_to_thread};
 
 const MAX_IOV_COUNT: usize = 1024;
 const RW_CHUNK_CAP: usize = 64 * 1024;
@@ -125,7 +125,7 @@ pub struct PreparedSocketMsgTransfer {
 }
 
 fn pin_exact_rw(
-    process: &Process,
+    ctx: &AsyncExecContext,
     ptr: usize,
     len: usize,
     writable: bool,
@@ -133,12 +133,12 @@ fn pin_exact_rw(
     if len == 0 {
         return Err(LinuxError::EINVAL);
     }
-    if ptr == 0 || process.validate_user_range(ptr, len).is_err() {
+    if ptr == 0 || !ctx.is_user_range(ptr, len) {
         return Err(LinuxError::EFAULT);
     }
     let seg = [UserIoSegment::new(ptr, len)];
     let mut cursor = UserBufferCursor::default();
-    let pinned = PinnedUserBuffers::pin_with_process(process, &seg, &mut cursor, writable)?;
+    let pinned = PinnedUserBuffers::pin_with_aspace(&ctx.aspace, &seg, &mut cursor, writable)?;
     if let Some(err) = pinned.terminal_error() {
         return Err(err);
     }
@@ -263,7 +263,7 @@ fn prepare_socket_rw_buffer(
     if !force_async && fits_single_pin_window(&segments) {
         let mut cursor = UserBufferCursor::default();
         let window =
-            PinnedUserBuffers::pin_with_process(&ctx.process, &segments, &mut cursor, to_user)?;
+            PinnedUserBuffers::pin_with_aspace(&ctx.aspace, &segments, &mut cursor, to_user)?;
         if let Some(err) = window.terminal_error() {
             return Err(err);
         }
@@ -349,10 +349,10 @@ pub fn prepare_accept_sqe(
             if raw_len < 0 {
                 return Err(LinuxError::EINVAL);
             }
-            let addrlen_pin = Some(pin_exact_rw(&ctx.process, addrlen_ptr, 4, true)?);
+            let addrlen_pin = Some(pin_exact_rw(ctx, addrlen_ptr, 4, true)?);
             let cap = (raw_len as usize).min(MAX_PIN_SOCKADDR_LEN);
             let addr_pin = if cap > 0 {
-                Some(pin_exact_rw(&ctx.process, addr, cap, true)?)
+                Some(pin_exact_rw(ctx, addr, cap, true)?)
             } else {
                 None
             };
@@ -506,7 +506,7 @@ pub fn prepare_sendmsg_recvmsg_sqe(
             };
             let pin = if cap > 0 {
                 Some(pin_exact_rw(
-                    &ctx.process,
+                    ctx,
                     initial_hdr.msg_name as usize,
                     cap,
                     true,
@@ -521,7 +521,7 @@ pub fn prepare_sendmsg_recvmsg_sqe(
             None
         } else {
             Some(pin_exact_rw(
-                &ctx.process,
+                ctx,
                 msg_ptr,
                 size_of::<MessageHeader>(),
                 true,

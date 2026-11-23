@@ -3,6 +3,7 @@
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use linux_raw_sys::io_uring::IORING_SQ_NEED_WAKEUP;
 use pulse_user_abi::io_uring::{IoUringCqe, IoUringSqe};
 
 use crate::capacity::{PAGE_SIZE_4K, RingRegionLayout};
@@ -48,8 +49,7 @@ unsafe impl Send for SharedRingMemory {}
 // SAFETY: `SharedRingMemory` does not grant unsynchronized `&`/`&mut` aliasing to
 // shared pages; external `Mutex`/`SpinNoIrq` locks serialize kernel-side SQ consumer
 // and CQ producer methods (`SubmitRingState`/`CompletionRingState`), while `SharedRingMemory`'s
-// raw mutation primitives stay crate-private. Only read-only atomic header queries (`load_cq_flags`)
-// and `&self` atomic loads are exposed across shared references.
+// raw mutation primitives stay crate-private. Exposed control-word accessors use atomics.
 unsafe impl Sync for SharedRingMemory {}
 
 impl SharedRingMemory {
@@ -131,6 +131,31 @@ impl SharedRingMemory {
     #[inline]
     pub fn load_cq_flags(&self) -> u32 {
         self.load_u32(self.layout.cq_flags_off, Ordering::Acquire)
+    }
+
+    /// Number of published SQ slots visible after a kernel-owned head.
+    pub fn sq_pending(&self, head: u32) -> u32 {
+        self.load_u32(self.layout.sq_tail_off, Ordering::Acquire)
+            .wrapping_sub(head)
+    }
+
+    /// Pairs with the producer's full fence between publishing tail and reading flags.
+    /// After this returns, the poller must recheck tail before going to sleep.
+    pub fn set_sq_need_wakeup(&self) {
+        self.fetch_or_u32(
+            self.layout.sq_flags_off,
+            IORING_SQ_NEED_WAKEUP,
+            Ordering::Relaxed,
+        );
+        core::sync::atomic::fence(Ordering::SeqCst);
+    }
+
+    pub fn clear_sq_need_wakeup(&self) {
+        self.fetch_and_u32(
+            self.layout.sq_flags_off,
+            !IORING_SQ_NEED_WAKEUP,
+            Ordering::Release,
+        );
     }
 
     /// Initializes the immutable mask/entries fields and zeroed head/tail/flags/counters
@@ -291,9 +316,7 @@ impl SubmitRingState {
             return 0;
         }
         let l = shared.layout();
-        let sq_tail = shared.load_u32(l.sq_tail_off, Ordering::Acquire);
-        let avail = sq_tail.wrapping_sub(self.kernel_sq_head);
-        let actual = to_submit.min(avail).min(self.sq_entries);
+        let actual = to_submit.min(shared.sq_pending(self.kernel_sq_head)).min(self.sq_entries);
         if actual == 0 {
             return 0;
         }
@@ -313,6 +336,11 @@ impl SubmitRingState {
             }
 
             let sqe = shared.read_sqe_volatile(sqe_idx);
+            if l.flags & linux_raw_sys::io_uring::IORING_SETUP_SQPOLL != 0 {
+                // Dispatch may expose a CQE immediately to a concurrent producer.
+                // liburing counts pending submissions as tail - head on its next submit.
+                shared.store_u32(l.sq_head_off, self.kernel_sq_head, Ordering::Release);
+            }
             submitted += 1;
             if on_sqe(&sqe).is_err() && !self.submit_all {
                 break;
@@ -684,6 +712,46 @@ mod tests {
         let sub_all = sq_all.submit_batch(&buf2.shared, 3, |_| Err(()));
         assert_eq!(sub_all, 3);
         assert_eq!(sq_all.kernel_sq_head(), 3);
+    }
+
+    #[test]
+    fn sqpoll_frees_the_copied_slot_before_dispatch_can_complete() {
+        let buf = AlignedTestBuffers::new(2, linux_raw_sys::io_uring::IORING_SETUP_SQPOLL);
+        let shared = &buf.shared;
+        let layout = shared.layout();
+        let mut sq = SubmitRingState::new(2, false);
+        buf.write_sq_array(0, 1);
+        buf.write_sqe(1, IoUringSqe { user_data: 42, ..Default::default() });
+        shared.store_u32(layout.sq_tail_off, 1, Ordering::Release);
+        assert_eq!(sq.submit_batch(shared, 1, |copied| {
+            assert_eq!(shared.load_u32(layout.sq_head_off, Ordering::Acquire), 1);
+            buf.write_sqe(1, IoUringSqe::default());
+            assert_eq!(copied.user_data, 42);
+            Ok(())
+        }), 1);
+    }
+
+    #[test]
+    fn sq_wakeup_and_cq_overflow_flags_survive_independent_updates() {
+        use linux_raw_sys::io_uring::IORING_SQ_NEED_WAKEUP;
+
+        let buf = AlignedTestBuffers::new(1, 0);
+        let shared = &buf.shared;
+        let flags = || shared.load_u32(shared.layout().sq_flags_off, Ordering::Acquire);
+        let mut cq = CompletionRingState::new(shared.layout().cq_entries);
+        let cqe = IoUringCqe { user_data: 5, res: 0, flags: 0 };
+        for _ in 0..shared.layout().cq_entries {
+            assert_eq!(cq.post_cqe(shared, cqe), PostCqeOutcome::RingWritten);
+        }
+        shared.set_sq_need_wakeup();
+        assert_eq!(cq.post_cqe(shared, cqe), PostCqeOutcome::QueuedOverflow);
+        assert_eq!(flags(), IORING_SQ_NEED_WAKEUP | IORING_SQ_CQ_OVERFLOW);
+        shared.clear_sq_need_wakeup();
+        assert_eq!(flags(), IORING_SQ_CQ_OVERFLOW);
+        shared.set_sq_need_wakeup();
+        shared.store_u32(shared.layout().cq_head_off, 1, Ordering::Release);
+        assert_eq!(cq.flush_cq_overflow(shared), 1);
+        assert_eq!(flags(), IORING_SQ_NEED_WAKEUP);
     }
 
     #[test]
