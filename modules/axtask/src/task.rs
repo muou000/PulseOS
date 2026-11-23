@@ -53,6 +53,7 @@ pub struct TaskInner {
     name: SpinNoIrq<String>,
     is_idle: bool,
     is_init: bool,
+    is_user: bool,
 
     entry: SpinNoIrq<Option<Box<dyn FnOnce() + Send>>>,
     state: AtomicU8,
@@ -335,13 +336,29 @@ impl TaskInner {
         *self.cpumask.lock()
     }
 
-    /// Sets the cpu affinity mask of the task.
-    ///
-    /// # Arguments
-    /// `cpumask` - The cpu affinity mask to be set in type [`AxCpuMask`].
+    /// Marks an unpublished task as a user thread. The first user thread can
+    /// run on any user CPU. Fork and clone inherit the caller's effective mask.
+    pub fn init_user_affinity(&mut self) {
+        let parent = crate::current();
+        *self.cpumask.get_mut() = if parent.is_user {
+            parent.cpumask()
+        } else {
+            crate::api::user_cpu_mask()
+        };
+        self.is_user = true;
+    }
+
+    /// Sets and returns the effective mask. An empty intersection leaves the
+    /// previous affinity in place and returns an empty mask.
     #[inline]
-    pub fn set_cpumask(&self, cpumask: AxCpuMask) {
-        *self.cpumask.lock() = cpumask
+    pub fn set_cpumask(&self, mut cpumask: AxCpuMask) -> AxCpuMask {
+        if self.is_user {
+            cpumask &= crate::api::user_cpu_mask();
+        }
+        if !cpumask.is_empty() {
+            *self.cpumask.lock() = cpumask;
+        }
+        cpumask
     }
 
     /// Polls and consumes a pending task interruption.
@@ -376,6 +393,7 @@ impl TaskInner {
             name: SpinNoIrq::new(name),
             is_idle: false,
             is_init: false,
+            is_user: false,
             entry: SpinNoIrq::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             #[cfg(feature = "bpf-trace")]

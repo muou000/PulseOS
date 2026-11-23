@@ -197,6 +197,7 @@ pub fn spawn_task_with_thread(
     thread: Arc<Thread>,
     register_proc: bool,
 ) -> axtask::AxTaskRef {
+    inner.init_user_affinity();
     let proc = thread.process();
     let pt_root = proc.page_table_root();
     let asid = proc.asid();

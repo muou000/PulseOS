@@ -16,6 +16,8 @@ extern crate pulse_core;
 extern crate pulse_syscalls;
 extern crate starry_vdso;
 
+mod cpu_reservation;
+
 use alloc::vec::Vec;
 use pulse_core::task::exec::resolve_exec_path_and_args;
 
@@ -38,6 +40,8 @@ fn power_off_after_writeback() -> ! {
 
 #[unsafe(no_mangle)]
 fn main() {
+    cpu_reservation::init();
+
     starry_vdso::vdso::init_vdso_data();
     axruntime::vdso::set_update_hook(starry_vdso::vdso::update_vdso_data);
 

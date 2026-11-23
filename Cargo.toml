@@ -247,6 +247,7 @@ bpf-trace = [
 ]
 
 [dependencies]
+axerrno.workspace = true
 axhal.workspace = true
 axlog.workspace = true
 axruntime = { workspace = true, features = ["pcp-boot-checks"] }

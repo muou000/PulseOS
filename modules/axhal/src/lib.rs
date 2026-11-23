@@ -244,6 +244,9 @@ pub fn mark_cpu_online(cpu_id: usize) {
         cpu_id < usize::BITS as usize,
         "online CPU mask is too small"
     );
+    // The LoongArch getcpu vDSO reads the logical CPU ID from RDTIME.
+    #[cfg(target_arch = "loongarch64")]
+    axcpu::init::set_timer_id(cpu_id);
     #[cfg(feature = "irq")]
     axplat::irq::cpu_online(cpu_id);
     #[cfg(feature = "smp")]

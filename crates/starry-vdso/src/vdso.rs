@@ -10,9 +10,21 @@ use kernel_elf_parser::{AuxEntry, AuxType};
 use log::{debug, info, warn};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K};
 
+use crate::{config::VVAR_PAGES, vdso_data::VdsoData};
+
 /// Global vDSO data instance
 #[unsafe(link_section = ".data")]
-pub static mut VDSO_DATA: crate::vdso_data::VdsoData = crate::vdso_data::VdsoData::new();
+pub static mut VDSO_DATA: VdsoData = VdsoData::new();
+
+const VVAR_SIZE: usize = VVAR_PAGES * PAGE_SIZE_4K;
+const DATA_SIZE: usize = size_of::<VdsoData>();
+const _: () = assert!(align_of::<VdsoData>() == PAGE_SIZE_4K);
+
+// The embedded vDSO can read ABI fields beyond the time data. In particular,
+// LoongArch getcpu reads a per-CPU NUMA node, always zero on PulseOS.
+#[repr(align(4096))]
+struct VvarZeroPages([u8; VVAR_SIZE - DATA_SIZE]);
+static VVAR_ZERO_PAGES: VvarZeroPages = VvarZeroPages([0; VVAR_SIZE - DATA_SIZE]);
 
 /// Initialize vDSO data
 pub fn init_vdso_data() {
@@ -247,23 +259,21 @@ fn map_vvar_and_push_aux(
     vdso_user_addr: usize,
     mappings: &mut Vec<VdsoMapping>,
 ) -> AxResult<()> {
-    use crate::config::VVAR_PAGES;
-    let vvar_user_addr = vdso_user_addr - VVAR_PAGES * PAGE_SIZE_4K;
-    let vvar_paddr = vdso_data_paddr();
-
+    let vvar_user_addr = vdso_user_addr - VVAR_SIZE;
     mappings.push(VdsoMapping {
         user_start: vvar_user_addr,
-        paddr: vvar_paddr.into(),
-        size: VVAR_PAGES * PAGE_SIZE_4K,
+        paddr: vdso_data_paddr().into(),
+        size: DATA_SIZE,
         flags: MemRegionFlags::READ,
     });
-
-    debug!(
-        "Mapped vvar pages at user {:#x}..{:#x} -> paddr {:#x}",
-        vvar_user_addr,
-        vvar_user_addr + VVAR_PAGES * PAGE_SIZE_4K,
-        vvar_paddr,
-    );
+    if DATA_SIZE < VVAR_SIZE {
+        mappings.push(VdsoMapping {
+            user_start: vvar_user_addr + DATA_SIZE,
+            paddr: virt_to_phys(VVAR_ZERO_PAGES.0.as_ptr().addr().into()),
+            size: VVAR_SIZE - DATA_SIZE,
+            flags: MemRegionFlags::READ,
+        });
+    }
 
     let aux_entry = AuxEntry::new(AuxType::SYSINFO_EHDR, vdso_user_addr);
     auxv.push(aux_entry);

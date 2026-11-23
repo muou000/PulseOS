@@ -134,6 +134,18 @@ BPF 和 pipe 的启动自检默认关闭。测试内核使用
 `make test APP_FEATURES="qemu guest-checks"` 显式开启两项检查；
 配置组合回归与结果标记见 [guest 自检说明](tests/guest_checks/README.md)。
 
+### 为内核任务保留 CPU
+
+内核在挂载根文件系统、确认在线 CPU 后读取一次 `/etc/pulse-kernel-cpus`。文件缺失或内容为空白时，用户线程可使用全部在线 CPU。要在 8 核机器上保留 CPU 7，在持久化的根文件系统中运行以下命令，再重新启动：
+
+```sh
+echo 7 > /etc/pulse-kernel-cpus
+```
+
+文件应为最多 4096 字节的普通文本文件。使用调度器的逻辑 CPU 编号，逗号分隔，连续编号可写成闭区间，例如 `2,5-7`。启动日志以十六进制位掩码报告生效集合，例如 `CPU reservation: reserved=0x80 user=0x7f`。编号离线、列表无效或保留了全部在线 CPU 时，启动会在创建首个用户线程前报告错误。删除或清空文件，下次启动即恢复默认配置。
+
+内核任务可以使用保留核。用户线程自首次入队起受用户可用集合约束，在同步系统调用中阻塞或恢复时也遵守该约束。当前线程调用 `sched_setaffinity` 时，只有请求与可用集合的交集生效。交集为空会返回 `EINVAL` 并保留原亲和性。可用 `sched_getaffinity` 查询有效掩码。
+
 ### 运行测试 (QEMU)
 
 #### RISC-V 64
