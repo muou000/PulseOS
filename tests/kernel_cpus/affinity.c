@@ -54,6 +54,11 @@ static void *exercise_placement(void *arg)
     const struct worker *worker = arg;
     expect_mask(1UL << worker->inherited_cpu);
     expect_cpu(worker->inherited_cpu);
+    /* All workers start pinned to the same CPU. Keep them runnable across
+     * timer ticks before allowing any of them to migrate. */
+    for (volatile unsigned step = 0; step < 8000000; step++)
+        ;
+    expect_cpu(worker->inherited_cpu);
     /* Rebind through each allowed CPU while the other threads do the same. */
     for (int i = 0; i < 16; i++) {
         int cpu = (i + worker->offset) % 8;
@@ -61,8 +66,11 @@ static void *exercise_placement(void *arg)
             continue;
         bind_mask(1UL << cpu);
         expect_cpu(cpu);
-        if (usleep(2000) || sched_yield())
-            fail("sleep/yield");
+        if (usleep(2000))
+            fail("usleep");
+        expect_cpu(cpu);
+        if (sched_yield())
+            fail("sched_yield");
         expect_cpu(cpu);
     }
     return NULL;
