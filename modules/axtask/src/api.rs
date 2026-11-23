@@ -142,14 +142,23 @@ pub(crate) fn cpu_mask_full() -> AxCpuMask {
         .clone()
 }
 
-static USER_CPU_MASK: lazyinit::LazyInit<AxCpuMask> = lazyinit::LazyInit::new();
+struct CpuReservation {
+    users: AxCpuMask,
+    sqpoll: usize,
+}
 
-/// Publishes the CPUs available to user threads once all boot CPUs are online.
-/// Each bit in `reserved` identifies a logical CPU reserved for kernel tasks.
-pub fn init_user_cpu_mask(reserved: usize) -> Result<(), &'static str> {
+static CPU_RESERVATION: lazyinit::LazyInit<CpuReservation> = lazyinit::LazyInit::new();
+
+/// Publishes CPU placement policy once all boot CPUs are online. Each bit in
+/// `reserved` excludes a logical CPU from userspace, and `sqpoll` selects the
+/// reserved CPUs that userspace can explicitly request for an SQ poller.
+pub fn init_cpu_reservation(reserved: usize, sqpoll: usize) -> Result<(), &'static str> {
     let online = axhal::online_cpu_mask();
     if reserved & !online != 0 {
         return Err("reserved CPU is offline");
+    }
+    if sqpoll & !reserved != 0 {
+        return Err("SQPOLL service CPU is outside the reserved set");
     }
     let user_bits = online & !reserved;
     if user_bits == 0 {
@@ -160,13 +169,18 @@ pub fn init_user_cpu_mask(reserved: usize) -> Result<(), &'static str> {
     for cpu in 0..axhal::cpu_num() {
         users.set(cpu, user_bits & (1 << cpu) != 0);
     }
-    USER_CPU_MASK.init_once(users);
-    info!("CPU reservation: reserved={reserved:#x} user={user_bits:#x}");
+    CPU_RESERVATION.init_once(CpuReservation { users, sqpoll });
+    info!("CPU reservation: reserved={reserved:#x} user={user_bits:#x} sqpoll={sqpoll:#x}");
     Ok(())
 }
 
 pub(crate) fn user_cpu_mask() -> AxCpuMask {
-    *USER_CPU_MASK.get().expect("user CPU mask not initialized")
+    CPU_RESERVATION.users
+}
+
+/// Returns whether the boot policy permits an SQ poller to bind to this reserved CPU.
+pub fn is_sqpoll_service_cpu(cpu: usize) -> bool {
+    cpu < usize::BITS as usize && CPU_RESERVATION.sqpoll & (1usize << cpu) != 0
 }
 
 /// Initializes the task scheduler for secondary CPUs.

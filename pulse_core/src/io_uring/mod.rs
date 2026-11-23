@@ -155,6 +155,14 @@ fn alloc_zeroed_shared_frame(byte_len: usize) -> LinuxResult<Arc<SharedFrame>> {
 impl IoUringState {
     fn new(entries: u32, params: &mut io_uring_params) -> LinuxResult<Arc<Self>> {
         let layout = validate_and_compute_ring_geometry(entries, params)?;
+        let owner = (params.flags & linux_raw_sys::io_uring::IORING_SETUP_SQPOLL != 0)
+            .then(AsyncExecContext::capture_current)
+            .transpose()?;
+        let sqpoll = owner
+            .as_ref()
+            .map(|ctx| sqpoll::SqPoll::new(ctx.process.pid(), params))
+            .transpose()?
+            .map(Box::new);
         let rings_frame = alloc_zeroed_shared_frame(layout.rings_alloc_bytes)?;
         let sqes_frame = alloc_zeroed_shared_frame(layout.sqes_alloc_bytes)?;
 
@@ -176,13 +184,8 @@ impl IoUringState {
         let submit_all = (layout.flags & linux_raw_sys::io_uring::IORING_SETUP_SUBMIT_ALL) != 0;
         let ring_id = alloc_ring_pool_id();
 
-        let owner = (params.flags & linux_raw_sys::io_uring::IORING_SETUP_SQPOLL != 0)
-            .then(AsyncExecContext::capture_current)
-            .transpose()?;
         let state = Arc::new(Self {
-            sqpoll: owner
-                .as_ref()
-                .map(|ctx| Box::new(sqpoll::SqPoll::new(ctx.process.pid()))),
+            sqpoll,
             ring_id,
             shared,
             rings_frame,
@@ -954,6 +957,15 @@ impl IoUringState {
         let mut stopped_on_error = false;
 
         let submitted = sq.submit_batch(&self.shared, to_submit, |sqe| {
+            #[cfg(feature = "guest-checks")]
+            if self.sqpoll_service_cpu().is_some() {
+                axlog::info!(
+                    "SQPOLL consume ring={} user_data={} cpu={}",
+                    self.ring_id,
+                    sqe.user_data,
+                    axhal::percpu::this_cpu_id()
+                );
+            }
             let has_link = (sqe.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) != 0;
 
             if chain_broken_by_prep {

@@ -1,9 +1,10 @@
-//! Boot-time user CPU placement policy, loaded before creating PID 1.
+//! Boot-time CPU reservation policy, loaded before creating PID 1.
 
 use axerrno::AxError;
 use axtask::future::block_on;
 
-const CONFIG: &str = "/etc/pulse-kernel-cpus";
+const RESERVED_CPUS: &str = "/etc/pulse-kernel-cpus";
+const SQPOLL_CPUS: &str = "/etc/pulse-sqpoll-cpus";
 
 fn parse_cpu_list(list: &str) -> Result<usize, &'static str> {
     let list = list.trim();
@@ -33,28 +34,34 @@ fn parse_cpu_list(list: &str) -> Result<usize, &'static str> {
     Ok(mask)
 }
 
-pub(super) fn init() {
+fn read_cpu_list(path: &str) -> usize {
     let fs = axfs::ROOT_FS_CONTEXT
         .get()
         .expect("root filesystem not mounted");
     // The rootfs is mounted and userspace has not started, so the configuration
     // is stable between the metadata check and the read.
-    let mask = match block_on(fs.metadata(CONFIG)) {
+    match block_on(fs.metadata(path)) {
         Err(AxError::NotFound) => 0,
-        Err(error) => panic!("{CONFIG}: {error:?}"),
+        Err(error) => panic!("{path}: {error:?}"),
         Ok(meta) => {
             assert!(
                 meta.node_type == axfs::NodeType::RegularFile && meta.size <= 4096,
-                "{CONFIG}: expected a regular file of at most 4096 bytes"
+                "{path}: expected a regular file of at most 4096 bytes"
             );
-            let list = block_on(fs.read_to_string(CONFIG))
-                .unwrap_or_else(|error| panic!("{CONFIG}: {error:?}"));
-            parse_cpu_list(&list).unwrap_or_else(|error| panic!("{CONFIG}: {error}"))
+            let list = block_on(fs.read_to_string(path))
+                .unwrap_or_else(|error| panic!("{path}: {error:?}"));
+            parse_cpu_list(&list).unwrap_or_else(|error| panic!("{path}: {error}"))
         }
-    };
-    axtask::init_user_cpu_mask(mask).unwrap_or_else(|error| {
+    }
+}
+
+pub(super) fn init() {
+    let reserved = read_cpu_list(RESERVED_CPUS);
+    let sqpoll = read_cpu_list(SQPOLL_CPUS);
+    axtask::init_cpu_reservation(reserved, sqpoll).unwrap_or_else(|error| {
         panic!(
-            "{CONFIG}: {error} (requested={mask:#x}, online={:#x})",
+            "CPU reservation: {error} ({RESERVED_CPUS}={reserved:#x}, {SQPOLL_CPUS}={sqpoll:#x}, \
+             online={:#x})",
             axhal::online_cpu_mask()
         )
     });
