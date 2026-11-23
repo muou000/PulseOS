@@ -283,14 +283,15 @@ def run_sqpoll_reserved(args: argparse.Namespace, run: Path, kernel: Path, image
     if consumes != [(ring, str(i), "7") for i in range(34)]:
         raise ValueError(f"Expected NOPs 0..33 on one ring on CPU 7, saw {consumes}")
 
-    # The only enters are the warmup and the syscall that resumes the sleeping ring.
+    # Warmup is the last enter before active NOPs. The next wake acknowledges
+    # NEED_WAKEUP on an empty SQ, before the producer publishes ID 33.
     enter = f"SQPOLL enter ring={ring} wakeup=true wait=false"
-    first_active = f"SQPOLL consume ring={ring} user_data=1 cpu=7"
-    last_nop = f"SQPOLL consume ring={ring} user_data=33 cpu=7"
-    for interval, first_sqe in ((active, first_active), (resumed, last_nop)):
-        if (interval.count("SQPOLL enter ring=") != 1 or enter not in interval
-                or first_sqe not in interval or interval.index(enter) > interval.index(first_sqe)):
-            raise ValueError(f"Expected one wakeup before {first_sqe}")
+    first_active = active.index(f"SQPOLL consume ring={ring} user_data=1 cpu=7")
+    if active.count("SQPOLL enter ring=") != 1 or enter not in active[:first_active]:
+        raise ValueError("Expected only the warmup enter before the active NOPs")
+    last_nop = resumed.index(f"SQPOLL consume ring={ring} user_data=33 cpu=7")
+    if enter not in resumed[:last_nop]:
+        raise ValueError("Expected a wakeup before consuming the resumed NOP")
     return {"mode": "sqpoll-reserved", "arch": args.arch, "qemu_exit": qemu_exit,
             "ring": int(ring), "cpu": 7, "active_nops": 32, "active_enters": 0,
             "resumed_user_data": 33, "passed": True}

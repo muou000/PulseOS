@@ -166,12 +166,13 @@ static void reserved_cpu(void)
     CHECK(r.enters == before);
     printf("SQPOLL reserved active batches=8 unique=32 enters=%u\n", r.enters - before);
     wait_asleep(&r);
-    /* Let the poller's sleep-side recheck finish before publishing the wakeup SQE. */
-    usleep(30000);
-    CHECK(load(SQ(&r, flags)) & IORING_SQ_NEED_WAKEUP);
+    /* Wake an empty SQ. The poller must acknowledge the kick before it can see ID 33. */
+    enter(&r, 0, 0, IORING_ENTER_SQ_WAKEUP);
+    while (load(SQ(&r, flags)) & IORING_SQ_NEED_WAKEUP)
+        sched_yield();
     nop.user_data = 33;
     submit(&r, &nop, 1);
-    enter(&r, 0, 0, IORING_ENTER_SQ_WAKEUP);
+    kick_if_asleep(&r);
     expect(&r, 33, 0);
     CHECK(load(CQ(&r, head)) == load(CQ(&r, tail)));
     puts("SQPOLL reserved NEED_WAKEUP resumed user_data=33");
