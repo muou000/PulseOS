@@ -27,6 +27,11 @@ pub(super) struct SqPoll {
 }
 
 impl SqPoll {
+    pub(super) fn publish_consumed_head(&self, head: u32) {
+        self.consumed_head.store(head, Ordering::Release);
+        self.space.notify_all(false);
+    }
+
     pub(super) fn new(owner_pid: u64) -> Self {
         Self {
             owner_pid,
@@ -81,9 +86,9 @@ impl IoUringState {
         mut report_cpu: Option<usize>,
     ) {
         let poll = self.sqpoll.as_ref().expect("SQPOLL state");
-        let mut head = 0;
         let mut deadline = monotonic_time() + idle;
         while !poll.stopping.load(Ordering::Acquire) {
+            let head = poll.consumed_head.load(Ordering::Acquire);
             if self.shared.sq_pending(head) != 0 {
                 if let Some(cpu) = report_cpu.take() {
                     axlog::info!(
@@ -93,9 +98,6 @@ impl IoUringState {
                     );
                 }
                 self.submit_sqes(self.shared.layout().sq_entries, &owner);
-                head = self.submit_lock.lock().sq.kernel_sq_head();
-                poll.consumed_head.store(head, Ordering::Release);
-                poll.space.notify_all(false);
                 deadline = monotonic_time() + idle;
             } else if monotonic_time() >= deadline {
                 let kicks = poll.kicks.load(Ordering::Acquire);

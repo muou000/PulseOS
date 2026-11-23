@@ -336,6 +336,11 @@ impl SubmitRingState {
             }
 
             let sqe = shared.read_sqe_volatile(sqe_idx);
+            if l.flags & linux_raw_sys::io_uring::IORING_SETUP_SQPOLL != 0 {
+                // Dispatch may expose a CQE immediately to a concurrent producer.
+                // liburing counts pending submissions as tail - head on its next submit.
+                shared.store_u32(l.sq_head_off, self.kernel_sq_head, Ordering::Release);
+            }
             submitted += 1;
             if on_sqe(&sqe).is_err() && !self.submit_all {
                 break;
@@ -707,6 +712,23 @@ mod tests {
         let sub_all = sq_all.submit_batch(&buf2.shared, 3, |_| Err(()));
         assert_eq!(sub_all, 3);
         assert_eq!(sq_all.kernel_sq_head(), 3);
+    }
+
+    #[test]
+    fn sqpoll_frees_the_copied_slot_before_dispatch_can_complete() {
+        let buf = AlignedTestBuffers::new(2, linux_raw_sys::io_uring::IORING_SETUP_SQPOLL);
+        let shared = &buf.shared;
+        let layout = shared.layout();
+        let mut sq = SubmitRingState::new(2, false);
+        buf.write_sq_array(0, 1);
+        buf.write_sqe(1, IoUringSqe { user_data: 42, ..Default::default() });
+        shared.store_u32(layout.sq_tail_off, 1, Ordering::Release);
+        assert_eq!(sq.submit_batch(shared, 1, |copied| {
+            assert_eq!(shared.load_u32(layout.sq_head_off, Ordering::Acquire), 1);
+            buf.write_sqe(1, IoUringSqe::default());
+            assert_eq!(copied.user_data, 42);
+            Ok(())
+        }), 1);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use axerrno::{LinuxError, LinuxResult};
 use axfs::FsContext;
 use pulse_user_abi::{FromUserAbi, IntoUserAbi};
 
-use crate::fd_table::{FdEntry, FdObject};
+use crate::fd_table::{FdEntry, FdObject, SharedFdTable};
 use crate::task::{
     AddressSpaceLock, Credentials, Process, Thread, current_process, current_thread, uaccess,
 };
@@ -20,6 +20,9 @@ use crate::task::{
 #[derive(Clone)]
 pub struct AsyncExecContext {
     pub process: Arc<Process>,
+    /// Linux SQPOLL shares this table with the creator until either unshares it.
+    /// Owner exit joins the poller before releasing the process's descriptors.
+    pub(super) files: SharedFdTable,
     /// Retain the submitting image even if an already-running job races exec cancellation.
     pub(super) aspace: Arc<AddressSpaceLock>,
     pub thread: Option<Arc<Thread>>,
@@ -33,12 +36,14 @@ impl AsyncExecContext {
         let process = current_process()?;
         let thread = current_thread().ok();
         let credentials = process.credentials.read().clone();
+        let files = process.fd_table();
         let aspace = process.aspace_handle();
         let mut fs_context = process.fs_context_handle().lock().clone();
         fs_context.credentials = Some((credentials.fsuid, credentials.fsgid));
         Ok(Self {
             process,
             aspace,
+            files,
             thread,
             credentials,
             fs_context,
@@ -92,12 +97,12 @@ impl AsyncExecContext {
     #[inline]
     pub fn get_fd_entry(&self, fd: i32) -> LinuxResult<FdEntry> {
         let fd_usize = usize::try_from(fd).map_err(|_| LinuxError::EBADF)?;
-        self.process.get_fd_entry(fd_usize)
+        self.files.read().get_entry_cloned(fd_usize)
     }
 
     #[inline]
     pub fn insert_fd_entry(&self, entry: FdEntry) -> LinuxResult<usize> {
-        self.process.insert_fd_entry(entry)
+        self.process.insert_fd_entry_into(&self.files, entry)
     }
 
     #[inline]

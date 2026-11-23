@@ -63,7 +63,7 @@ use self::ops::{
     spawn_poll_add_future, spawn_timer_future,
 };
 use self::worker_pool::{alloc_ring_pool_id, global_worker_pool};
-use crate::fd_table::{EventFdObject, FdEntry, FdFlags, FdObject, PollEventSequence, PollRegistration};
+use crate::fd_table::{EventFdObject, FdEntry, FdFlags, FdObject, PollEventSequence, PollRegistration, SharedFdTable};
 use crate::mm::{FixedBufferIo, FixedBufferPages, pin_fixed_buffer_pages};
 use crate::task::Process;
 
@@ -681,12 +681,12 @@ impl IoUringState {
                             if !state_wk.is_request_active(req_id) {
                                 return;
                             }
-                            let res = state_wk.execute_files_update(&ctx_wk.process, outcome);
+                            let res = state_wk.execute_files_update(&ctx_wk.files, outcome);
                             state_wk.complete_request(req_id, res, 0, true);
                         });
                     }
                 } else {
-                    let res = self.execute_files_update(&ctx.process, outcome);
+                    let res = self.execute_files_update(&ctx.files, outcome);
                     if let Some(eff) = self.claim_completion_for_sync(req_id, res, false) {
                         pending_starts.extend(eff);
                     }
@@ -1062,6 +1062,10 @@ impl IoUringState {
             }
         });
 
+        if let Some(poll) = &self.sqpoll {
+            poll.publish_consumed_head(sq.kernel_sq_head());
+        }
+
         // If the batch ended with a dangling link bit on the last SQE, close and commit the chain.
         if !open_chain.is_empty() {
             used_slow_path = true;
@@ -1239,14 +1243,14 @@ impl IoUringState {
         self.fixed_files.lock().check_can_register(nr_args)
     }
 
-    pub fn register_files(&self, process: &Process, raw_fds: &[i32]) -> LinuxResult<()> {
+    pub fn register_files(&self, files: &SharedFdTable, raw_fds: &[i32]) -> LinuxResult<()> {
         let _reg_guard = self.register_lock.lock();
         self.fixed_files.lock().check_can_register(raw_fds.len())?;
 
         let mut slots = Vec::with_capacity(raw_fds.len());
         for &fd in raw_fds {
             match FixedFileRegistry::resolve_slot_fd(fd, &mut |u| {
-                resolve_process_fd_for_fixed(process, u)
+                resolve_fd_for_fixed(files, u)
             }) {
                 Ok(slot) => slots.push(slot),
                 Err(err) => {
@@ -1291,7 +1295,7 @@ impl IoUringState {
 
     pub fn update_fixed_files(
         &self,
-        process: &Process,
+        files: &SharedFdTable,
         offset: u32,
         raw_fds: &[i32],
         resv: u32,
@@ -1306,7 +1310,7 @@ impl IoUringState {
         let mut first_err = None;
         for &fd in raw_fds {
             match FixedFileRegistry::resolve_slot_fd(fd, &mut |u| {
-                resolve_process_fd_for_fixed(process, u)
+                resolve_fd_for_fixed(files, u)
             }) {
                 Ok(slot) => resolved.push(slot),
                 Err(err) => {
@@ -1342,18 +1346,18 @@ impl IoUringState {
 
     fn execute_files_update(
         &self,
-        process: &Process,
+        files: &SharedFdTable,
         outcome: LinuxResult<(u32, Vec<i32>)>,
     ) -> i32 {
-        match outcome.and_then(|(offset, fds)| self.update_fixed_files(process, offset, &fds, 0)) {
+        match outcome.and_then(|(offset, fds)| self.update_fixed_files(files, offset, &fds, 0)) {
             Ok(done) => done as i32,
             Err(err) => -err.code(),
         }
     }
 }
 
-fn resolve_process_fd_for_fixed(process: &Process, fd: usize) -> LinuxResult<FdEntry> {
-    let entry = process.get_fd_entry(fd)?;
+fn resolve_fd_for_fixed(files: &SharedFdTable, fd: usize) -> LinuxResult<FdEntry> {
+    let entry = files.read().get_entry_cloned(fd)?;
     if entry.object.as_any().is::<IoUringObject>() {
         return Err(LinuxError::EBADF);
     }
@@ -1718,13 +1722,13 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     let w_fd = process.insert_fd_entry(FdEntry::new(Arc::new(w_end), FdFlags::empty()))?;
     let ring_fd = process.insert_fd_entry(FdEntry::new(Arc::clone(&ring) as Arc<dyn FdObject>, FdFlags::empty()))?;
     assert_eq!(
-        state.register_files(&process, &[ring_fd as i32]).err(),
+        state.register_files(&process.fd_table(), &[ring_fd as i32]).err(),
         Some(LinuxError::EBADF)
     );
-    state.register_files(&process, &[r_fd as i32, -1, -1])?;
+    state.register_files(&process.fd_table(), &[r_fd as i32, -1, -1])?;
     assert!(state.get_fixed_fd_entry(0).is_ok());
     assert_eq!(state.get_fixed_fd_entry(1).err(), Some(LinuxError::EBADF));
-    let done = state.update_fixed_files(&process, 1, &[w_fd as i32, -2], 0)?;
+    let done = state.update_fixed_files(&process.fd_table(), 1, &[w_fd as i32, -2], 0)?;
     assert_eq!(done, 1);
     assert!(state.get_fixed_fd_entry(1).is_ok());
     state.unregister_files(0, 0)?;

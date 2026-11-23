@@ -404,7 +404,7 @@ pub(crate) fn sys_io_uring_register(
                 Ok(p) => p,
                 Err(e) => return -e.code() as isize,
             };
-            match state.register_files(&process, &raw_fds) {
+            match state.register_files(&process.fd_table(), &raw_fds) {
                 Ok(()) => 0,
                 Err(e) => -e.code() as isize,
             }
@@ -434,7 +434,7 @@ pub(crate) fn sys_io_uring_register(
                 Ok(p) => p,
                 Err(e) => return -e.code() as isize,
             };
-            match state.update_fixed_files(&process, up.offset, &raw_fds, up.resv) {
+            match state.update_fixed_files(&process.fd_table(), up.offset, &raw_fds, up.resv) {
                 Ok(done) => done as isize,
                 Err(e) => -e.code() as isize,
             }

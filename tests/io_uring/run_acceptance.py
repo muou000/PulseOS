@@ -107,6 +107,8 @@ def stage_dir_for(arch: str) -> Path:
 
 
 def install_tree_to_image(image_copy: Path, source: Path, dest: str) -> None:
+    # Diagnostics also call these helpers directly. Only inject into a run copy.
+    helpers.scoped(image_copy)
     installer = REPO / "scripts/install_to_rootfs.sh"
     subprocess.run(
         [str(installer), str(image_copy), str(source), dest],

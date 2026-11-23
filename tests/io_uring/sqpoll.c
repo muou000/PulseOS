@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -228,6 +229,61 @@ static void foreign_submitter(void)
     destroy(&r);
 }
 
+static void unshared_files(void)
+{
+    int sentinel[2];
+    CHECK(pipe(sentinel) == 0);
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        int fd = known_file();
+        struct ring r = setup(IORING_SETUP_SQPOLL, 10, 0);
+        int empty = -1;
+        CHECK(syscall(SYS_io_uring_register, r.fd, IORING_REGISTER_FILES, &empty, 1) == 0);
+        CHECK(unshare(CLONE_FILES) == 0);
+        CHECK(close(sentinel[1]) == 0);
+        int other = open("/dev/null", O_RDONLY);
+        CHECK(other >= 0 && dup2(other, fd) == fd && close(other) == 0);
+
+        char buf[sizeof(contents)] = {};
+        struct io_uring_sqe read = { .opcode = IORING_OP_READ, .fd = fd,
+            .addr = (uintptr_t)buf, .len = sizeof(buf), .user_data = 1 };
+        submit(&r, &read, 1);
+        kick_if_asleep(&r);
+        expect(&r, 1, sizeof(buf));
+        CHECK(memcmp(buf, contents, sizeof(buf)) == 0);
+
+        struct io_uring_sqe update = { .opcode = IORING_OP_FILES_UPDATE, .flags = IOSQE_ASYNC,
+            .addr = (uintptr_t)&fd, .len = 1, .user_data = 2 };
+        submit(&r, &update, 1);
+        kick_if_asleep(&r);
+        expect(&r, 2, 1);
+        memset(buf, 0, sizeof(buf));
+        read.flags = IOSQE_FIXED_FILE;
+        read.fd = 0;
+        submit(&r, &read, 1);
+        kick_if_asleep(&r);
+        expect(&r, 1, sizeof(buf));
+        CHECK(memcmp(buf, contents, sizeof(buf)) == 0);
+
+        struct io_uring_sqe sock = { .opcode = IORING_OP_SOCKET, .flags = IOSQE_ASYNC,
+            .fd = AF_INET, .off = SOCK_STREAM, .user_data = 3 };
+        submit(&r, &sock, 1);
+        kick_if_asleep(&r);
+        struct io_uring_cqe cqe = reap(&r);
+        CHECK(cqe.user_data == 3 && cqe.res >= 0);
+        CHECK(fcntl(cqe.res, F_GETFD) == -1 && errno == EBADF);
+        destroy(&r);
+        _exit(0);
+    }
+    CHECK(close(sentinel[1]) == 0);
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    char byte;
+    CHECK(read(sentinel[0], &byte, 1) == 0);
+    CHECK(close(sentinel[0]) == 0);
+}
+
 static void *wake_full(void *arg)
 {
     struct ring *r = arg;
@@ -339,6 +395,8 @@ int main(int argc, char **argv)
     measure_reads(1);
     foreign_submitter();
     puts("SQPOLL foreign fd table, address space and wakeup PASS");
+    unshared_files();
+    puts("SQPOLL unshare lookup, FILES_UPDATE, socket install and old table release PASS");
     wake_and_wait();
     puts("SQPOLL full SQ_WAIT, sleep boundary and CQ overflow coexistence PASS");
     for (int state = ACTIVE; state <= INFLIGHT; state++)
