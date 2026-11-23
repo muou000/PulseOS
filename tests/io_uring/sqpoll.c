@@ -271,7 +271,6 @@ static void reserved_futures(void)
     expect(&ordinary, 101, POLLIN);
     publish(&c.stop, 1);
     CHECK(pthread_join(thread, NULL) == 0);
-    printf("FUTURE_CPU wake_cpu=0 GETEVENTS_cpu=1 calls=%u\n", c.calls);
 
     /* The second ordinary request can only resume in a global background driver. */
     char byte;
@@ -304,6 +303,8 @@ static void reserved_futures(void)
     CHECK(close(sentinel[0]) == 0);
     CHECK(close(work_pipe[0]) == 0 && close(work_pipe[1]) == 0);
     CHECK(close(signal_pipe[0]) == 0 && close(signal_pipe[1]) == 0);
+    /* stdout shares the serial port with the per-poll kernel traces. */
+    printf("FUTURE_CPU wake_cpu=0 GETEVENTS_cpu=1 calls=%u\n", c.calls);
     puts("FUTURE_CPU CQ order, unique completions, close and writer release PASS");
 }
 
