@@ -42,6 +42,10 @@ _Avoid_: full Linux io_uring compatibility, tool-specific io_uring profile
 内核与用户态通过 `rings` 与 `sqes` 两组共享物理页框及 Acquire/Release 索引协议交换提交与完成事件的映射模型；内核在私有状态维持权威头尾并仅以单次易失快照读取 SQE，从而将共享页中的用户并发篡改隔离在协议边界之外。
 _Avoid_: direct user ring reference, trusted shared ring header
 
+**`io_uring` 提交队列轮询（SQPOLL）**:
+内核线程主动从共享提交队列取走请求的提交模式。线程活跃时，应用发布 SQ tail 即可提交。线程准备休眠时，应用发布后检查 `IORING_SQ_NEED_WAKEUP`，按需以 `IORING_ENTER_SQ_WAKEUP` 唤醒它。
+_Avoid_: I/O 完成轮询（IOPOLL）, 用户态轮询完成队列
+
 **`io_uring` 预注册资源表**:
 绑定在单个 `io_uring` 实例上、与进程当前页表及文件描述符表生命周期解耦的预钉住物理页缓冲表（Fixed Buffers）与固定描述符表（Fixed Files）。预钉住缓冲在注册期完成权限校验、写破私有拷贝、物理页框引用获取与锁页配额记账；固定描述符持有独立的对象引用并拒绝环对象自引用；在途请求通过独立槽位引用保活底层资源，使资源注销或槽位更新无需阻塞在途 I/O。
 _Avoid_: raw user iovec cache, fd index alias table
