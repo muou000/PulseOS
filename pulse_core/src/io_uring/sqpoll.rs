@@ -49,7 +49,7 @@ impl IoUringState {
     pub(super) fn start_sqpoll(
         self: &Arc<Self>,
         params: &io_uring_params,
-        owner: AsyncExecContext,
+        mut owner: AsyncExecContext,
     ) -> LinuxResult<()> {
         let poll = self.sqpoll.as_ref().expect("SQPOLL state");
         let allowed = axtask::current().cpumask();
@@ -65,8 +65,12 @@ impl IoUringState {
             ms => Duration::from_millis(u64::from(ms)),
         };
         let state = self.clone();
+        let files = owner.share_sqpoll_files();
         let task = TaskInner::try_new(
-            move || state.poll_sq(owner, idle, cpu),
+            move || {
+                state.poll_sq(owner, idle, cpu);
+                drop(files);
+            },
             alloc::format!("iou-sqp-{}", poll.owner_pid),
             axconfig::TASK_STACK_SIZE,
         )?;

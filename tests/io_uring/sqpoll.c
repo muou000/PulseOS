@@ -229,6 +229,26 @@ static void foreign_submitter(void)
     destroy(&r);
 }
 
+static void ordinary_close_after_unshare(void)
+{
+    int pipefd[2];
+    CHECK(pipe2(pipefd, O_NONBLOCK) == 0);
+    struct ring r = setup(0, 0, 0);
+    CHECK(syscall(SYS_io_uring_register, r.fd, IORING_REGISTER_FILES, pipefd + 1, 1) == 0);
+    CHECK(close(pipefd[1]) == 0);
+    struct io_uring_sqe poll = { .opcode = IORING_OP_POLL_ADD, .fd = pipefd[0],
+        .poll32_events = POLLIN, .user_data = 1 };
+    submit(&r, &poll, 1);
+    enter(&r, 1, 0, 0);
+    CHECK(load(CQ(&r, head)) == load(CQ(&r, tail)));
+    CHECK(unshare(CLONE_FILES) == 0);
+    destroy(&r);
+    /* The cancelled poll must not keep the old fd table and its ring alive. */
+    char byte;
+    CHECK(read(pipefd[0], &byte, 1) == 0);
+    CHECK(close(pipefd[0]) == 0);
+}
+
 static void unshared_files(void)
 {
     int sentinel[2];
@@ -395,6 +415,8 @@ int main(int argc, char **argv)
     measure_reads(1);
     foreign_submitter();
     puts("SQPOLL foreign fd table, address space and wakeup PASS");
+    ordinary_close_after_unshare();
+    puts("SQPOLL regression ordinary ring unshare and close released writer PASS");
     unshared_files();
     puts("SQPOLL unshare lookup, FILES_UPDATE, socket install and old table release PASS");
     wake_and_wait();

@@ -681,12 +681,12 @@ impl IoUringState {
                             if !state_wk.is_request_active(req_id) {
                                 return;
                             }
-                            let res = state_wk.execute_files_update(&ctx_wk.files, outcome);
+                            let res = state_wk.execute_files_update(&ctx_wk, outcome);
                             state_wk.complete_request(req_id, res, 0, true);
                         });
                     }
                 } else {
-                    let res = self.execute_files_update(&ctx.files, outcome);
+                    let res = self.execute_files_update(ctx, outcome);
                     if let Some(eff) = self.claim_completion_for_sync(req_id, res, false) {
                         pending_starts.extend(eff);
                     }
@@ -1346,10 +1346,10 @@ impl IoUringState {
 
     fn execute_files_update(
         &self,
-        files: &SharedFdTable,
+        ctx: &AsyncExecContext,
         outcome: LinuxResult<(u32, Vec<i32>)>,
     ) -> i32 {
-        match outcome.and_then(|(offset, fds)| self.update_fixed_files(files, offset, &fds, 0)) {
+        match outcome.and_then(|(offset, fds)| self.update_fixed_files(&ctx.files()?, offset, &fds, 0)) {
             Ok(done) => done as i32,
             Err(err) => -err.code(),
         }
