@@ -203,33 +203,39 @@ static void *drive_ordinary_ring(void *arg)
     return NULL;
 }
 
-static struct io_uring_sqe poll_add(int fd, unsigned events, uint64_t id)
+static struct io_uring_sqe poll_readable(int fd, uint64_t id)
 {
     return (struct io_uring_sqe){ .opcode = IORING_OP_POLL_ADD, .fd = fd,
-        .poll32_events = events, .user_data = id };
+        .poll32_events = POLLIN, .user_data = id };
 }
 
-/* A second, ready native poll lets us withhold the pipe write/cancel until the
- * driver has had the chance to poll the first request. The host checks Pending. */
-static void arm_reserved_poll(struct ring *r, int reader, int writer, uint64_t id)
+static const struct timespec zero_delay = {0};
+
+static struct io_uring_sqe timeout_after(const struct timespec *delay, uint64_t id)
 {
-    struct io_uring_sqe pair[] = { poll_add(reader, POLLIN, id), poll_add(writer, POLLOUT, id + 1) };
-    pair[1].flags = IOSQE_ASYNC;
+    return (struct io_uring_sqe){ .opcode = IORING_OP_TIMEOUT, .fd = -1,
+        .addr = (uintptr_t)delay, .len = 1, .user_data = id };
+}
+
+/* Wait for the driver to poll the following timer before writing or cancelling. */
+static void arm_reserved_poll(struct ring *r, int reader, uint64_t id)
+{
+    struct io_uring_sqe pair[] = { poll_readable(reader, id), timeout_after(&zero_delay, id + 1) };
     submit(r, pair, 2);
     kick_if_asleep(r);
-    expect(r, id + 1, POLLOUT);
+    expect(r, id + 1, -ETIME);
 }
 
 /* Let SQPOLL finish dispatching before the worker completes the Path 3 read. */
-static void dependent_poll(struct ring *r, int *pipefd, int ready_fd, int linked, uint64_t id)
+static void dependent_timeout(struct ring *r, int *pipefd, int linked, uint64_t id)
 {
     char byte = 0;
     struct io_uring_sqe pair[] = {
         { .opcode = IORING_OP_READ, .flags = IOSQE_ASYNC | (linked ? IOSQE_IO_LINK : 0),
           .fd = pipefd[0], .addr = (uintptr_t)&byte, .len = 1, .user_data = id },
-        poll_add(ready_fd, POLLIN, id + 1),
+        timeout_after(&zero_delay, id + 1),
     };
-    pair[1].flags = IOSQE_ASYNC | (linked ? 0 : IOSQE_IO_DRAIN);
+    pair[1].flags = linked ? 0 : IOSQE_IO_DRAIN;
     submit(r, pair, 2);
     kick_if_asleep(r);
     while (load(SQ(r, head)) != load(SQ(r, tail)))
@@ -238,7 +244,7 @@ static void dependent_poll(struct ring *r, int *pipefd, int ready_fd, int linked
     CHECK(load(CQ(r, head)) == load(CQ(r, tail)));
     CHECK(write(pipefd[1], "w", 1) == 1);
     expect(r, id, 1);
-    expect(r, id + 1, POLLIN);
+    expect(r, id + 1, -ETIME);
     CHECK(byte == 'w');
 }
 
@@ -250,10 +256,10 @@ static void reserved_futures(void)
     puts("FUTURE_CPU_BEGIN");
     struct ring r = setup(IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF, 1, 7);
     struct ring ordinary = setup(0, 0, 0);
-    struct io_uring_sqe poll = poll_add(signal_pipe[0], POLLIN, 101);
+    struct io_uring_sqe poll = poll_readable(signal_pipe[0], 101);
     submit(&ordinary, &poll, 1);
     enter(&ordinary, 1, 0, 0);
-    arm_reserved_poll(&r, signal_pipe[0], signal_pipe[1], 1);
+    arm_reserved_poll(&r, signal_pipe[0], 1);
 
     struct competitor c = { .ordinary = &ordinary };
     pthread_t thread;
@@ -276,20 +282,20 @@ static void reserved_futures(void)
     CHECK(write(signal_pipe[1], "b", 1) == 1);
     expect(&ordinary, 102, POLLIN);
 
-    dependent_poll(&r, work_pipe, signal_pipe[0], 1, 3);
-    dependent_poll(&r, work_pipe, signal_pipe[0], 0, 5);
+    dependent_timeout(&r, work_pipe, 1, 3);
+    dependent_timeout(&r, work_pipe, 0, 5);
 
     /* Only the ring retains the sentinel writer. EOF after close proves release. */
     CHECK(syscall(SYS_io_uring_register, r.fd, IORING_REGISTER_FILES, sentinel + 1, 1) == 0);
     CHECK(close(sentinel[1]) == 0);
-    arm_reserved_poll(&r, work_pipe[0], signal_pipe[1], 7);
+    arm_reserved_poll(&r, work_pipe[0], 7);
     struct io_uring_sqe cancel = { .opcode = IORING_OP_POLL_REMOVE, .fd = -1, .addr = 7, .user_data = 9 };
     submit(&r, &cancel, 1);
     kick_if_asleep(&r);
     expect(&r, 7, -ECANCELED);
     expect(&r, 9, 0);
     CHECK(write(work_pipe[1], "c", 1) == 1);
-    arm_reserved_poll(&r, sentinel[0], signal_pipe[1], 10);
+    arm_reserved_poll(&r, sentinel[0], 10);
     CHECK(load(CQ(&r, head)) == load(CQ(&r, tail)));
     CHECK(load(CQ(&ordinary, head)) == load(CQ(&ordinary, tail)));
     destroy(&r);
@@ -310,8 +316,7 @@ static void reserved_recv_and_timeout(struct ring *r)
     struct io_uring_sqe batch[] = {
         { .opcode = IORING_OP_RECV, .fd = sock[0], .len = 1,
           .addr = (uintptr_t)&received, .user_data = 203 },
-        { .opcode = IORING_OP_TIMEOUT, .fd = -1, .len = 1,
-          .addr = (uintptr_t)&delay, .user_data = 204 },
+        timeout_after(&delay, 204),
     };
     submit(r, batch, 2);
     kick_if_asleep(r);

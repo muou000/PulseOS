@@ -303,7 +303,23 @@ def run_sqpoll_reserved(args: argparse.Namespace, run: Path, kernel: Path, image
 
 
 def run_future_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
-    clean, qemu_exit = run_reserved_probe(args, run, kernel, image_copy, "--reserved-futures")
+    # Workers can legitimately run on the target. Collect an actual remote
+    # activation for each successor, checking every poll on every attempt.
+    remote_submissions = {}
+    for attempt in range(1, 6):
+        clean, qemu_exit = run_reserved_probe(args, run, kernel, image_copy, "--reserved-futures")
+        summary = check_future_cpu(clean)
+        for request, cpu, _ in summary["worker_submissions"]:
+            if int(cpu) != summary["target"]:
+                remote_submissions[request] = {"cpu": int(cpu), "attempt": attempt}
+        if len(remote_submissions) == 2:
+            return {**summary, "arch": args.arch, "qemu_exit": qemu_exit,
+                    "attempts": attempt, "remote_submissions": remote_submissions}
+        (run / "guest.log").rename(run / f"guest-{attempt}.log")
+    raise ValueError(f"Missing remote worker activation after {attempt} runs: {remote_submissions}")
+
+
+def check_future_cpu(clean: str) -> dict:
     _, begin, workload = clean.partition("FUTURE_CPU_BEGIN")
     trace, _, native_io = workload.partition("FUTURE_CPU_NATIVE_IO_BEGIN")
     if not begin or "FUTURE_CPU CQ order, unique completions, close and writer release PASS" not in trace:
@@ -314,18 +330,23 @@ def run_future_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy
     reserved = re.search(r"SQPOLL consume ring=(\d+) user_data=1 cpu=7\b", trace)
     if not reserved:
         raise ValueError("Missing reserved SQ consumption (build with guest-checks)")
+    io_ring = re.search(r"SQPOLL consume ring=(\d+) user_data=203 cpu=7\b", native_io)
+    if not io_ring or "FUTURE_CPU socket recv, timeout and shared offset write/read PASS" not in native_io:
+        raise ValueError("Missing native socket, timer or file results")
     ring = reserved[1]
     polls = re.findall(r"io_uring poll ring=(\d+) req=(\d+) phase=(first|resume) cpu=(\d+) "
-                       r"result=(pending|ready) task=(\S+)", trace)
+                       r"result=(pending|ready) task=(\S+)", workload)
+    reserved_ids = {ring, io_ring[1]}
+    outside = [record for record in polls if record[0] in reserved_ids and
+               (record[3] != "7" or record[5] != "async-exec-cpu-7")]
+    if outside:
+        raise ValueError(f"Reserved request polled outside its CPU 7 driver: {outside}")
     dedicated = [(req, phase, cpu, result) for rid, req, phase, cpu, result, _ in polls if rid == ring]
     # User data on this ring equals the request ordinal. 3 and 5 run on Path 3,
     # 9 cancels 7 synchronously, and every other request must receive one first poll.
     first = [int(req) for req, phase, _, _ in dedicated if phase == "first"]
     if sorted(first) != [1, 2, 4, 6, 7, 8, 10, 11]:
         raise ValueError(f"Missing or duplicate first polls on ring {ring}: {first}")
-    outside = [entry for entry in dedicated if entry[2] != "7"]
-    if outside:
-        raise ValueError(f"Reserved ring {ring} polled outside CPU 7: {outside}")
     for req in ("1", "7", "10"):
         if (req, "first", "7", "pending") not in dedicated:
             raise ValueError(f"Reserved request {req} did not wait before wake/cancel/close")
@@ -335,7 +356,7 @@ def run_future_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy
     workers = re.findall(rf"io_uring native submit ring={ring} req=(4|6) cpu=(\d+) task=(io-uring-wk-\d+)", trace)
     if sorted(req for req, _, _ in workers) != ["4", "6"]:
         raise ValueError(f"Missing worker dispatch of link/drain successors: {workers}")
-    ordinary = {rid for rid, *_ in polls if rid != ring}
+    ordinary = {rid for rid, *_ in polls} - reserved_ids
     if len(ordinary) != 1:
         raise ValueError(f"Expected one ordinary ring alongside reserved ring {ring}, got {ordinary}")
     ordinary_id = ordinary.pop()
@@ -344,24 +365,18 @@ def run_future_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy
                   if rid == ordinary_id and r == req]
         if not any(p == "first" and res == "pending" for p, res, _ in events):
             raise ValueError(f"Ordinary request {req} did not wait")
-        if not any(p == "resume" and res == "ready" and (req == "1" or task.startswith("async-exec-"))
+        if not any(p == "resume" and res == "ready" and (req == "1" or re.fullmatch(r"async-exec-\d+", task))
                    for p, res, task in events):
             raise ValueError(f"Missing ordinary request {req} progress: {events}")
-    io_ring = re.search(r"SQPOLL consume ring=(\d+) user_data=203 cpu=7\b", native_io)
-    if not io_ring or "FUTURE_CPU socket recv, timeout and shared offset write/read PASS" not in native_io:
-        raise ValueError("Missing native socket, timer or file results")
-    io_polls = re.findall(rf"io_uring poll ring={io_ring[1]} req=(\d+) phase=(first|resume) cpu=(\d+) "
-                          r"result=(pending|ready)", native_io)
+    io_polls = [(req, phase, cpu, result) for rid, req, phase, cpu, result, _ in polls if rid == io_ring[1]]
     if not any(req == "3" and phase == "first" for req, phase, _, _ in io_polls):
         raise ValueError("Missing shared-offset native write poll")
-    if any(cpu != "7" for _, _, cpu, _ in io_polls):
-        raise ValueError(f"Native I/O polled outside CPU 7: {io_polls}")
     for req in ("1", "2"):
         if (req, "first", "7", "pending") not in io_polls or (req, "resume", "7", "ready") not in io_polls:
             raise ValueError(f"Native RECV/TIMEOUT did not wait and resume: {io_polls}")
-    return {"mode": "future-cpu", "arch": args.arch, "qemu_exit": qemu_exit,
+    return {"mode": "future-cpu",
             "ring": int(ring), "target": 7, "first": len(first), "resume": len(dedicated) - len(first),
-            "outside": len(outside), "worker_submissions": workers, "ordinary_ring": int(ordinary_id),
+            "polls": dedicated, "outside": len(outside), "worker_submissions": workers, "ordinary_ring": int(ordinary_id),
             "getevents_calls": int(competition[1]), "io_ring": int(io_ring[1]),
             "io_polls": io_polls, "passed": True}
 
