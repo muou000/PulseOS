@@ -286,10 +286,6 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
         }
     }
 
-    if cpumask.is_empty() {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
     if axtask::set_current_affinity(cpumask) {
         0
     } else {

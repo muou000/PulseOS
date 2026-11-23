@@ -4,6 +4,9 @@ use loongArch64::register::{MemoryAccessType, crmd, stlbps, tlbidx, tlbrehi, tlb
 use memory_addr::PhysAddr;
 use page_table_multiarch::loongarch64::LA64MetaData;
 
+/// Sets the timer ID returned by `RDTIME` on the current CPU.
+pub use loongArch64::register::tid::set_tid as set_timer_id;
+
 const DMW_CACHED_BASE: usize = 0x9000_0000_0000_0000;
 const DMW_VIRT_MASK: usize = 0x0fff_ffff_ffff_ffff;
 

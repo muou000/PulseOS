@@ -843,7 +843,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         let b_done = bitset_done.clone();
         let b_started = bitset_started.clone();
         let bq_clone = bq.clone();
-        axtask::spawn_raw(
+        let waiter = axtask::spawn_raw(
             move || {
                 b_started.store(true, Ordering::Release);
                 bq_clone.wait_until(|| b_done.load(Ordering::Acquire));
@@ -865,12 +865,8 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         let woken_match = table.wake_mask(k0, 1, 0b010);
         assert_eq!(woken_match, 1);
 
-        for _ in 0..100 {
-            if bq.len() == 0 {
-                break;
-            }
-            axtask::yield_now();
-        }
+        // The woken task still owns its queue until its closure returns.
+        assert_eq!(waiter.join(), Some(0));
         assert_eq!(bq.len(), 0);
         drop(bq);
         table.remove_bitset_if_empty(k0);
@@ -890,7 +886,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         let done_clone = waiter_done.clone();
         let started_clone = waiter_started.clone();
         let q_src_clone = q_src.clone();
-        axtask::spawn_raw(
+        let waiter = axtask::spawn_raw(
             move || {
                 started_clone.store(true, Ordering::Release);
                 q_src_clone.wait_until(|| done_clone.load(Ordering::Acquire));
@@ -921,12 +917,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         let woken_dst = table.wake(k_dst, 1);
         assert_eq!(woken_dst, 1);
 
-        for _ in 0..100 {
-            if q_dst.len() == 0 {
-                break;
-            }
-            axtask::yield_now();
-        }
+        assert_eq!(waiter.join(), Some(0));
         assert_eq!(q_dst.len(), 0);
         drop(q_src);
         drop(q_dst);

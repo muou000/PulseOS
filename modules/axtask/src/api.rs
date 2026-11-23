@@ -142,6 +142,33 @@ pub(crate) fn cpu_mask_full() -> AxCpuMask {
         .clone()
 }
 
+static USER_CPU_MASK: lazyinit::LazyInit<AxCpuMask> = lazyinit::LazyInit::new();
+
+/// Publishes the CPUs available to user threads once all boot CPUs are online.
+/// Each bit in `reserved` identifies a logical CPU reserved for kernel tasks.
+pub fn init_user_cpu_mask(reserved: usize) -> Result<(), &'static str> {
+    let online = axhal::online_cpu_mask();
+    if reserved & !online != 0 {
+        return Err("reserved CPU is offline");
+    }
+    let user_bits = online & !reserved;
+    if user_bits == 0 {
+        return Err("all online CPUs are reserved");
+    }
+
+    let mut users = AxCpuMask::new();
+    for cpu in 0..axhal::cpu_num() {
+        users.set(cpu, user_bits & (1 << cpu) != 0);
+    }
+    USER_CPU_MASK.init_once(users);
+    info!("CPU reservation: reserved={reserved:#x} user={user_bits:#x}");
+    Ok(())
+}
+
+pub(crate) fn user_cpu_mask() -> AxCpuMask {
+    *USER_CPU_MASK.get().expect("user CPU mask not initialized")
+}
+
 /// Initializes the task scheduler for secondary CPUs.
 pub fn init_scheduler_secondary() {
     crate::run_queue::init_secondary();
@@ -265,34 +292,30 @@ pub const fn rt_time_slice_ns() -> u64 {
 pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
     let has_online_cpu =
         (0..axhal::cpu_num()).any(|cpu_id| cpumask.get(cpu_id) && axhal::is_cpu_online(cpu_id));
-    if cpumask.is_empty() || !has_online_cpu {
-        false
-    } else {
-        let curr = current().clone();
-
-        curr.set_cpumask(cpumask);
-        // After setting the affinity, we need to check if current cpu matches
-        // the affinity. If not, we need to migrate the task to the correct CPU.
-        #[cfg(feature = "smp")]
-        if !cpumask.get(axhal::percpu::this_cpu_id()) {
-            // Migration executes scheduler and IPI paths on this stack.
-            let migration_task = TaskInner::new(
-                move || crate::run_queue::migrate_entry(curr),
-                "migration-task".into(),
-                axconfig::TASK_STACK_SIZE,
-            )
-            .into_arc();
-
-            // Migrate the current task to the correct CPU using the migration task.
-            current_run_queue::<NoPreemptIrqSave>().migrate_current(migration_task);
-
-            assert!(
-                cpumask.get(axhal::percpu::this_cpu_id()),
-                "Migration failed"
-            );
-        }
-        true
+    if !has_online_cpu {
+        return false;
     }
+    let curr = current().clone();
+    let effective = curr.set_cpumask(cpumask);
+    if effective.is_empty() {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    if !effective.get(axhal::percpu::this_cpu_id()) {
+        // Migration executes scheduler and IPI paths on this stack.
+        let migration_task = TaskInner::new(
+            move || crate::run_queue::migrate_entry(curr),
+            "migration-task".into(),
+            axconfig::TASK_STACK_SIZE,
+        )
+        .into_arc();
+        current_run_queue::<NoPreemptIrqSave>().migrate_current(migration_task);
+        assert!(
+            effective.get(axhal::percpu::this_cpu_id()),
+            "Migration failed"
+        );
+    }
+    true
 }
 
 /// Current task gives up the CPU time voluntarily, and switches to another
