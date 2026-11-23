@@ -452,6 +452,74 @@ fn test_kernel_executor_inline_and_dedup_wake() {
 }
 
 #[test]
+fn test_cpu_executor_owns_first_poll_and_wake() {
+    use core::{future::poll_fn, task::Poll};
+
+    use crate::future::{CpuExecutor, drive_ready};
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(init_test_env);
+
+    let executor = CpuExecutor::get(0).unwrap();
+    assert!(core::ptr::eq(executor, CpuExecutor::get(0).unwrap()));
+    assert!(CpuExecutor::get(usize::MAX).is_err());
+    let submitter = current().id();
+    let wake = Arc::new(Mutex::new(None));
+    let registration = wake.clone();
+    let mut first = true;
+    let handle = executor.spawn(poll_fn(move |cx| {
+        assert_ne!(current().id(), submitter);
+        assert_eq!(axhal::percpu::this_cpu_id(), executor.cpu());
+        if first {
+            first = false;
+            *registration.lock().unwrap() = Some(cx.waker().clone());
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    }));
+
+    assert_eq!(drive_ready(1), 0);
+    axtask::yield_now();
+    wake.lock().unwrap().take().unwrap().wake();
+    assert_eq!(drive_ready(1), 0);
+    axtask::yield_now();
+    assert!(handle.is_done());
+}
+
+#[test]
+fn test_cpu_executor_releases_cancelled_futures() {
+    use core::future::pending;
+
+    use crate::future::CpuExecutor;
+
+    let _lock = SERIAL.lock();
+    INIT.call_once(init_test_env);
+    let executor = CpuExecutor::get(0).unwrap();
+    let polls = Arc::new(AtomicUsize::new(0));
+
+    // Cancel both before the first poll and after it returns Pending.
+    for first_poll in [false, true] {
+        let resource = Arc::new(());
+        let released = Arc::downgrade(&resource);
+        let count = polls.clone();
+        let handle = executor.spawn(async move {
+            count.fetch_add(1, Ordering::Relaxed);
+            pending::<()>().await;
+            drop(resource);
+        });
+        if first_poll {
+            axtask::yield_now();
+        }
+        handle.cancel();
+        assert!(handle.is_done());
+        assert!(released.upgrade().is_none());
+        axtask::yield_now();
+        assert_eq!(polls.load(Ordering::Relaxed), usize::from(first_poll));
+    }
+}
+
+#[test]
 fn test_kernel_executor_wake_during_poll_and_cancel_safety() {
     use core::{
         future::Future,

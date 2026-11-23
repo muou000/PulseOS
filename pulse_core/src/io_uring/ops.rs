@@ -12,7 +12,7 @@ use axerrno::{LinuxError, LinuxResult};
 use axhal::time::{monotonic_time, wall_time};
 use axio::{IoBuf, IoBufMut, Write};
 use axpoll::IoEvents;
-use axtask::future::{global_executor, sleep_until};
+use axtask::future::sleep_until;
 use linux_raw_sys::{
     general::{POLLERR, POLLNVAL, RLIMIT_FSIZE, iovec},
     io_uring::{__kernel_timespec, io_uring_op},
@@ -734,7 +734,7 @@ pub fn spawn_timer_future(
     };
     let state_cloned = Arc::clone(state);
 
-    let handle = global_executor().spawn_and_poll_once(async move {
+    state.spawn_native(req_id, async move {
         let _guard = guard;
         sleep_until(deadline).await;
         if is_link_timeout {
@@ -743,8 +743,6 @@ pub fn spawn_timer_future(
             state_cloned.on_timeout_expired(req_id, generation);
         }
     });
-
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 struct LimitedRead<'a, R> {
@@ -899,7 +897,7 @@ fn spawn_file_sync_op(
         return;
     }
 
-    let handle = global_executor().spawn_and_poll_once(async move {
+    state.spawn_native(req_id, async move {
         let _guard = guard;
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
             release_fd_entry_async(entry).await;
@@ -910,7 +908,6 @@ fn spawn_file_sync_op(
         let code = res.map(|()| 0).unwrap_or_else(|err| -err.code());
         state_cloned.complete_request(req_id, code, 0, true);
     });
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 pub fn execute_fsync_request(
@@ -1464,6 +1461,13 @@ fn execute_regular_file_rw(
         return;
     }
 
+    // Reserve before handing off to either executor so later implicit-offset I/O
+    // cannot overtake this request while its first poll is queued on another CPU.
+    let pos_ticket = params
+        .opt_offset
+        .is_none()
+        .then(|| file_obj.reserve_position_ticket())
+        .flatten();
     if !force_async && !matches!(buffer, PreparedRwBuffer::MultiWindow { .. }) {
         // Path 2: native multi-Future execution on KernelExecutor.
         let Some(guard) = state.try_enter_inflight_owned() else {
@@ -1472,8 +1476,13 @@ fn execute_regular_file_rw(
         let state_cloned = Arc::clone(state);
         let ctx_cloned = ctx.clone();
 
-        let handle = global_executor().spawn_and_poll_once(async move {
+        state.spawn_native(req_id, async move {
             let _guard = guard;
+            if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
+                drop(pos_ticket);
+                release_fd_entry_async(entry).await;
+                return;
+            }
             let file_obj = entry
                 .object
                 .as_any()
@@ -1485,7 +1494,7 @@ fn execute_regular_file_rw(
                 req_id,
                 file_obj,
                 buffer,
-                None,
+                pos_ticket,
                 params,
             )
             .await;
@@ -1496,8 +1505,6 @@ fn execute_regular_file_rw(
             };
             state_cloned.complete_request(req_id, code, 0, true);
         });
-
-        state.install_cancel_handle_or_cancel(req_id, handle);
         return;
     }
 
@@ -1506,11 +1513,6 @@ fn execute_regular_file_rw(
     let needs_serial = params.opt_offset.is_none()
         || (params.is_write && (force_append || file_obj.is_append_open()));
     let serial_key = needs_serial.then(|| fd_serial_key(&entry.object));
-    let pos_ticket = params
-        .opt_offset
-        .is_none()
-        .then(|| file_obj.reserve_position_ticket())
-        .flatten();
 
     let Some(guard) = state.try_enter_inflight_owned() else {
         return;
@@ -1640,7 +1642,7 @@ fn execute_seekable_special_file_rw(
     let sync_after = (params.rw_flags & (RWF_DSYNC | RWF_SYNC)) != 0;
     let data_only = (params.rw_flags & RWF_SYNC) == 0;
 
-    let handle = global_executor().spawn_and_poll_once(async move {
+    state.spawn_native(req_id, async move {
         let _guard = guard;
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
             release_fd_entry_async(entry).await;
@@ -1698,8 +1700,6 @@ fn execute_seekable_special_file_rw(
         };
         state_cloned.complete_request(req_id, code, 0, true);
     });
-
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1924,7 +1924,7 @@ fn execute_stream_rw(
     let mut registrations: Vec<PollRegistration> = Vec::new();
     let mut guard_slot = Some(guard);
 
-    let handle = global_executor().spawn_and_poll_once(poll_fn(move |cx| {
+    state.spawn_native(req_id, poll_fn(move |cx| {
         registrations.clear();
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
             let _ = guard_slot.take();
@@ -1987,8 +1987,6 @@ fn execute_stream_rw(
             }
         }
     }));
-
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 #[inline]
@@ -2211,7 +2209,7 @@ pub fn spawn_poll_add_future(
         core::cell::RefCell::new(Vec::new());
     let mut guard_slot = Some(guard);
 
-    let handle = global_executor().spawn_and_poll_once(poll_fn(move |cx| {
+    state.spawn_native(req_id, poll_fn(move |cx| {
         if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
             registrations.borrow_mut().clear();
             let _ = guard_slot.take();
@@ -2266,8 +2264,6 @@ pub fn spawn_poll_add_future(
             }
         }
     }));
-
-    state.install_cancel_handle_or_cancel(req_id, handle);
 }
 
 pub(super) fn eval_poll_target_with_context(

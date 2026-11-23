@@ -18,6 +18,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
+use core::future::Future;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use axalloc::global_allocator;
@@ -281,11 +282,37 @@ impl IoUringState {
         self.inner.lock().orch.try_begin_completing(req_id)
     }
 
-    pub(crate) fn install_cancel_handle_or_cancel(
-        &self,
-        req_id: RequestId,
-        handle: CancelHandle,
-    ) {
+    /// All native requests, including link/drain successors, inherit the ring's poll placement.
+    fn spawn_native(&self, req_id: RequestId, future: impl Future<Output = ()> + Send + 'static) {
+        #[cfg(feature = "guest-checks")]
+        let future = {
+            let ring = self.ring_id;
+            axlog::info!(
+                "io_uring native submit ring={ring} req={req_id} cpu={} task={}",
+                axhal::percpu::this_cpu_id(),
+                axtask::current().name()
+            );
+            async move {
+                let mut future = core::pin::pin!(future);
+                let mut phase = "first";
+                core::future::poll_fn(move |cx| {
+                    let cpu = axhal::percpu::this_cpu_id();
+                    let poll = future.as_mut().poll(cx);
+                    let result = if poll.is_pending() { "pending" } else { "ready" };
+                    axlog::info!(
+                        "io_uring poll ring={ring} req={req_id} phase={phase} cpu={cpu} result={result} task={}",
+                        axtask::current().name()
+                    );
+                    phase = "resume";
+                    poll
+                })
+                .await
+            }
+        };
+        let handle = match self.service_executor() {
+            Some(executor) => executor.spawn(future),
+            None => axtask::future::spawn_and_poll_once(future),
+        };
         if handle.is_done() {
             return;
         }
