@@ -4,7 +4,6 @@ use alloc::{
     boxed::Box,
     collections::{BTreeMap, BTreeSet, VecDeque},
     format,
-    vec::Vec,
 };
 use core::{
     sync::atomic::{AtomicU64, Ordering},
@@ -40,6 +39,13 @@ impl RingWorkerQueue {
             in_flight: 0,
         }
     }
+}
+
+/// Work to perform after releasing the file-position and pool locks.
+struct WorkerDispatch {
+    wake: usize,
+    spawn: usize,
+    first_worker_id: u64,
 }
 
 struct PoolInner {
@@ -79,22 +85,43 @@ impl PoolInner {
                 || self.position_jobs[&key].front() == Some(&(ring_id, job.req_id)))
     }
 
-    fn remove_position_job(&mut self, ring_id: u64, job: &WorkerJob) {
-        if job.position_ticket.is_some() {
-            let key = job.serial_key.expect("file-position ordering key");
-            let fifo = self
-                .position_jobs
-                .get_mut(&key)
-                .expect("queued position ticket");
-            if fifo.front() == Some(&(ring_id, job.req_id)) {
-                fifo.pop_front();
-            } else {
-                // A queued cancellation can remove an entry in the middle.
-                fifo.retain(|&id| id != (ring_id, job.req_id));
-            }
-            if fifo.is_empty() {
-                self.position_jobs.remove(&key);
-            }
+    fn remove_position_job(&mut self, ring_id: u64, job: &WorkerJob) -> bool {
+        if job.position_ticket.is_none() {
+            return false;
+        }
+        let key = job.serial_key.expect("file-position ordering key");
+        let fifo = self
+            .position_jobs
+            .get_mut(&key)
+            .expect("queued position ticket");
+        let first = fifo.front() == Some(&(ring_id, job.req_id));
+        if first {
+            fifo.pop_front();
+        } else {
+            fifo.retain(|&id| id != (ring_id, job.req_id));
+        }
+        if fifo.is_empty() {
+            self.position_jobs.remove(&key);
+            return false;
+        }
+        first
+    }
+
+    /// One newly eligible submission or FIFO head creates at most one more
+    /// execution opportunity. Reserve stack-backed workers under the pool lock.
+    fn plan_dispatch(&mut self, opportunities: usize, max_workers: usize) -> WorkerDispatch {
+        let spawn = opportunities
+            .min(self.queued_jobs.saturating_sub(self.available_workers))
+            .min(max_workers - self.active_workers);
+        let wake = (opportunities - spawn).min(self.available_workers);
+        let first_worker_id = self.next_worker_id;
+        self.next_worker_id = self.next_worker_id.wrapping_add(spawn as u64);
+        self.active_workers += spawn;
+        self.available_workers += spawn;
+        WorkerDispatch {
+            wake,
+            spawn,
+            first_worker_id,
         }
     }
 
@@ -215,9 +242,9 @@ impl BoundedWorkerPool {
         let ring_id = ring.ring_id();
         let service_cpu = ring.sqpoll_service_cpu();
 
-        {
+        let (max_workers, per_ring_limit) = Self::limits();
+        let enqueue = move |position_ticket: Option<FilePositionTicket>| {
             let mut inner = self.inner.lock();
-            let position_ticket = position_file.and_then(FileObject::reserve_position_ticket);
             if position_ticket.is_some() {
                 let key = serial_key.expect("file-position ordering key");
                 inner
@@ -226,57 +253,42 @@ impl BoundedWorkerPool {
                     .or_default()
                     .push_back((ring_id, req_id));
             }
+            let job = WorkerJob {
+                req_id,
+                serial_key,
+                service_cpu,
+                position_ticket,
+                task,
+            };
+            let eligible = inner.job_eligible(ring_id, &job);
             if !inner.rings.contains_key(&ring_id) {
                 inner.rings.insert(ring_id, RingWorkerQueue::new());
                 inner.ring_order.push_back(ring_id);
             }
-            inner
-                .rings
-                .get_mut(&ring_id)
-                .unwrap()
-                .jobs
-                .push_back(WorkerJob {
-                    req_id,
-                    serial_key,
-                    service_cpu,
-                    position_ticket,
-                    task,
-                });
+            let entry = inner.rings.get_mut(&ring_id).unwrap();
+            let runnable = eligible && entry.in_flight < per_ring_limit;
+            entry.jobs.push_back(job);
             inner.queued_jobs += 1;
-        }
-        self.service_backlog();
+            inner.plan_dispatch(usize::from(runnable), max_workers)
+        };
+        // The file-position lock precedes the pool lock. Enqueue only
+        // transfers the ticket and the pre-boxed job into the bounded pool.
+        let dispatch = match position_file {
+            Some(file) => file.publish_position_ticket(enqueue),
+            None => enqueue(None),
+        };
+        self.dispatch(dispatch);
     }
 
-    /// Supply a worker for runnable jobs. A claim can leave further runnable
-    /// jobs behind just before its worker blocks; a cancellation can expose the
-    /// head of one or more position FIFOs after earlier idle workers retired.
-    fn service_backlog(&'static self) {
-        let (max_workers, per_ring_limit) = Self::limits();
-        let worker_to_spawn = {
-            let mut inner = self.inner.lock();
-            if inner.queued_jobs == 0
-                || (inner.available_workers == 0 && inner.active_workers == max_workers)
-                || !inner.has_runnable_job(per_ring_limit)
-            {
-                return;
-            }
-            if inner.queued_jobs > inner.available_workers && inner.active_workers < max_workers {
-                inner.available_workers += 1;
-                inner.active_workers += 1;
-                let wid = inner.next_worker_id;
-                inner.next_worker_id = inner.next_worker_id.wrapping_add(1);
-                Some(wid)
-            } else {
-                None
-            }
-        };
-
-        self.job_wq.notify_one(false);
-
-        if let Some(wid) = worker_to_spawn {
+    fn dispatch(&'static self, dispatch: WorkerDispatch) {
+        for _ in 0..dispatch.wake {
+            self.job_wq.notify_one(false);
+        }
+        for index in 0..dispatch.spawn {
+            let id = dispatch.first_worker_id.wrapping_add(index as u64);
             spawn_raw(
                 || self.worker_loop(),
-                format!("io-uring-wk-{wid}"),
+                format!("io-uring-wk-{id}"),
                 axconfig::TASK_STACK_SIZE,
             );
         }
@@ -286,72 +298,81 @@ impl BoundedWorkerPool {
     ///
     /// Drops the removed closure outside `SpinNoIrq` to obey ADR-0007.
     pub fn cancel_queued_request(&'static self, ring_id: u64, req_id: u64) -> bool {
-        let removed: Vec<WorkerJob> = {
+        let (max_workers, _) = Self::limits();
+        let (removed, dispatch) = {
             let mut inner = self.inner.lock();
-            let mut found = Vec::new();
-            if let Some(entry) = inner.rings.get_mut(&ring_id) {
-                let mut i = 0;
-                while i < entry.jobs.len() {
-                    if entry.jobs[i].req_id == req_id {
-                        if let Some(job) = entry.jobs.remove(i) {
-                            found.push(job);
-                            continue;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            for job in &found {
-                inner.remove_position_job(ring_id, job);
-            }
+            let Some(entry) = inner.rings.get_mut(&ring_id) else {
+                return false;
+            };
+            let Some(index) = entry.jobs.iter().position(|job| job.req_id == req_id) else {
+                return false;
+            };
+            let job = entry.jobs.remove(index).unwrap();
+            let exposed = inner.remove_position_job(ring_id, &job);
             inner.remove_empty_ring(ring_id);
-            inner.queued_jobs = inner.queued_jobs.saturating_sub(found.len());
-            found
+            inner.queued_jobs -= 1;
+            (job, inner.plan_dispatch(usize::from(exposed), max_workers))
         };
-        let cancelled = !removed.is_empty();
         drop(removed);
-        if cancelled {
-            self.service_backlog();
-        }
-        cancelled
+        self.dispatch(dispatch);
+        true
     }
 
     /// Cancels all queued Path 3 jobs belonging to `ring_id` (during teardown).
     pub fn cancel_ring_queued(&'static self, ring_id: u64) {
-        let removed = {
+        let (max_workers, _) = Self::limits();
+        let (removed, dispatch) = {
             let mut inner = self.inner.lock();
-            let drained = if let Some(entry) = inner.rings.get_mut(&ring_id) {
-                entry.jobs.drain(..).collect::<Vec<_>>()
-            } else {
-                Vec::new()
+            let Some(entry) = inner.rings.get_mut(&ring_id) else {
+                return;
             };
-            for job in &drained {
-                inner.remove_position_job(ring_id, job);
+            let drained = core::mem::take(&mut entry.jobs);
+            let position_keys: BTreeSet<_> = drained
+                .iter()
+                .filter(|job| job.position_ticket.is_some())
+                .filter_map(|job| job.serial_key)
+                .collect();
+            let mut exposed = 0;
+            for key in position_keys {
+                let fifo = inner
+                    .position_jobs
+                    .get_mut(&key)
+                    .expect("queued position ticket");
+                let was_head = fifo.front().is_some_and(|&(ring, _)| ring == ring_id);
+                fifo.retain(|&(ring, _)| ring != ring_id);
+                if fifo.is_empty() {
+                    inner.position_jobs.remove(&key);
+                } else if was_head {
+                    exposed += 1;
+                }
             }
-            inner.queued_jobs = inner.queued_jobs.saturating_sub(drained.len());
+            inner.queued_jobs -= drained.len();
             inner.remove_empty_ring(ring_id);
-            drained
+            (drained, inner.plan_dispatch(exposed, max_workers))
         };
-        if !removed.is_empty() {
-            drop(removed);
-            self.service_backlog();
-        }
+        drop(removed);
+        self.dispatch(dispatch);
     }
 
     fn finish_ring_job(&'static self, ring_id: u64, serial_key: Option<u64>) {
-        let mut inner = self.inner.lock();
-        if let Some(key) = serial_key {
-            inner.in_flight_keys.remove(&key);
-        }
-        inner
-            .rings
-            .get_mut(&ring_id)
-            .expect("running ring")
-            .in_flight -= 1;
-        inner.available_workers += 1;
-        inner.remove_empty_ring(ring_id);
-        drop(inner);
-        self.service_backlog();
+        let (max_workers, per_ring_limit) = Self::limits();
+        let dispatch = {
+            let mut inner = self.inner.lock();
+            if let Some(key) = serial_key {
+                inner.in_flight_keys.remove(&key);
+            }
+            let entry = inner.rings.get_mut(&ring_id).expect("running ring");
+            let released_quota = entry.in_flight == per_ring_limit && !entry.jobs.is_empty();
+            entry.in_flight -= 1;
+            inner.available_workers += 1;
+            inner.remove_empty_ring(ring_id);
+            // The finishing worker takes the next job. Only releasing *both*
+            // a ring quota and a shared key could enable a second job, in a
+            // different ring, before that worker blocks again.
+            let extra = released_quota && serial_key.is_some() && inner.queued_jobs > 1;
+            inner.plan_dispatch(usize::from(extra), max_workers)
+        };
+        self.dispatch(dispatch);
     }
 
     fn worker_loop(&'static self) {
@@ -364,7 +385,6 @@ impl BoundedWorkerPool {
             };
 
             if let Some((ring_id, job)) = next {
-                self.service_backlog();
                 let serial_key = job.serial_key;
                 if let Some(cpu) = job.service_cpu {
                     // The ring validated this online CPU at setup. Migration
@@ -372,7 +392,11 @@ impl BoundedWorkerPool {
                     assert!(axtask::set_current_affinity(AxCpuMask::one_shot(cpu)));
                 }
                 #[cfg(feature = "guest-checks")]
-                trace_job(ring_id, job.req_id, "start", serial_key);
+                {
+                    let expected = job.service_cpu.map_or(default_mask, AxCpuMask::one_shot);
+                    assert_eq!(axtask::current().cpumask(), expected);
+                    trace_job(ring_id, job.req_id, "start", serial_key);
+                }
                 (job.task)(job.position_ticket);
                 #[cfg(feature = "guest-checks")]
                 trace_job(ring_id, job.req_id, "finish", serial_key);

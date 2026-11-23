@@ -101,6 +101,13 @@ impl FileObject {
         self.inner.reserve_position_ticket()
     }
 
+    pub(crate) fn publish_position_ticket<R>(
+        &self,
+        publish: impl FnOnce(Option<axfs::FilePositionTicket>) -> R,
+    ) -> R {
+        self.inner.publish_position_ticket(publish)
+    }
+
     pub async fn begin_read_io_async(&self, offset: Option<u64>) -> LinuxResult<axfs::FileIo<'_>> {
         self.inner
             .begin_read_io(offset)
