@@ -162,11 +162,16 @@ def check_worker_limits(log):
 
     starts = [m for m in JOB.finditer(trace) if m["phase"] == "start"]
     workers = {m["task"] for m in starts}
-    if len(workers) != 16 or len(starts) != 23:
-        raise ValueError(f"Expected 23 jobs on 16 worker threads, got {len(starts)} on {workers}")
+    if len(workers) != 16 or len(starts) != 24:
+        raise ValueError(f"Expected 24 jobs on 16 worker threads, got {len(starts)} on {workers}")
     targets = {first["ring"]: "7", third["ring"]: "6"}
     if any(m["cpu"] != targets[m["ring"]] for m in JOB.finditer(trace) if m["ring"] in targets):
         raise ValueError("Selected jobs ran outside their respective service CPUs")
+    ordinary_reuse = [m for m in starts if m["ring"] not in {*targets, ordinary}]
+    selected_workers = {m["task"] for m in full_jobs if m["ring"] == first["ring"]}
+    if (len(ordinary_reuse) != 1 or ordinary_reuse[0]["req"] != "5"
+            or ordinary_reuse[0]["task"] not in selected_workers):
+        raise ValueError("Expected an ordinary read on a recycled service worker after queued cancellation")
     expected = [(ordinary, "9"), (ordinary, "10"), (first["ring"], "12")]
     position = [m for m in starts if m.group("ring", "req") in expected]
     if ([m.group("ring", "req") for m in position] != expected

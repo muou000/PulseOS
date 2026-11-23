@@ -568,8 +568,9 @@ static void worker_limits(void)
     enum { per_ring = 8, selected_count = per_ring + 3, pipe_count = selected_count + per_ring };
     unsigned flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
     struct ring a = setup(flags, 1, 7), b = setup(0, 0, 0), c = setup(flags, 1, 6);
+    struct ring other = setup(0, 0, 0);
     int pipes[pipe_count][2], fd = known_file();
-    char bytes[pipe_count] = {}, positions[3] = {}, probe = 0;
+    char bytes[pipe_count] = {}, positions[3] = {}, dropped[3] = {}, probe = 0, reused = 0;
     CHECK(lseek(fd, 0, SEEK_SET) == 0);
     puts("WORKER_LIMITS_BEGIN");
     for (unsigned i = 0; i < pipe_count; i++) {
@@ -587,15 +588,30 @@ static void worker_limits(void)
         struct io_uring_sqe read = worker_read(fd, positions + i, 1, 5100 + i);
         read.off = UINT64_MAX;
         worker_submit(i == 2 ? &a : &b, read);
+        if (i == 0) {
+            /* Cancel a middle ticket, then close with two tickets between B's reads. */
+            for (unsigned j = 0; j < 3; j++) {
+                struct io_uring_sqe queued = worker_read(fd, dropped + j, 1, 5201 + j);
+                queued.off = UINT64_MAX;
+                worker_submit(&other, queued);
+            }
+        }
     }
+    worker_submit(&other, (struct io_uring_sqe){ .opcode = IORING_OP_ASYNC_CANCEL,
+        .fd = -1, .addr = 5202, .user_data = 5204 });
+    CHECK(worker_result(&other, 5202) == -ECANCELED && worker_result(&other, 5204) == 0);
     worker_submit(&c, worker_read(fd, &probe, 1, 6001));
     worker_submit(&c, (struct io_uring_sqe){ .opcode = IORING_OP_NOP, .user_data = 6002 });
     CHECK(worker_result(&c, 6002) == 0);
+    worker_submit(&other, worker_read(fd, &reused, 1, 5205));
     puts("WORKER_LIMITS_RELEASE");
     for (unsigned i = 0; i < selected_count; i++) {
         CHECK(write(pipes[i][1], "a", 1) == 1 && worker_result(&a, 5001 + i) == 1);
-        if (i == 1)
+        if (i == 2) {
             CHECK(worker_result(&c, 6001) == 1 && probe == contents[0]);
+            CHECK(worker_result(&other, 5205) == 1 && reused == contents[0]);
+            destroy(&other);
+        }
     }
     CHECK(load(CQ(&a, head)) == load(CQ(&a, tail)));
 
@@ -606,6 +622,7 @@ static void worker_limits(void)
     CHECK(worker_result(&b, 5100) == 1 && worker_result(&b, 5101) == 1);
     CHECK(worker_result(&a, 5102) == 1);
     CHECK(!memcmp(positions, contents, sizeof(positions)) && lseek(fd, 0, SEEK_CUR) == 3);
+    CHECK(!dropped[0] && !dropped[1] && !dropped[2]);
     for (unsigned i = selected_count + 1; i < pipe_count; i++)
         CHECK(write(pipes[i][1], "a", 1) == 1 && worker_result(&b, 5001 + i) == 1);
     for (unsigned i = 0; i < pipe_count; i++)

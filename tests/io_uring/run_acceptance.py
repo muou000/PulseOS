@@ -339,6 +339,9 @@ def run_future_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy
 
 
 def check_future_cpu(clean: str) -> dict:
+    remote = re.findall(r"\[IO_URING_CPU_GUEST\] first poll submit=(\d+) target=(\d+) cpu=(\d+) task=(\S+)", clean)
+    if remote != [("0", "7", "7", "async-exec-cpu-7")]:
+        raise ValueError(f"Expected one first poll dispatched from CPU 0 to the CPU 7 driver: {remote}")
     _, begin, workload = clean.partition("FUTURE_CPU_BEGIN")
     trace, _, native_io = workload.partition("FUTURE_CPU_NATIVE_IO_BEGIN")
     if not begin or "FUTURE_CPU CQ order, unique completions, close and writer release PASS" not in trace:
@@ -396,6 +399,7 @@ def check_future_cpu(clean: str) -> dict:
     return {"mode": "future-cpu",
             "ring": int(ring), "target": 7, "first": len(first), "resume": len(dedicated) - len(first),
             "polls": dedicated, "outside": len(outside), "worker_submissions": workers, "ordinary_ring": int(ordinary_id),
+            "remote_first_poll": {"submit_cpu": int(remote[0][0]), "poll_cpu": int(remote[0][2])},
             "getevents_calls": int(competition[1]), "io_ring": int(io_ring[1]),
             "io_polls": io_polls, "passed": True}
 

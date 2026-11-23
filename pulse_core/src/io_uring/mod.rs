@@ -1896,5 +1896,39 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     );
 
     axlog::ax_println!("[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS");
+    check_remote_first_poll()?;
+    Ok(())
+}
+
+/// Exercise a remote first dispatch even when the ring's own Path 3 predecessors
+/// already complete on the same CPU as its native executor.
+#[cfg(feature = "guest-checks")]
+fn check_remote_first_poll() -> LinuxResult<()> {
+    use core::time::Duration;
+
+    let original = axtask::current().cpumask();
+    let Some(target) = (1..axhal::cpu_num()).find(|&cpu| axtask::is_sqpoll_service_cpu(cpu)) else {
+        return Ok(());
+    };
+    if !original.get(0) {
+        return Ok(());
+    }
+    let executor = axtask::future::CpuExecutor::get(target)?;
+    assert!(axtask::set_current_affinity(axtask::AxCpuMask::one_shot(0)));
+    let submit_cpu = axhal::percpu::this_cpu_id();
+    let handle = executor.spawn(async move {
+        let poll_cpu = axhal::percpu::this_cpu_id();
+        axlog::ax_println!(
+            "[IO_URING_CPU_GUEST] first poll submit={} target={} cpu={} task={}",
+            submit_cpu, target, poll_cpu, axtask::current().name()
+        );
+        assert_eq!(poll_cpu, target);
+    });
+    assert!(axtask::set_current_affinity(original));
+    let deadline = axhal::time::monotonic_time() + Duration::from_secs(5);
+    while !handle.is_done() {
+        assert!(axhal::time::monotonic_time() < deadline, "remote first poll timed out");
+        axtask::sleep(Duration::from_millis(1));
+    }
     Ok(())
 }
