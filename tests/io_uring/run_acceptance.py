@@ -4,6 +4,7 @@
 Modes:
   guest-checks : Verify boot-time io_uring frame refcount & teardown probes.
   functional   : Verify LTP io_uring01..04, 54/54 liburing-2.9, smp_stress, meminfo.
+  sqpoll       : Verify the shared-ring SQPOLL protocol and pinned sqpoll-sleep.t.
   fio          : Verify syscall-count reduction and ext4 O_DIRECT/cached fio-3.39.
   bpf          : Capture paired cpu+sched bpf-record sessions, run bpf-analyzer
                  and scripts/perf_pipeline.py (native perf + FlameGraph SVG).
@@ -217,6 +218,40 @@ def run_guest_checks(args: argparse.Namespace, run: Path, kernel: Path, image_co
         "passed": True,
     }
     (run / f"guest-checks-{args.arch}.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
+
+
+def run_sqpoll(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
+    stage = stage_dir_for(args.arch)
+    install_verified_file(image_copy, stage / "bin/sqpoll", "/opt/io_uring/sqpoll", run)
+    install_verified_file(
+        image_copy, stage / "liburing-tests/sqpoll-sleep.t", "/opt/io_uring/sqpoll-sleep.t", run
+    )
+    clean, qemu_exit = run_guest_job(
+        arch=args.arch,
+        kernel=kernel,
+        image_copy=image_copy,
+        run=run,
+        script_text="""#!/bin/sh
+set -e
+/opt/io_uring/sqpoll
+/opt/io_uring/sqpoll-sleep.t
+echo 'SQPOLL liburing-2.9 sqpoll-sleep.t PASS'
+""",
+        boot_timeout=args.boot_timeout,
+        timeout=args.timeout,
+    )
+    markers = [
+        "SQPOLL affinity requested=1 running=1",
+        "SQPOLL active batches=8 unique=32 ordinary_reads=16 fixed_reads=16 enters=0",
+        "SQPOLL_RESULT PASS",
+        "SQPOLL liburing-2.9 sqpoll-sleep.t PASS",
+    ]
+    for marker in markers:
+        if marker not in clean:
+            raise RuntimeError(f"Missing SQPOLL evidence: {marker}")
+    summary = {"mode": "sqpoll", "arch": args.arch, "qemu_exit": qemu_exit, "markers": markers, "passed": True}
+    (run / f"sqpoll-{args.arch}.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 
 
@@ -755,7 +790,7 @@ def run_bpf(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "fio", "bpf"))
+    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "sqpoll", "fio", "bpf"))
     parser.add_argument("--arch", required=True, choices=tuple(ARCHES))
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--boot-timeout", type=float, default=60.0)
@@ -777,6 +812,7 @@ def main() -> int:
     handlers = {
         "guest-checks": run_guest_checks,
         "functional": run_functional,
+        "sqpoll": run_sqpoll,
         "fio": run_fio,
         "bpf": run_bpf,
     }

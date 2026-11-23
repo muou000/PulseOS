@@ -28,7 +28,7 @@ pub use pulse_io_uring_core::resources::{
     UserIoSegment, fits_single_pin_window,
 };
 
-use crate::task::{Process, current_process};
+use crate::task::{AddressSpaceLock, Process, current_process, uaccess};
 
 const MAX_WINDOW_BYTES: usize = MAX_PIN_WINDOW_BYTES;
 const MAX_WINDOW_FRAGMENTS: usize = MAX_PIN_WINDOW_FRAGMENTS;
@@ -196,7 +196,15 @@ impl PinnedUserBuffers {
         cursor: &mut UserBufferCursor,
         writable: bool,
     ) -> Result<Self, LinuxError> {
-        let aspace_handle = process.aspace_handle();
+        Self::pin_with_aspace(&process.aspace_handle(), segments, cursor, writable)
+    }
+
+    pub(crate) fn pin_with_aspace(
+        aspace: &AddressSpaceLock,
+        segments: &[UserIoSegment],
+        cursor: &mut UserBufferCursor,
+        writable: bool,
+    ) -> Result<Self, LinuxError> {
         let flags = if writable {
             MappingFlags::WRITE
         } else {
@@ -212,7 +220,7 @@ impl PinnedUserBuffers {
         'window: while len < MAX_WINDOW_BYTES && frames.fragments.len() < MAX_WINDOW_FRAGMENTS {
             let fault;
             {
-                let aspace = aspace_handle.read();
+                let aspace = aspace.read();
                 loop {
                     if len == MAX_WINDOW_BYTES || frames.fragments.len() == MAX_WINDOW_FRAGMENTS {
                         break 'window;
@@ -225,7 +233,7 @@ impl PinnedUserBuffers {
                             break 'window;
                         }
                     };
-                    if process.validate_user_range(addr, chunk).is_err() {
+                    if uaccess::validate_user_range(addr, chunk).is_err() {
                         terminal_error = Some(LinuxError::EFAULT);
                         break 'window;
                     }
@@ -274,7 +282,7 @@ impl PinnedUserBuffers {
             }
             // File faults and COW may wait and may re-enter the filesystem.
             // Neither an address-space nor leaf-page-table guard survives here.
-            if let Err(error) = process.try_fault_in_user_range(fault.0, fault.1, flags) {
+            if let Err(error) = aspace.fault_in_user_range(fault.0, fault.1, flags) {
                 terminal_error = Some(LinuxError::from(error.canonicalize()));
                 break;
             }

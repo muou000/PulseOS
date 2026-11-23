@@ -2,7 +2,7 @@
 # Reproducible cross-build script for PulseOS io_uring test suites:
 #   - Pinned liburing-2.9 (08468cc3): static liburing.a + 54 Tier A/B static tests
 #   - Pinned fio-3.39 (a6e474c9): static fio with io_uring engine (zero liburing dep)
-#   - Repo C probes: static tests/io_uring/{smp_stress,syscall_count_bench}.c
+#   - Repo C probes: static tests/io_uring/{smp_stress,sqpoll,syscall_count_bench}.c
 #   - Runner staging: tests/io_uring/run_all.sh + MANIFEST.txt
 #   - Optional incremental rootfs image injection via scripts/install_to_rootfs.sh
 set -euo pipefail
@@ -220,21 +220,6 @@ ensure_pinned_repo() {
 
 emit_liburing_harness_patch() {
     cat <<'PATCH'
-diff --git a/test/connect-rep.c b/test/connect-rep.c
-index 431df96..b5fbcab 100644
---- a/test/connect-rep.c
-+++ b/test/connect-rep.c
-@@ -147,6 +147,10 @@ static int test(int flags)
- 		params.sq_thread_idle = 50;
- 
- 	ret = io_uring_queue_init_params(8, &ring, &params);
-+	if (ret == -EINVAL && flags) {
-+		fprintf(stdout, "flags 0x%x not supported, skipping\n", flags);
-+		return T_EXIT_SKIP;
-+	}
- 	if (ret < 0) {
- 		fprintf(stderr, "Queue init: %d\n", ret);
- 		return T_EXIT_FAIL;
 diff --git a/test/connect.c b/test/connect.c
 index 71f0e39..786d0ae 100644
 --- a/test/connect.c
@@ -243,44 +228,13 @@ index 71f0e39..786d0ae 100644
  	int ret;
  
  	ret = io_uring_queue_init(8, &ring, flags);
-+	if (ret == -EINVAL && flags) {
++	if (ret == -EINVAL && (flags & IORING_SETUP_DEFER_TASKRUN)) {
 +		fprintf(stdout, "flags 0x%x not supported, skipping\n", flags);
 +		return T_EXIT_SKIP;
 +	}
  	if (ret) {
  		fprintf(stderr, "io_uring_queue_setup() = %d\n", ret);
  		return T_EXIT_FAIL;
-diff --git a/test/helpers.c b/test/helpers.c
-index e84aaa7..32bde11 100644
---- a/test/helpers.c
-+++ b/test/helpers.c
-@@ -132,8 +132,9 @@ enum t_setup_ret t_create_ring_params(int depth, struct io_uring *ring,
- 	ret = io_uring_queue_init_params(depth, ring, p);
- 	if (!ret)
- 		return T_SETUP_OK;
--	if ((p->flags & IORING_SETUP_SQPOLL) && ret == -EPERM && geteuid()) {
--		fprintf(stdout, "SQPOLL skipped for regular user\n");
-+	if ((p->flags & IORING_SETUP_SQPOLL) &&
-+	    (ret == -EINVAL || (ret == -EPERM && geteuid()))) {
-+		fprintf(stdout, "SQPOLL skipped\n");
- 		return T_SETUP_SKIP;
- 	}
- 
-diff --git a/test/io-cancel.c b/test/io-cancel.c
-index 7ac4664..fd539fe 100644
---- a/test/io-cancel.c
-+++ b/test/io-cancel.c
-@@ -449,6 +449,10 @@ static int test_sqpoll_cancel_iowq_requests(void)
- 	char buffer[16];
- 
- 	ret = io_uring_queue_init(8, &ring, IORING_SETUP_SQPOLL);
-+	if (ret == -EINVAL) {
-+		fprintf(stdout, "SQPOLL not supported, skipping\n");
-+		return 0;
-+	}
- 	if (ret) {
- 		fprintf(stderr, "ring create failed: %d\n", ret);
- 		return 1;
 diff --git a/test/send_recv.c b/test/send_recv.c
 index f68a158..705ddf1 100644
 --- a/test/send_recv.c
@@ -488,8 +442,8 @@ build_liburing_for_arch() {
         make -C src -j"${NPROC}" liburing.a \
             CC="${TC_CC}" AR="${TC_AR}" RANLIB="${TC_RANLIB}" \
             ENABLE_SHARED=0 CFLAGS="${cflags}"
-        echo "[${arch}] Building 54 static liburing test binaries..."
-        make -C test -j"${NPROC}" "${TIER_A_TESTS[@]}" "${TIER_B_TESTS[@]}" \
+        echo "[${arch}] Building v1 tests and sqpoll-sleep.t..."
+        make -C test -j"${NPROC}" "${TIER_A_TESTS[@]}" "${TIER_B_TESTS[@]}" sqpoll-sleep.t \
             CC="${TC_CC}" CXX="${TC_CXX}" \
             CFLAGS="${cflags}" LDFLAGS="-static"
     )
@@ -498,7 +452,7 @@ build_liburing_for_arch() {
     rm -rf "${out_tests}"
     mkdir -p "${out_tests}"
 
-    for t in "${TIER_A_TESTS[@]}" "${TIER_B_TESTS[@]}"; do
+    for t in "${TIER_A_TESTS[@]}" "${TIER_B_TESTS[@]}" sqpoll-sleep.t; do
         local bin="${work_dir}/test/${t}"
         [[ -f "${bin}" ]] || die "Missing built test binary: ${bin}"
         "${TC_STRIP}" "${bin}"
@@ -525,6 +479,7 @@ build_liburing_for_arch() {
         echo "Tier B (${#TIER_B_TESTS[@]} core tests with OOS skip tolerance in test/ only):"
         printf '  %s\n' "${TIER_B_TESTS[@]}"
         echo ""
+        echo "SQPOLL extension: sqpoll-sleep.t (unmodified upstream test)"
         echo "Exact test/ harness diff:"
         git -C "${work_dir}" diff test/
     } > "${out_tests}/MANIFEST.txt"
@@ -576,7 +531,7 @@ build_custom_tests_for_arch() {
     mkdir -p "${stage_dir}/bin"
     local src_dir="${REPO_ROOT}/tests/io_uring"
 
-    for spec in "smp_stress:-pthread" "syscall_count_bench:"; do
+    for spec in "smp_stress:-pthread" "sqpoll:-pthread" "syscall_count_bench:"; do
         local name="${spec%%:*}"
         local extra_flag="${spec#*:}"
         local src="${src_dir}/${name}.c"
@@ -617,6 +572,7 @@ install_staged_to_image() {
     fi
     if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "tests" ]]; then
         "${installer}" "${image}" "${stage_dir}/bin/smp_stress" /opt/io_uring/smp_stress
+        "${installer}" "${image}" "${stage_dir}/bin/sqpoll" /opt/io_uring/sqpoll
         "${installer}" "${image}" "${stage_dir}/bin/syscall_count_bench" /opt/io_uring/syscall_count_bench
     fi
     if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "runner" ]]; then

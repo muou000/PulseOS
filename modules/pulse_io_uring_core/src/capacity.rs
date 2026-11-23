@@ -7,20 +7,23 @@ pub const IORING_MAX_ENTRIES: u32 = 32_768;
 pub const IORING_MAX_CQ_ENTRIES: u32 = IORING_MAX_ENTRIES * 2;
 pub const PAGE_SIZE_4K: usize = 4096;
 
-/// Strictly advertised `IORING_FEAT_*` mask for v1.
-pub const V1_FEATURES: u32 = linux_raw_sys::io_uring::IORING_FEAT_SINGLE_MMAP
+/// Advertised features, including the SQPOLL extension to v1.
+pub const SUPPORTED_FEATURES: u32 = linux_raw_sys::io_uring::IORING_FEAT_SINGLE_MMAP
     | linux_raw_sys::io_uring::IORING_FEAT_NODROP
     | linux_raw_sys::io_uring::IORING_FEAT_SUBMIT_STABLE
     | linux_raw_sys::io_uring::IORING_FEAT_RW_CUR_POS
     | linux_raw_sys::io_uring::IORING_FEAT_CUR_PERSONALITY
     | linux_raw_sys::io_uring::IORING_FEAT_FAST_POLL
     | linux_raw_sys::io_uring::IORING_FEAT_POLL_32BITS
-    | linux_raw_sys::io_uring::IORING_FEAT_EXT_ARG;
+    | linux_raw_sys::io_uring::IORING_FEAT_EXT_ARG
+    | linux_raw_sys::io_uring::IORING_FEAT_SQPOLL_NONFIXED;
 
-/// Supported `io_uring_setup` flags for v1.
-pub const V1_SUPPORTED_SETUP_FLAGS: u32 = linux_raw_sys::io_uring::IORING_SETUP_CQSIZE
+/// Supported `io_uring_setup` flags.
+pub const SUPPORTED_SETUP_FLAGS: u32 = linux_raw_sys::io_uring::IORING_SETUP_CQSIZE
     | linux_raw_sys::io_uring::IORING_SETUP_CLAMP
-    | linux_raw_sys::io_uring::IORING_SETUP_SUBMIT_ALL;
+    | linux_raw_sys::io_uring::IORING_SETUP_SUBMIT_ALL
+    | linux_raw_sys::io_uring::IORING_SETUP_SQPOLL
+    | linux_raw_sys::io_uring::IORING_SETUP_SQ_AFF;
 
 /// Byte offsets of fields inside the shared rings memory region (`IORING_OFF_SQ_RING` / `IORING_OFF_CQ_RING`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,11 +89,14 @@ pub fn validate_and_compute_ring_geometry(
     if entries == 0 {
         return Err(LinuxError::EINVAL);
     }
-    if params.flags & !V1_SUPPORTED_SETUP_FLAGS != 0 {
+    if params.flags & !SUPPORTED_SETUP_FLAGS != 0 {
         return Err(LinuxError::EINVAL);
     }
-    if params.sq_thread_cpu != 0
-        || params.sq_thread_idle != 0
+    let sqpoll = params.flags & linux_raw_sys::io_uring::IORING_SETUP_SQPOLL != 0;
+    let has_poll_params = params.flags & linux_raw_sys::io_uring::IORING_SETUP_SQ_AFF != 0
+        || params.sq_thread_cpu != 0
+        || params.sq_thread_idle != 0;
+    if (!sqpoll && has_poll_params)
         || params.wq_fd != 0
         || params.resv != [0; 3]
     {
@@ -174,7 +180,7 @@ pub fn validate_and_compute_ring_geometry(
 
     params.sq_entries = sq_entries;
     params.cq_entries = cq_entries;
-    params.features = V1_FEATURES;
+    params.features = SUPPORTED_FEATURES;
     params.sq_off = layout.to_sq_offsets();
     params.cq_off = layout.to_cq_offsets();
 
@@ -271,7 +277,7 @@ mod tests {
 
         let unsupported = [
             IORING_SETUP_IOPOLL,
-            IORING_SETUP_SQPOLL,
+            linux_raw_sys::io_uring::IORING_SETUP_SQ_AFF,
             IORING_SETUP_NO_SQARRAY,
             IORING_SETUP_SINGLE_ISSUER,
             IORING_SETUP_DEFER_TASKRUN,
@@ -296,6 +302,25 @@ mod tests {
     }
 
     #[test]
+    fn sqpoll_accepts_idle_and_advertises_nonfixed_on_all_rings() {
+        use linux_raw_sys::io_uring::{IORING_FEAT_SQPOLL_NONFIXED, IORING_SETUP_SQ_AFF};
+        for flags in [
+            0,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF,
+        ] {
+            let mut p = zero_params();
+            p.flags = flags;
+            if flags != 0 {
+                p.sq_thread_idle = 10;
+                p.sq_thread_cpu = 2;
+            }
+            validate_and_compute_ring_geometry(4, &mut p).unwrap();
+            assert_ne!(p.features & IORING_FEAT_SQPOLL_NONFIXED, 0);
+        }
+    }
+
+    #[test]
     fn powers_of_two_clamp_and_cqsize_geometry_match_contract() {
         let mut p = zero_params();
         p.flags = IORING_SETUP_SUBMIT_ALL;
@@ -304,7 +329,7 @@ mod tests {
         assert_eq!(layout.cq_entries, 8);
         assert_eq!(p.sq_entries, 4);
         assert_eq!(p.cq_entries, 8);
-        assert_eq!(p.features, V1_FEATURES);
+        assert_eq!(p.features, SUPPORTED_FEATURES);
         assert_eq!(layout.rings_alloc_bytes % PAGE_SIZE_4K, 0);
         assert_eq!(layout.sqes_alloc_bytes % PAGE_SIZE_4K, 0);
         assert_eq!(layout.sqes_alloc_bytes, PAGE_SIZE_4K);

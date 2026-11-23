@@ -497,8 +497,8 @@ fn prepare_sqe_inner(
                 let pin_inline = fits_single_pin_window(&segments);
                 let buffer = if pin_inline {
                     let mut cursor = UserBufferCursor::default();
-                    let window = PinnedUserBuffers::pin_with_process(
-                        &ctx.process,
+                    let window = PinnedUserBuffers::pin_with_aspace(
+                        &ctx.aspace,
                         &segments,
                         &mut cursor,
                         !is_write,
@@ -1225,7 +1225,7 @@ pub(crate) fn try_inline_fast_path_read(
     }
     let mut cursor = UserBufferCursor::default();
     let mut win =
-        PinnedUserBuffers::pin_with_process(&ctx.process, &segs, &mut cursor, true).ok()?;
+        PinnedUserBuffers::pin_with_aspace(&ctx.aspace, &segs, &mut cursor, true).ok()?;
     try_read_with_staging(
         file_obj,
         opt_offset,
@@ -1315,8 +1315,8 @@ async fn transfer_regular_file_buffer(
                     }
                     break;
                 }
-                let window = match PinnedUserBuffers::pin_with_process(
-                    &ctx.process,
+                let window = match PinnedUserBuffers::pin_with_aspace(
+                    &ctx.aspace,
                     &segments,
                     &mut cursor,
                     !is_write,
@@ -2136,8 +2136,8 @@ fn run_sync_rw(
             };
             let mut cursor = UserBufferCursor::default();
             loop {
-                let window = match PinnedUserBuffers::pin_with_process(
-                    &ctx.process,
+                let window = match PinnedUserBuffers::pin_with_aspace(
+                    &ctx.aspace,
                     &segments,
                     &mut cursor,
                     !is_write,

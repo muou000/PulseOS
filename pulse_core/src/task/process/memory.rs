@@ -34,42 +34,7 @@ impl Process {
         len: usize,
         access: MappingFlags,
     ) -> AxResult<()> {
-        self.validate_user_range(user_addr, len)?;
-        if len == 0 {
-            return Ok(());
-        }
-        let end = user_addr.checked_add(len).ok_or(AxError::BadAddress)?;
-        let start_page = VirtAddr::from(user_addr).align_down_4k();
-        let end_page = VirtAddr::from(end).align_up_4k();
-        let access = access | MappingFlags::USER;
-
-        let aspace_handle = self.aspace_handle();
-        let mut page = start_page;
-        while page < end_page {
-            {
-                let aspace = aspace_handle.read();
-                while page < end_page {
-                    let already_resident = aspace
-                        .query_vaddr(page)
-                        .is_ok_and(|(paddr, flags, _)| {
-                            paddr.as_usize() != 0 && flags.contains(access)
-                        });
-                    if !already_resident {
-                        break;
-                    }
-                    page += memory_addr::PAGE_SIZE_4K;
-                }
-            }
-
-            if page >= end_page {
-                break;
-            }
-            if !self.resolve_page_fault(&aspace_handle, page, access)? {
-                return Err(AxError::BadAddress);
-            }
-            page += memory_addr::PAGE_SIZE_4K;
-        }
-        Ok(())
+        self.aspace_handle().fault_in_user_range(user_addr, len, access)
     }
 
     pub fn read_user_bytes(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<()> {
@@ -89,41 +54,19 @@ impl Process {
     }
 
     pub fn read_user_bytes_partial(&self, user_addr: usize, bytes: &mut [u8]) -> AxResult<usize> {
-        self.validate_user_range(user_addr, bytes.len())?;
         if task::current_process().is_ok_and(|current| core::ptr::eq(current.as_ref(), self)) {
             return task::uaccess::copy_from_user_partial(bytes, user_addr);
         }
 
-        let start = VirtAddr::from(user_addr);
-        let aspace_handle = self.aspace_handle();
-        if aspace_handle.read().read(start, bytes).is_ok() {
-            return Ok(bytes.len());
-        }
-        self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::READ)?;
-        aspace_handle
-            .read()
-            .read(start, bytes)
-            .map(|()| bytes.len())
-            .map_err(AxError::from)
+        self.aspace_handle().read_user_bytes_partial(user_addr, bytes)
     }
 
     pub fn write_user_bytes_partial(&self, user_addr: usize, bytes: &[u8]) -> AxResult<usize> {
-        self.validate_user_range(user_addr, bytes.len())?;
         if task::current_process().is_ok_and(|current| core::ptr::eq(current.as_ref(), self)) {
             return task::uaccess::copy_to_user_partial(user_addr, bytes);
         }
 
-        let start = VirtAddr::from(user_addr);
-        let aspace_handle = self.aspace_handle();
-        if aspace_handle.read().write(start, bytes).is_ok() {
-            return Ok(bytes.len());
-        }
-        self.try_fault_in_user_range(user_addr, bytes.len(), MappingFlags::WRITE)?;
-        aspace_handle
-            .read()
-            .write(start, bytes)
-            .map(|()| bytes.len())
-            .map_err(AxError::from)
+        self.aspace_handle().write_user_bytes_partial(user_addr, bytes)
     }
 
     /// Freeze the current user stack while holding nonblocking leases on both

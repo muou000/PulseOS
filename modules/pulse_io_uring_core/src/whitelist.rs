@@ -44,9 +44,11 @@ pub const fn is_op_supported_v1(opcode: u8) -> bool {
 }
 
 #[inline]
-pub const fn validate_enter_flags_v1(flags: u32) -> Result<(), LinuxError> {
+pub const fn validate_enter_flags(flags: u32) -> Result<(), LinuxError> {
     const ALLOWED: u32 = linux_raw_sys::io_uring::IORING_ENTER_GETEVENTS
-        | linux_raw_sys::io_uring::IORING_ENTER_EXT_ARG;
+        | linux_raw_sys::io_uring::IORING_ENTER_EXT_ARG
+        | linux_raw_sys::io_uring::IORING_ENTER_SQ_WAIT
+        | linux_raw_sys::io_uring::IORING_ENTER_SQ_WAKEUP;
     if flags & !ALLOWED != 0 {
         Err(LinuxError::EINVAL)
     } else {
@@ -662,18 +664,17 @@ mod tests {
 
     #[test]
     fn enter_register_and_probe_match_v1_contract() {
-        assert_eq!(validate_enter_flags_v1(0), Ok(()));
+        assert_eq!(validate_enter_flags(0), Ok(()));
         assert_eq!(
-            validate_enter_flags_v1(IORING_ENTER_GETEVENTS | IORING_ENTER_EXT_ARG),
+            validate_enter_flags(IORING_ENTER_GETEVENTS | IORING_ENTER_EXT_ARG),
             Ok(())
         );
-        for flag in [
-            IORING_ENTER_SQ_WAKEUP,
-            IORING_ENTER_SQ_WAIT,
-            IORING_ENTER_REGISTERED_RING,
-            1 << 31,
-        ] {
-            assert_eq!(validate_enter_flags_v1(flag), Err(LinuxError::EINVAL));
+        assert_eq!(
+            validate_enter_flags(IORING_ENTER_SQ_WAKEUP | IORING_ENTER_SQ_WAIT | IORING_ENTER_GETEVENTS),
+            Ok(())
+        );
+        for flag in [IORING_ENTER_REGISTERED_RING, 1 << 31] {
+            assert_eq!(validate_enter_flags(flag), Err(LinuxError::EINVAL));
         }
 
         for op in [

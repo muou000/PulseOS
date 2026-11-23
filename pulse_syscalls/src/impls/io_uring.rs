@@ -6,7 +6,7 @@ use core::time::Duration;
 
 use axerrno::LinuxError;
 use linux_raw_sys::io_uring::{
-    __kernel_timespec, IORING_ENTER_GETEVENTS, io_uring_files_update, io_uring_getevents_arg,
+    __kernel_timespec, IORING_ENTER_GETEVENTS, IORING_ENTER_SQ_WAIT, IORING_ENTER_SQ_WAKEUP, io_uring_files_update, io_uring_getevents_arg,
     io_uring_params, io_uring_probe, io_uring_register_op,
 };
 use pulse_core::fd_table::{FdEntry, FdFlags};
@@ -129,13 +129,20 @@ pub(crate) fn sys_io_uring_enter(
         None => None,
     };
 
-    let exec_ctx = match AsyncExecContext::capture_current() {
-        Ok(ctx) => ctx,
-        Err(e) => return -e.code() as isize,
+    let (submitted, stopped_on_inline_error, all_inline_fast_path) = if state.is_sqpoll() {
+        let wake = flags & IORING_ENTER_SQ_WAKEUP != 0;
+        let wait = flags & IORING_ENTER_SQ_WAIT != 0;
+        if let Err(e) = state.sqpoll_enter(wake, wait) {
+            return -e.code() as isize;
+        }
+        (to_submit, false, false)
+    } else {
+        let exec_ctx = match AsyncExecContext::capture_current() {
+            Ok(ctx) => ctx,
+            Err(e) => return -e.code() as isize,
+        };
+        state.submit_sqes(to_submit, &exec_ctx)
     };
-
-    let (submitted, stopped_on_inline_error, all_inline_fast_path) =
-        state.submit_sqes(to_submit, &exec_ctx);
     if all_inline_fast_path
         && temporary_mask.is_none()
         && (stopped_on_inline_error
@@ -198,6 +205,10 @@ pub(crate) fn sys_io_uring_enter(
                     wait_err = Some(LinuxError::EBADF);
                     break;
                 }
+                if state.sqpoll_stopped() {
+                    wait_err = Some(LinuxError::EOWNERDEAD);
+                    break;
+                }
                 if current_have_signals() {
                     wait_err = Some(LinuxError::EINTR);
                     break;
@@ -220,6 +231,7 @@ pub(crate) fn sys_io_uring_enter(
                     || {
                         let _ = axtask::future::drive_ready(16);
                         state.is_dying()
+                            || state.sqpoll_stopped()
                             || current_have_signals()
                             || state.timeout_expiries() != initial_timeout_expiries
                             || state.check_cq_ready_and_ebadr(false).0 >= effective_min
@@ -235,6 +247,10 @@ pub(crate) fn sys_io_uring_enter(
                 }
                 if state.is_dying() {
                     wait_err = Some(LinuxError::EBADF);
+                    break;
+                }
+                if state.sqpoll_stopped() {
+                    wait_err = Some(LinuxError::EOWNERDEAD);
                     break;
                 }
                 if current_have_signals() {

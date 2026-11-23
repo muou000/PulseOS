@@ -375,6 +375,8 @@ impl Process {
         } = prepared;
         let new_pt_root = new_aspace_handle.read().page_table_root();
         let new_asid = new_aspace_handle.read().asid();
+        // SQPOLL must finish submitting from the old image before the switch.
+        crate::io_uring::cancel_requests_for_process(self.pid());
         let old_aspace = self.replace_aspace_handle(new_aspace_handle);
 
         axtask::set_current_page_table_root(new_pt_root, new_asid);
@@ -409,7 +411,6 @@ impl Process {
         };
         self.release_posix_locks_for_entries(&cloexec_entries);
         drop(cloexec_entries);
-        crate::io_uring::cancel_requests_for_process(self.pid());
         self.stack_top.store(load_info.user_sp, Ordering::Release);
         self.entry.store(load_info.entry, Ordering::Release);
         self.set_signal_trampoline(load_info.signal_trampoline);
