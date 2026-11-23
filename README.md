@@ -142,9 +142,18 @@ BPF 和 pipe 的启动自检默认关闭。测试内核使用
 echo 7 > /etc/pulse-kernel-cpus
 ```
 
-文件应为最多 4096 字节的普通文本文件。使用调度器的逻辑 CPU 编号，逗号分隔，连续编号可写成闭区间，例如 `2,5-7`。启动日志以十六进制位掩码报告生效集合，例如 `CPU reservation: reserved=0x80 user=0x7f`。编号离线、列表无效或保留了全部在线 CPU 时，启动会在创建首个用户线程前报告错误。删除或清空文件，下次启动即恢复默认配置。
+文件应为最多 4096 字节的普通文本文件。使用调度器的逻辑 CPU 编号，逗号分隔，连续编号可写成闭区间，例如 `2,5-7`。启动日志以十六进制位掩码报告生效集合，例如 `CPU reservation: reserved=0x80 user=0x7f sqpoll=0x0`。编号离线、列表无效或保留了全部在线 CPU 时，启动会在创建首个用户线程前报告错误。
 
 内核任务可以使用保留核。用户线程自首次入队起受用户可用集合约束，在同步系统调用中阻塞或恢复时也遵守该约束。当前线程调用 `sched_setaffinity` 时，只有请求与可用集合的交集生效。交集为空会返回 `EINVAL` 并保留原亲和性。可用 `sched_getaffinity` 查询有效掩码。
+
+要允许应用显式指定 CPU 7 为 ring 的 SQPOLL 服务核，将它同时写入保留集合和服务集合，然后重启：
+
+```sh
+echo 7 > /etc/pulse-kernel-cpus
+echo 7 > /etc/pulse-sqpoll-cpus
+```
+
+`/etc/pulse-sqpoll-cpus` 采用相同的 CPU 列表语法，缺失或空白表示服务集合为空。服务集合必须是在线保留核的子集，配置有误时启动会在 PID 1 前报告错误。应用使用 `IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF` 并设置 `sq_thread_cpu=7` 后，该 ring 的轮询线程从第一次取 SQE 起就在 CPU 7 上运行。用户线程仍在自己的有效掩码内运行。对普通非保留 CPU 的 SQPOLL 绑核请求，目标必须在线且位于创建者的有效掩码中。删除或清空两个文件后重启，即可恢复默认配置。
 
 ### 运行测试 (QEMU)
 

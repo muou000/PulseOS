@@ -15,8 +15,42 @@ use linux_raw_sys::io_uring::{IORING_SETUP_SQ_AFF, io_uring_params};
 use super::{AsyncExecContext, IoUringState};
 use crate::task::{current_have_signals, current_thread};
 
+#[derive(Clone, Copy)]
+enum SqPollTarget {
+    Unbound,
+    CreatorAllowed(usize),
+    ReservedService(usize),
+}
+
+impl SqPollTarget {
+    fn from_params(params: &io_uring_params) -> LinuxResult<Self> {
+        if params.flags & IORING_SETUP_SQ_AFF == 0 {
+            return Ok(Self::Unbound);
+        }
+        let cpu = params.sq_thread_cpu as usize;
+        if cpu >= axhal::cpu_num() || !axhal::is_cpu_online(cpu) {
+            return Err(LinuxError::EINVAL);
+        }
+        if axtask::is_sqpoll_service_cpu(cpu) {
+            Ok(Self::ReservedService(cpu))
+        } else if axtask::current().cpumask().get(cpu) {
+            Ok(Self::CreatorAllowed(cpu))
+        } else {
+            Err(LinuxError::EINVAL)
+        }
+    }
+
+    fn cpu(self) -> Option<usize> {
+        match self {
+            Self::Unbound => None,
+            Self::CreatorAllowed(cpu) | Self::ReservedService(cpu) => Some(cpu),
+        }
+    }
+}
+
 pub(super) struct SqPoll {
     owner_pid: u64,
+    target: SqPollTarget,
     stopping: AtomicBool,
     // Wait predicates must see the consumer's head without acquiring its sleeping submit lock.
     consumed_head: AtomicU32,
@@ -32,34 +66,36 @@ impl SqPoll {
         self.space.notify_all(false);
     }
 
-    pub(super) fn new(owner_pid: u64) -> Self {
-        Self {
+    pub(super) fn new(owner_pid: u64, params: &io_uring_params) -> LinuxResult<Self> {
+        Ok(Self {
             owner_pid,
+            target: SqPollTarget::from_params(params)?,
             stopping: AtomicBool::new(false),
             consumed_head: AtomicU32::new(0),
             kicks: AtomicU32::new(0),
             work: WaitQueue::new(),
             space: WaitQueue::new(),
             task: SpinNoIrq::new(Weak::new()),
-        }
+        })
     }
 }
 
 impl IoUringState {
+    /// Reserved CPU explicitly selected by this ring for SQPOLL service.
+    pub fn sqpoll_service_cpu(&self) -> Option<usize> {
+        match self.sqpoll.as_ref()?.target {
+            SqPollTarget::ReservedService(cpu) => Some(cpu),
+            _ => None,
+        }
+    }
+
     pub(super) fn start_sqpoll(
         self: &Arc<Self>,
         params: &io_uring_params,
         mut owner: AsyncExecContext,
     ) -> LinuxResult<()> {
         let poll = self.sqpoll.as_ref().expect("SQPOLL state");
-        let allowed = axtask::current().cpumask();
-        let cpu =
-            (params.flags & IORING_SETUP_SQ_AFF != 0).then_some(params.sq_thread_cpu as usize);
-        if let Some(cpu) = cpu
-            && (cpu >= axhal::cpu_num() || !axhal::is_cpu_online(cpu) || !allowed.get(cpu))
-        {
-            return Err(LinuxError::EINVAL);
-        }
+        let cpu = poll.target.cpu();
         let idle = match params.sq_thread_idle {
             0 => Duration::from_secs(1),
             ms => Duration::from_millis(u64::from(ms)),
@@ -138,6 +174,13 @@ impl IoUringState {
 
     pub fn sqpoll_enter(&self, wakeup: bool, wait: bool) -> LinuxResult<()> {
         let poll = self.sqpoll.as_ref().expect("SQPOLL enter");
+        #[cfg(feature = "guest-checks")]
+        if self.sqpoll_service_cpu().is_some() {
+            axlog::info!(
+                "SQPOLL enter ring={} wakeup={wakeup} wait={wait}",
+                self.ring_id
+            );
+        }
         if wakeup {
             poll.kicks.fetch_add(1, Ordering::Release);
             poll.work.notify_one(true);

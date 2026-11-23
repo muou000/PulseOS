@@ -116,6 +116,69 @@ static void wait_asleep(struct ring *r)
         sched_yield();
 }
 
+/* Eight online CPUs, with 6 and 7 reserved and only 7 serving SQPOLL. */
+static void reserved_cpu(void)
+{
+    cpu_set_t allowed, one;
+    CHECK(sched_getaffinity(0, sizeof(allowed), &allowed) == 0);
+    CHECK(CPU_COUNT(&allowed) == 6);
+    for (int cpu = 0; cpu < 6; cpu++)
+        CHECK(CPU_ISSET(cpu, &allowed));
+    CPU_ZERO(&one);
+    CPU_SET(7, &one);
+    CHECK(sched_setaffinity(0, sizeof(one), &one) == -1 && errno == EINVAL);
+    CPU_CLR(7, &one);
+    CPU_SET(0, &one);
+    CHECK(sched_setaffinity(0, sizeof(one), &one) == 0 && sched_getcpu() == 0);
+    puts("SQPOLL user mask=0x3f bind7=EINVAL producer=0");
+
+    unsigned flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+    const unsigned invalid[] = { 1, 6, 8, UINT_MAX };
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        struct io_uring_params p = { .flags = flags, .sq_thread_cpu = invalid[i] };
+        CHECK(syscall(SYS_io_uring_setup, 4, &p) == -1 && errno == EINVAL);
+    }
+    puts("SQPOLL rejected disallowed=1 reserved=6 absent=8 out_of_range=UINT_MAX");
+
+    struct ring r = setup(flags, 2000, 7);
+    struct io_uring_sqe nop = { .opcode = IORING_OP_NOP, .user_data = 0 };
+    submit(&r, &nop, 1);
+    enter(&r, 0, 1, IORING_ENTER_SQ_WAKEUP | IORING_ENTER_GETEVENTS);
+    expect(&r, 0, 0);
+
+    unsigned before = r.enters;
+    for (unsigned batch = 0; batch < 8; batch++) {
+        unsigned first = 1 + 4 * batch;
+        struct io_uring_sqe nops[4] = {};
+        for (unsigned i = 0; i < 4; i++) {
+            nops[i].opcode = IORING_OP_NOP;
+            nops[i].user_data = first + i;
+        }
+        submit(&r, nops, 4);
+        unsigned seen = 0;
+        for (unsigned i = 0; i < 4; i++) {
+            struct io_uring_cqe cqe = reap(&r);
+            CHECK(cqe.res == 0 && cqe.user_data >= first && cqe.user_data < first + 4);
+            seen |= 1u << (cqe.user_data - first);
+        }
+        CHECK(seen == 0xf);
+    }
+    CHECK(r.enters == before);
+    printf("SQPOLL reserved active batches=8 unique=32 enters=%u\n", r.enters - before);
+    wait_asleep(&r);
+    /* Wake an empty SQ. The poller must acknowledge the kick before it can see ID 33. */
+    enter(&r, 0, 0, IORING_ENTER_SQ_WAKEUP);
+    while (load(SQ(&r, flags)) & IORING_SQ_NEED_WAKEUP)
+        sched_yield();
+    nop.user_data = 33;
+    submit(&r, &nop, 1);
+    kick_if_asleep(&r);
+    expect(&r, 33, 0);
+    CHECK(load(CQ(&r, head)) == load(CQ(&r, tail)));
+    puts("SQPOLL reserved NEED_WAKEUP resumed user_data=33");
+    destroy(&r);
+}
+
 static void ordinary_and_invalid(void)
 {
     struct io_uring_params p = { .flags = IORING_SETUP_SQ_AFF };
@@ -405,6 +468,10 @@ int main(int argc, char **argv)
 {
     alarm(40);
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && strcmp(argv[1], "--reserved-cpu") == 0) {
+        reserved_cpu();
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "--ordinary-baseline") == 0) {
         measure_reads(0);
         return 0;

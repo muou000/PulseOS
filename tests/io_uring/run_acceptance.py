@@ -5,6 +5,7 @@ Modes:
   guest-checks : Verify boot-time io_uring frame refcount & teardown probes.
   functional   : Verify LTP io_uring01..04, 54/54 liburing-2.9, smp_stress, meminfo.
   sqpoll       : Verify the shared-ring SQPOLL protocol and pinned sqpoll-sleep.t.
+  sqpoll-reserved : Observe SQ consumption on a reserved CPU (guest-checks kernel).
   fio          : Verify syscall-count reduction and ext4 O_DIRECT/cached fio-3.39.
   bpf          : Capture paired cpu+sched bpf-record sessions, run bpf-analyzer
                  and scripts/perf_pipeline.py (native perf + FlameGraph SVG).
@@ -255,6 +256,45 @@ echo 'SQPOLL liburing-2.9 sqpoll-sleep.t PASS'
     summary = {"mode": "sqpoll", "arch": args.arch, "qemu_exit": qemu_exit, "markers": markers, "passed": True}
     (run / f"sqpoll-{args.arch}.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
+
+
+def run_sqpoll_reserved(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
+    for name, cpus in (("pulse-kernel-cpus", "6-7"), ("pulse-sqpoll-cpus", "7")):
+        config = run / name
+        config.write_text(cpus + "\n")
+        install_verified_file(image_copy, config, f"/etc/{name}", run)
+    probe = stage_dir_for(args.arch) / "bin/sqpoll"
+    install_verified_file(image_copy, probe, "/opt/io_uring/sqpoll", run)
+    clean, qemu_exit = run_guest_job(
+        arch=args.arch, kernel=kernel, image_copy=image_copy, run=run,
+        script_text="#!/bin/sh\nexec /opt/io_uring/sqpoll --reserved-cpu\n",
+        boot_timeout=args.boot_timeout, timeout=args.timeout,
+    )
+
+    trace = extract_block(clean, "SQPOLL user mask=0x3f bind7=EINVAL producer=0",
+                          "SQPOLL reserved NEED_WAKEUP resumed user_data=33")
+    active, marker, resumed = trace.partition("SQPOLL reserved active batches=8 unique=32 enters=0")
+    if not marker:
+        raise ValueError("Missing active NOP completion and enter count")
+    consumes = re.findall(r"SQPOLL consume ring=(\d+) user_data=(\d+) cpu=(\d+)", trace)
+    if not consumes:
+        raise ValueError("Missing SQE consumption trace (build with guest-checks)")
+    ring = consumes[0][0]
+    if consumes != [(ring, str(i), "7") for i in range(34)]:
+        raise ValueError(f"Expected NOPs 0..33 on one ring on CPU 7, saw {consumes}")
+
+    # Warmup is the last enter before active NOPs. The next wake acknowledges
+    # NEED_WAKEUP on an empty SQ, before the producer publishes ID 33.
+    enter = f"SQPOLL enter ring={ring} wakeup=true wait=false"
+    first_active = active.index(f"SQPOLL consume ring={ring} user_data=1 cpu=7")
+    if active.count("SQPOLL enter ring=") != 1 or enter not in active[:first_active]:
+        raise ValueError("Expected only the warmup enter before the active NOPs")
+    last_nop = resumed.index(f"SQPOLL consume ring={ring} user_data=33 cpu=7")
+    if enter not in resumed[:last_nop]:
+        raise ValueError("Expected a wakeup before consuming the resumed NOP")
+    return {"mode": "sqpoll-reserved", "arch": args.arch, "qemu_exit": qemu_exit,
+            "ring": int(ring), "cpu": 7, "active_nops": 32, "active_enters": 0,
+            "resumed_user_data": 33, "passed": True}
 
 
 def run_functional(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
@@ -792,7 +832,7 @@ def run_bpf(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "sqpoll", "fio", "bpf"))
+    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "sqpoll", "sqpoll-reserved", "fio", "bpf"))
     parser.add_argument("--arch", required=True, choices=tuple(ARCHES))
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--boot-timeout", type=float, default=60.0)
@@ -815,6 +855,7 @@ def main() -> int:
         "guest-checks": run_guest_checks,
         "functional": run_functional,
         "sqpoll": run_sqpoll,
+        "sqpoll-reserved": run_sqpoll_reserved,
         "fio": run_fio,
         "bpf": run_bpf,
     }
