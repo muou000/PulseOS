@@ -18,11 +18,11 @@ use crate::Process;
 struct StdoutRaw;
 
 fn console_read_bytes(buf: &mut [u8]) -> axio::Result<usize> {
-    Ok(axhal::console::read_bytes(buf))
+    Ok(hal::console::read_bytes(buf))
 }
 
 fn console_write_bytes(buf: &[u8]) -> axio::Result<usize> {
-    axhal::console::write_bytes(buf);
+    hal::console::write_bytes(buf);
     Ok(buf.len())
 }
 
@@ -87,7 +87,7 @@ impl TtyInputEffects {
 
 static STDIN_BUFFER: Lazy<SpinNoIrq<TtyInputState>> =
     Lazy::new(|| SpinNoIrq::new(TtyInputState::default()));
-pub static STDIN_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+pub static STDIN_WAIT_QUEUE: task::WaitQueue = task::WaitQueue::new();
 
 #[derive(Clone, Copy, Default)]
 struct ForegroundProcessGroup {
@@ -208,7 +208,7 @@ fn deliver_terminal_signal(signal: usize) {
         let procs = crate::processes_snapshot();
         for p in procs {
             if p.pgid() == t_pgid && p.pid() > 1 && !p.is_zombie() {
-                axlog::info!(
+                kernel_log::info!(
                     "TTY: sending signal {} to process {} (pgid {})",
                     signal,
                     p.pid(),
@@ -362,13 +362,13 @@ impl Write for StdoutRaw {
 }
 
 static STDOUT_WRITER: Lazy<Mutex<StdoutRaw>> = Lazy::new(|| Mutex::new(StdoutRaw));
-static TTY_WRITE_TRANSACTION: axsync::Mutex<()> = axsync::Mutex::new(());
+static TTY_WRITE_TRANSACTION: sync::Mutex<()> = sync::Mutex::new(());
 
 /// Serializes all fragments of one user TTY write transaction.
 ///
 /// Raw console access remains protected by `STDOUT_WRITER` per fragment, so
 /// this sleeping lock is never used from interrupt or early-console paths.
-pub fn lock_tty_write_transaction() -> axsync::MutexGuard<'static, ()> {
+pub fn lock_tty_write_transaction() -> sync::MutexGuard<'static, ()> {
     TTY_WRITE_TRANSACTION.lock()
 }
 
@@ -777,7 +777,7 @@ impl FdObject for StdinObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+        wqs: &mut alloc::vec::Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         if (events & (POLLIN as i16)) != 0 {
             wqs.push(&STDIN_WAIT_QUEUE);

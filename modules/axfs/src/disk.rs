@@ -82,15 +82,15 @@ impl BlockDriverOps for SharedBlockDevice {
     }
 
     fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
-        axtask::future::block_on(self.dev.read_block_async_dyn(block_id, buf))
+        task::future::block_on(self.dev.read_block_async_dyn(block_id, buf))
     }
 
     fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
-        axtask::future::block_on(self.dev.write_block_async_dyn(block_id, buf))
+        task::future::block_on(self.dev.write_block_async_dyn(block_id, buf))
     }
 
     fn flush(&mut self) -> DevResult {
-        axtask::future::block_on(self.dev.flush_async_dyn())
+        task::future::block_on(self.dev.flush_async_dyn())
     }
 }
 
@@ -263,12 +263,12 @@ impl Drop for FlushingTaskGuard {
 
 /// Flushes all registered disks.
 pub fn flush_all_disks() -> DevResult<()> {
-    axtask::future::block_on(flush_all_disks_async())
+    task::future::block_on(flush_all_disks_async())
 }
 
 /// Asynchronously flushes all registered disks.
 pub async fn flush_all_disks_async() -> DevResult<()> {
-    let task_id = axtask::current().id().as_u64();
+    let task_id = task::current().id().as_u64();
     {
         let mut guard = FLUSHING_TASKS.lock();
         if !guard.insert(task_id) {
@@ -373,7 +373,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> SeekableDisk<D> {
 
     /// Write all pending changes to the disk.
     pub fn flush(&mut self) -> DevResult<()> {
-        axtask::future::block_on(self.flusher.flush_disk())
+        task::future::block_on(self.flusher.flush_disk())
     }
 
     pub fn device(&self) -> Arc<Mutex<D>> {

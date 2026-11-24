@@ -1,7 +1,7 @@
 use core::ops::{Deref, DerefMut};
 
 use axerrno::{AxError, AxResult};
-use axhal::trap::PageFaultFlags;
+use hal::trap::PageFaultFlags;
 use axmm::{AddrSpace, MappingPlacement, MappingWait, PreparedMapping};
 use kernel_guard::NoPreempt;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
@@ -124,7 +124,7 @@ impl AddressSpaceLock {
 
     fn wait_for_mapping(wait: MappingWait) {
         while wait.is_pending() {
-            axtask::yield_now();
+            task::yield_now();
         }
     }
 
@@ -198,7 +198,7 @@ impl AddressSpaceLock {
     /// disabled, never schedules, and drops this lease before returning.
     #[cfg(feature = "bpf-trace")]
     pub(crate) fn try_read_for_sampling(&self) -> Option<RwLockReadGuard<'_, AddrSpace>> {
-        if axhal::asm::irqs_enabled() {
+        if hal::asm::irqs_enabled() {
             return None;
         }
         self.inner.try_read()

@@ -71,7 +71,7 @@ pub(super) fn run() -> axfs_ng_vfs::VfsResult<()> {
     let reader = super::Ext4DiskWrapper(super::Ext4Disk::new(device.clone()));
     let mut page = alloc::vec![0; 4096];
     let mut batch = alloc::vec![0; 8192];
-    axtask::future::block_on(async {
+    task::future::block_on(async {
         let cold = reader
             .read_with_io(4096, &mut page, 0..4096)
             .await

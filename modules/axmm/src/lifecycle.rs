@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use axerrno::{AxError, AxResult};
-use axhal::paging::{MappingFlags, PageSize};
+use hal::paging::{MappingFlags, PageSize};
 use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange, PAGE_SIZE_4K};
 
 use crate::{

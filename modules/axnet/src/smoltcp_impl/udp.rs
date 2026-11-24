@@ -7,7 +7,7 @@ use core::{
 use axerrno::{AxError, AxResult, ax_err, ax_err_type};
 use axio::{PollState, Read, Write};
 use axpoll::{IoEvents, Pollable};
-use axsync::Mutex;
+use sync::Mutex;
 use smoltcp::{
     iface::SocketHandle,
     socket::udp::{self, BindError, SendError},
@@ -541,7 +541,7 @@ impl UdpSocket {
         })
     }
 
-    fn recv_impl<F, T>(&self, deadline: Option<axhal::time::TimeValue>, mut op: F) -> AxResult<T>
+    fn recv_impl<F, T>(&self, deadline: Option<hal::time::TimeValue>, mut op: F) -> AxResult<T>
     where
         F: FnMut(&mut udp::Socket) -> AxResult<T>,
     {
@@ -555,7 +555,7 @@ impl UdpSocket {
     fn block_on<F, T>(
         &self,
         events: IoEvents,
-        deadline: Option<axhal::time::TimeValue>,
+        deadline: Option<hal::time::TimeValue>,
         mut f: F,
     ) -> AxResult<T>
     where
@@ -594,7 +594,7 @@ impl UdpSocket {
     }
 
     /// Returns the wait queue for this socket.
-    pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn get_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.any
     }
 
@@ -608,12 +608,12 @@ impl UdpSocket {
     }
 
     /// Returns the read readiness wait queue for this socket.
-    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn read_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.read
     }
 
     /// Returns the write readiness wait queue for this socket.
-    pub fn write_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn write_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.write
     }
 

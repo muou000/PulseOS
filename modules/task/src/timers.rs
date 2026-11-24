@@ -1,0 +1,195 @@
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use hal::time::monotonic_time;
+use kernel_guard::{NoOp, NoPreemptIrqSave};
+use lazyinit::LazyInit;
+use timer_list::{TimeValue, TimerEvent, TimerList};
+
+use crate::{AxTaskRef, AxTaskWeak, WakeContext, WakeSource, select_wake_run_queue};
+
+static TIMER_TICKET_ID: AtomicU64 = AtomicU64::new(1);
+
+// If deadline selection itself takes longer than the selected deadline,
+// leave a small window for the SBI timer write to become visible.
+const MIN_TIMER_ARM_LEAD_NANOS: u64 = 100_000;
+
+pub enum AxTimerEvent {
+    TaskWakeup {
+        ticket_id: u64,
+        task: AxTaskWeak,
+    },
+    Generic {
+        callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>,
+    },
+}
+
+// Task-context insertions must disable local IRQs because the timer IRQ also
+// mutates this per-CPU heap.
+percpu_static! {
+    TIMER_LIST: LazyInit<TimerList<AxTimerEvent>> = LazyInit::new(),
+}
+
+impl TimerEvent for AxTimerEvent {
+    fn callback(self, _now: TimeValue) {
+        match self {
+            Self::TaskWakeup { ticket_id, task } => {
+                if let Some(task) = task.upgrade() {
+                    if task.timer_ticket() != ticket_id {
+                        return;
+                    }
+                    select_wake_run_queue::<NoOp>(&task).unblock_task_with_context(
+                        task,
+                        true,
+                        WakeContext::new(|| (WakeSource::Timer, ticket_id)),
+                    );
+                }
+            }
+            Self::Generic { callback } => {
+                callback(_now);
+            }
+        }
+    }
+}
+
+percpu_static! {
+    NEXT_TICK_DEADLINE: u64 = 0,
+}
+
+pub fn reprogram_timer() {
+    reprogram_timer_internal(None);
+}
+
+pub(crate) fn reprogram_timer_for_task(task: &AxTaskRef) {
+    reprogram_timer_internal(Some(task));
+}
+
+pub(crate) fn reprogram_timer_from_tick() {
+    reprogram_timer_internal(None);
+}
+
+fn reprogram_timer_internal(scheduler_task: Option<&AxTaskRef>) {
+    let now_ns = hal::time::monotonic_time_nanos();
+    let mut tick_deadline = unsafe { NEXT_TICK_DEADLINE.read_current_raw() };
+    let periodic_interval_nanos = hal::time::NANOS_PER_SEC / config::TICKS_PER_SEC as u64;
+
+    // A task can enter this path while its local timer IRQ is pending. Do not
+    // arm the already elapsed periodic tick in that case: doing so can replace
+    // a future sleep event with a compare value at (or before) `now`.
+    if now_ns >= tick_deadline {
+        let missed_ticks = (now_ns - tick_deadline) / periodic_interval_nanos + 1;
+        tick_deadline += missed_ticks * periodic_interval_nanos;
+        unsafe { NEXT_TICK_DEADLINE.write_current_raw(tick_deadline) };
+    }
+
+    let mut final_deadline = tick_deadline;
+
+    let task_event_deadline = unsafe {
+        let tl = TIMER_LIST.current_ref_raw();
+        if tl.is_inited() {
+            tl.next_deadline()
+        } else {
+            None
+        }
+    };
+    let future_deadline = crate::future::next_timer_deadline();
+    for event_deadline in [task_event_deadline, future_deadline].into_iter().flatten() {
+        let event_mono_ns = event_deadline.as_nanos().min(u64::MAX as u128) as u64;
+        if event_mono_ns < final_deadline {
+            final_deadline = event_mono_ns;
+        }
+    }
+
+    let scheduler_deadline = scheduler_task.map_or_else(
+        || crate::run_queue::scheduler_preemption_deadline(now_ns),
+        |task| crate::run_queue::scheduler_preemption_deadline_for(task, now_ns),
+    );
+    if let Some(scheduler_deadline) = scheduler_deadline {
+        if scheduler_deadline < final_deadline {
+            final_deadline = scheduler_deadline;
+        }
+    }
+
+    if final_deadline != u64::MAX {
+        let arm_now_ns = hal::time::monotonic_time_nanos();
+        if final_deadline <= arm_now_ns {
+            final_deadline = arm_now_ns.saturating_add(MIN_TIMER_ARM_LEAD_NANOS);
+        }
+        hal::time::set_oneshot_timer(final_deadline);
+    }
+}
+
+pub fn next_deadline() -> Option<TimeValue> {
+    let task_event_deadline = unsafe {
+        let tl = TIMER_LIST.current_ref_raw();
+        if tl.is_inited() {
+            tl.next_deadline()
+        } else {
+            None
+        }
+    };
+    let event_deadline = match (task_event_deadline, crate::future::next_timer_deadline()) {
+        (Some(a), Some(b)) => Some(core::cmp::min(a, b)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    };
+    let scheduler_deadline =
+        crate::run_queue::scheduler_preemption_deadline(hal::time::monotonic_time_nanos())
+            .map(TimeValue::from_nanos);
+    match (event_deadline, scheduler_deadline) {
+        (Some(a), Some(b)) => Some(core::cmp::min(a, b)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    }
+}
+
+pub fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
+    let _guard = NoPreemptIrqSave::new();
+    TIMER_LIST.with_current(|timer_list| {
+        let ticket_id = TIMER_TICKET_ID.fetch_add(1, Ordering::AcqRel);
+        task.set_timer_ticket(ticket_id);
+        timer_list.set(
+            deadline,
+            AxTimerEvent::TaskWakeup {
+                ticket_id,
+                task: alloc::sync::Arc::downgrade(&task),
+            },
+        );
+    });
+    reprogram_timer();
+}
+
+pub fn set_generic_timer(
+    deadline: TimeValue,
+    callback: alloc::boxed::Box<dyn FnOnce(TimeValue) + Send + Sync>,
+) {
+    let _guard = NoPreemptIrqSave::new();
+    TIMER_LIST.with_current(|timer_list| {
+        timer_list.set(deadline, AxTimerEvent::Generic { callback });
+    });
+    reprogram_timer();
+}
+
+pub fn check_events() {
+    loop {
+        let now = monotonic_time();
+        let event = unsafe {
+            // Safety: IRQs are disabled at this time.
+            TIMER_LIST.current_ref_mut_raw()
+        }
+        .expire_one(now);
+        if let Some((_deadline, event)) = event {
+            event.callback(now);
+        } else {
+            break;
+        }
+    }
+}
+
+pub fn init() {
+    TIMER_LIST.with_current(|timer_list| {
+        timer_list.init_once(TimerList::new());
+    });
+    let first_deadline = hal::time::monotonic_time_nanos()
+        + hal::time::NANOS_PER_SEC / config::TICKS_PER_SEC as u64;
+    unsafe { NEXT_TICK_DEADLINE.write_current_raw(first_deadline) };
+}

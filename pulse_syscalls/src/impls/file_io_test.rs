@@ -19,7 +19,7 @@ pub(super) fn prctl(command: usize, address: usize, size: usize, reserved: usize
         }
         match command {
             0 if address == 0 && size == 0 => {
-                axfs::file_io_test_begin(axtask::current().id().as_u64());
+                axfs::file_io_test_begin(task::current().id().as_u64());
                 Ok(())
             }
             1 if size == 5 * size_of::<u64>() => {

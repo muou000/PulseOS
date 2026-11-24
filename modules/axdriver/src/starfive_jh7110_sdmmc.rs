@@ -5,7 +5,7 @@ use core::{
 
 use axdriver_base::{BaseDriverOps, DevResult, DeviceType};
 use axdriver_block::{AsyncBlockDriverOps, BlockDriverOps, starfive_jh7110::Jh7110SdMmc};
-use axhal::mem::phys_to_virt;
+use hal::mem::phys_to_virt;
 
 const VF2_SDIO1_PADDR: usize = 0x1602_0000;
 
@@ -275,7 +275,7 @@ fn configure_vf2_sdmmc_resources(paddr: usize) -> bool {
         reset.write_volatile(value);
         value
     };
-    axhal::time::busy_wait(VF2_RESET_SETTLE);
+    hal::time::busy_wait(VF2_RESET_SETTLE);
     let iomux_status_after = unsafe {
         wait_vf2_reset_deasserted(
             crg,
@@ -301,7 +301,7 @@ fn configure_vf2_sdmmc_resources(paddr: usize) -> bool {
         value
     };
     fence(Ordering::SeqCst);
-    axhal::time::busy_wait(VF2_RESET_SETTLE);
+    hal::time::busy_wait(VF2_RESET_SETTLE);
     let sdio_status_after = unsafe {
         wait_vf2_reset_deasserted(crg, VF2_SYSRST_SDIO1_STATUS_OFFSET, VF2_SDIO1_RESET_MASK)
     };
@@ -330,7 +330,7 @@ pub(crate) struct Jh7110SdMmcDevice {
 }
 
 pub(crate) fn probe() -> Option<Jh7110SdMmcDevice> {
-    let paddr = axconfig::devices::SDMMC_PADDR;
+    let paddr = config::devices::SDMMC_PADDR;
     if !configure_vf2_sdmmc_resources(paddr) {
         error!("JH7110 SD/MMC: refusing to probe SDIO1 after resource initialization failure");
         return None;

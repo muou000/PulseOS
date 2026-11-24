@@ -78,9 +78,9 @@ fn start_writeback_daemon() {
         return;
     }
 
-    axtask::spawn_async(async {
+    task::spawn_async(async {
         loop {
-            axtask::future::sleep(WRITEBACK_INTERVAL).await;
+            task::future::sleep(WRITEBACK_INTERVAL).await;
             if let Err(error) = flush_background_writeback_async().await {
                 // Keep the request armed so a transient SD/MMC error gets a
                 // later retry. Shutdown still performs its own bounded,
@@ -93,7 +93,7 @@ fn start_writeback_daemon() {
 }
 
 pub fn flush_all_filesystems() -> axfs_ng_vfs::VfsResult<()> {
-    axtask::future::block_on(flush_all_filesystems_async())
+    task::future::block_on(flush_all_filesystems_async())
 }
 
 /// Drains writeback owned by a mount before detaching it from the VFS tree.
@@ -330,7 +330,7 @@ pub fn set_loop_backing(id: usize, file: File) -> axfs_ng_vfs::VfsResult<()> {
     if id >= 8 {
         return Err(axfs_ng_vfs::VfsError::InvalidInput);
     }
-    let metadata = axtask::future::block_on(file.location().metadata())?;
+    let metadata = task::future::block_on(file.location().metadata())?;
     let size = cached_file_size(file.location()).unwrap_or(metadata.size);
     let dev = &fs::loop_dev::LOOP_DEVICES[id];
     let file = Arc::new(file);
@@ -366,7 +366,7 @@ pub fn set_loop_flags(id: usize, flags: u32) -> axfs_ng_vfs::VfsResult<()> {
 
 pub fn lookup_location(path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
     let context = FS_CONTEXT.lock().clone();
-    axtask::future::block_on(context.resolve(path))
+    task::future::block_on(context.resolve(path))
 }
 
 pub fn probe_block_device(
@@ -380,15 +380,15 @@ pub fn probe_block_device(
     #[cfg(all(feature = "fat", not(feature = "ext4")))]
     {
         let _ = path;
-        axtask::future::block_on(node.mount_fat())
+        task::future::block_on(node.mount_fat())
     }
     #[cfg(not(all(feature = "fat", not(feature = "ext4"))))]
     {
         let disk = node.get_block_device()?;
-        let fs = axtask::future::block_on(fs::new_default(disk))?;
+        let fs = task::future::block_on(fs::new_default(disk))?;
         // /dev/loopN is a name for a changeable binding. The boot aliases
         // represent fixed devices and may retain their filesystem.
-        let rdev = axtask::future::block_on(entry.metadata())?.rdev;
+        let rdev = task::future::block_on(entry.metadata())?.rdev;
         if rdev.major() != 7 {
             register_mountable_filesystem(path, &fs);
         }
@@ -415,12 +415,12 @@ fn register_mountable_device(source: &str, disk_name: &str, fs: &axfs_ng_vfs::Fi
 }
 
 fn ensure_mount_dir(cx: &FsContext, path: &str) -> axfs_ng_vfs::VfsResult<axfs_ng_vfs::Location> {
-    match axtask::future::block_on(cx.resolve(path)) {
+    match task::future::block_on(cx.resolve(path)) {
         Ok(loc) => {
             loc.check_is_dir()?;
             Ok(loc)
         }
-        Err(_) => axtask::future::block_on(cx.create_dir(path, NodePermission::default())),
+        Err(_) => task::future::block_on(cx.create_dir(path, NodePermission::default())),
     }
 }
 
@@ -467,7 +467,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     let root_device = disk::SharedBlockDevice::new(
         block_devs.take_one().expect("root block device is required"),
     );
-    let root = axtask::future::block_on(fs::new_default(root_device.clone()))
+    let root = task::future::block_on(fs::new_default(root_device.clone()))
         .expect("failed to mount root filesystem on device0");
     info!(
         "  select block device 0 ({}, {} KiB) as root filesystem",
@@ -491,7 +491,7 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
         let index = dev_nodes.len();
         let name = disk_node_name(index);
         let device = disk::SharedBlockDevice::new(dev);
-        match axtask::future::block_on(fs::new_default(device.clone())) {
+        match task::future::block_on(fs::new_default(device.clone())) {
             Ok(fs) if fs.name() != "vfat" => {
                 register_mountable_device(&format!("device{index}"), &name, &fs);
             }

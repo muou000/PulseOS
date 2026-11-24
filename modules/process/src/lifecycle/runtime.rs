@@ -72,7 +72,7 @@ impl Process {
     pub fn handle_page_fault(
         &self,
         vaddr: VirtAddr,
-        flags: axhal::trap::PageFaultFlags,
+        flags: hal::trap::PageFaultFlags,
     ) -> AxResult<bool> {
         let aspace_handle = self.aspace_handle();
         self.resolve_page_fault(&aspace_handle, vaddr, flags)
@@ -81,7 +81,7 @@ impl Process {
     pub fn handle_page_fault_with_io(
         &self,
         vaddr: VirtAddr,
-        flags: axhal::trap::PageFaultFlags,
+        flags: hal::trap::PageFaultFlags,
     ) -> AxResult<axmm::PageFaultResolution> {
         self.aspace_handle().resolve_page_fault_with_io(vaddr, flags)
     }
@@ -90,7 +90,7 @@ impl Process {
         &self,
         aspace_handle: &Arc<AddressSpaceLock>,
         vaddr: VirtAddr,
-        flags: axhal::trap::PageFaultFlags,
+        flags: hal::trap::PageFaultFlags,
     ) -> AxResult<bool> {
         aspace_handle.resolve_page_fault(vaddr, flags)
     }
@@ -101,19 +101,19 @@ impl Process {
         unsafe {
             #[cfg(target_arch = "riscv64")]
             {
-                axhal::asm::write_user_page_table(pt_root, asid);
-                axhal::asm::flush_tlb_after_satp_write();
+                hal::asm::write_user_page_table(pt_root, asid);
+                hal::asm::flush_tlb_after_satp_write();
             }
             #[cfg(target_arch = "loongarch64")]
             {
-                axhal::asm::write_user_page_table(pt_root);
-                axhal::asm::write_user_asid(asid);
-                axhal::asm::flush_tlb(None);
+                hal::asm::write_user_page_table(pt_root);
+                hal::asm::write_user_asid(asid);
+                hal::asm::flush_tlb(None);
             }
             #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
             {
-                axhal::asm::write_user_page_table(pt_root);
-                axhal::asm::flush_tlb(None);
+                hal::asm::write_user_page_table(pt_root);
+                hal::asm::flush_tlb(None);
             }
         }
     }
@@ -160,7 +160,7 @@ impl Process {
         let new_asid = new_handle.read().asid();
         let old_handle = self.replace_aspace_handle(new_handle);
         if switch_current_aspace {
-            axtask::set_current_page_table_root(new_pt_root, new_asid);
+            task::set_current_page_table_root(new_pt_root, new_asid);
             self.activate();
         }
         drop(old_handle);
@@ -229,7 +229,7 @@ impl Process {
         *self.exec_path.write() = None;
         self.exec_access.write().clear();
 
-        axlog::debug!("release_zombie_resources: pid={}", self.pid());
+        kernel_log::debug!("release_zombie_resources: pid={}", self.pid());
         Ok(())
     }
 
@@ -243,7 +243,7 @@ impl Process {
         self.wait_task_refs_exited();
         let _ = self.take_task_ref_by_tid(self.pid());
         if let Err(e) = self.shrink_reaped_resources() {
-            axlog::warn!(
+            kernel_log::warn!(
                 "failed to shrink reaped child resources for pid={}: {:?}",
                 self.pid(),
                 e
@@ -255,7 +255,7 @@ impl Process {
 
     /// Accounts and retires a child removed by a consuming wait operation.
     pub fn retire_reaped_child(&self, child: Arc<Process>) {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         let (child_utime_ns, child_stime_ns) = child.snapshot_cpu_time_ns(now_ns);
         self.add_child_time_ns(child_utime_ns, child_stime_ns);
         child.retire_reaped_resources();
@@ -280,7 +280,7 @@ impl Process {
             && let Some(thread) = thread
         {
             thread.request_exec_exit();
-            axtask::interrupt_task(task, true);
+            task::interrupt_task(task, true);
         }
     }
 
@@ -360,11 +360,11 @@ impl Process {
         };
 
         for task in tasks {
-            axlog::debug!("begin_group_exit: waking task {}", task.id_name());
+            kernel_log::debug!("begin_group_exit: waking task {}", task.id_name());
             if let Some(handle) = thread_handle_from_task(&task) {
                 handle.signal_wait_queue().notify_all(false);
             }
-            axtask::interrupt_task(task, true);
+            task::interrupt_task(task, true);
         }
     }
 
@@ -435,7 +435,7 @@ impl Process {
                     .signal_wait_queue()
                     .notify_all_with_context(true, wake_context);
             }
-            axtask::interrupt_task_with_context(task, true, wake_context);
+            task::interrupt_task_with_context(task, true, wake_context);
         }
     }
 
@@ -594,10 +594,10 @@ impl Process {
                 let space = self.aspace_handle().read().observation_identity().0;
                 crate::bpf::mappings::task(task.id().as_u64(), self.pid(), tid, space,
                     self.exec_generation.load(Ordering::Acquire), "exit", 0, &task.name(),
-                    axhal::time::monotonic_time_nanos());
+                    hal::time::monotonic_time_nanos());
             }
             if let Some(handle) = crate::thread_handle_from_task(&task) {
-                let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                let now_ns = hal::time::monotonic_time_nanos() as u64;
                 let (u, s) = handle.snapshot_cpu_time_ns(now_ns);
                 self.time_context
                     .user_time_ns
@@ -608,7 +608,7 @@ impl Process {
             }
         }
         self.thread_exit_event.notify_all(false);
-        axlog::debug!(
+        kernel_log::debug!(
             "finish_thread_exit: pid={}, tid={}, remaining_threads={}, group_exiting={}",
             self.pid(),
             tid,
@@ -626,7 +626,7 @@ impl Process {
         };
         self.exit_code.store(final_code, Ordering::Release);
         if let Err(e) = self.release_zombie_resources(true) {
-            axlog::warn!(
+            kernel_log::warn!(
                 "finish_thread_exit: failed to release zombie resources for pid={}: {:?}",
                 self.pid(),
                 e

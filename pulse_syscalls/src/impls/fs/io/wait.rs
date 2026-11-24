@@ -61,9 +61,9 @@ pub(super) fn readiness_scan_once(pollfds: &mut [pollfd], objects: &[Option<Poll
     ready
 }
 
-fn remaining_duration(deadline: Option<axhal::time::TimeValue>) -> Option<Duration> {
+fn remaining_duration(deadline: Option<hal::time::TimeValue>) -> Option<Duration> {
     deadline.map(|deadline| {
-        let now = axhal::time::monotonic_time();
+        let now = hal::time::monotonic_time();
         if now >= deadline {
             Duration::ZERO
         } else {
@@ -106,7 +106,7 @@ fn objects_may_be_ready(wait_objects: &[(PollObject, i16)], thread: &Thread) -> 
 fn refresh_readiness_wait_queues<'a>(
     wait_objects: &'a [(PollObject, i16)],
     thread: &'a Thread,
-    queues: &mut Vec<&'a axtask::WaitQueue>,
+    queues: &mut Vec<&'a task::WaitQueue>,
 ) -> bool {
     queues.clear();
     for (object, events) in wait_objects {
@@ -123,7 +123,7 @@ fn wait_event_driven(
     thread: &Thread,
     pollfds: &mut [pollfd],
     objects: &[Option<PollObject>],
-    deadline: Option<axhal::time::TimeValue>,
+    deadline: Option<hal::time::TimeValue>,
 ) -> Option<ReadinessWaitResult> {
     let wait_objects = collect_readiness_wait_objects(pollfds, objects)?;
     let mut queues = Vec::with_capacity(wait_objects.len().saturating_add(1).min(128));
@@ -141,7 +141,7 @@ fn wait_event_driven(
         if let Some(Duration::ZERO) = remaining_duration(deadline) {
             break;
         }
-        axtask::yield_now();
+        task::yield_now();
     }
 
     if !yielded_ready {
@@ -159,7 +159,7 @@ fn wait_event_driven(
                 return None;
             }
             let wait_result =
-                axtask::WaitQueue::wait_multiple_timeout_until(&queues, remain, &mut check_ready);
+                task::WaitQueue::wait_multiple_timeout_until(&queues, remain, &mut check_ready);
             if matches!(wait_result, Err(true)) {
                 break;
             }
@@ -173,7 +173,7 @@ fn wait_fallback(
     thread: &Thread,
     pollfds: &mut [pollfd],
     objects: &[Option<PollObject>],
-    deadline: Option<axhal::time::TimeValue>,
+    deadline: Option<hal::time::TimeValue>,
 ) -> ReadinessWaitResult {
     let mut idle_rounds = 0usize;
 
@@ -187,13 +187,13 @@ fn wait_fallback(
         }
 
         if let Some(deadline) = deadline {
-            let now = axhal::time::monotonic_time();
+            let now = hal::time::monotonic_time();
             if now >= deadline {
                 return ReadinessWaitResult::TimedOut;
             }
             idle_rounds = idle_rounds.saturating_add(1);
             if idle_rounds <= ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
+                task::yield_now();
             } else {
                 let sleep_dur = core::cmp::min(deadline - now, SLEEP_QUANTUM);
                 if sleep_dur > Duration::ZERO {
@@ -201,13 +201,13 @@ fn wait_fallback(
                         .signal_wait_queue()
                         .wait_timeout_until(sleep_dur, || thread.has_pending_signal());
                 } else {
-                    axtask::yield_now();
+                    task::yield_now();
                 }
             }
         } else {
             idle_rounds = idle_rounds.saturating_add(1);
             if idle_rounds <= ACTIVE_YIELD_ROUNDS {
-                axtask::yield_now();
+                task::yield_now();
             } else {
                 thread
                     .signal_wait_queue()
@@ -237,7 +237,7 @@ pub(super) fn wait_for_readiness(
     thread: &Thread,
     pollfds: &mut [pollfd],
     objects: &[Option<PollObject>],
-    deadline: Option<axhal::time::TimeValue>,
+    deadline: Option<hal::time::TimeValue>,
 ) -> ReadinessWaitResult {
     let ready = readiness_scan_once(pollfds, objects);
     if ready > 0 {

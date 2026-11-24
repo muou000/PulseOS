@@ -9,9 +9,9 @@ use core::{
 };
 
 use axerrno::{LinuxError, LinuxResult};
-use axhal::time::monotonic_time;
-use axtask::future::CpuExecutor;
-use axtask::{AxCpuMask, AxTaskWeak, TaskInner, WaitQueue};
+use hal::time::monotonic_time;
+use task::future::CpuExecutor;
+use task::{AxCpuMask, AxTaskWeak, TaskInner, WaitQueue};
 use kspin::SpinNoIrq;
 use linux_raw_sys::io_uring::{IORING_SETUP_SQ_AFF, io_uring_params};
 
@@ -31,12 +31,12 @@ impl SqPollTarget {
             return Ok(Self::Unbound);
         }
         let cpu = params.sq_thread_cpu as usize;
-        if cpu >= axhal::cpu_num() || !axhal::is_cpu_online(cpu) {
+        if cpu >= hal::cpu_num() || !hal::is_cpu_online(cpu) {
             return Err(LinuxError::EINVAL);
         }
-        if axtask::is_sqpoll_service_cpu(cpu) {
+        if task::is_sqpoll_service_cpu(cpu) {
             Ok(Self::ReservedService(CpuExecutor::get(cpu)?))
-        } else if axtask::current().cpumask().get(cpu) {
+        } else if task::current().cpumask().get(cpu) {
             Ok(Self::CreatorAllowed(cpu))
         } else {
             Err(LinuxError::EINVAL)
@@ -105,14 +105,14 @@ impl IoUringState {
         if !matches!(poll.target, SqPollTarget::ReservedService(_)) {
             return;
         }
-        for cpu in (0..axhal::cpu_num()).filter(|&cpu| axhal::is_cpu_online(cpu)) {
-            axlog::info!(
+        for cpu in (0..hal::cpu_num()).filter(|&cpu| hal::is_cpu_online(cpu)) {
+            kernel_log::info!(
                 "SQPOLL observe ring={} phase={phase} cpu={cpu} user_dispatch={}",
                 self.ring_id,
                 crate::user_dispatches(cpu)
             );
         }
-        axlog::info!(
+        kernel_log::info!(
             "SQPOLL {phase} ring={} enter_calls={}",
             self.ring_id,
             poll.enter_calls.load(Ordering::Relaxed)
@@ -150,14 +150,14 @@ impl IoUringState {
                 drop(files);
             },
             alloc::format!("iou-sqp-{}", poll.owner_pid),
-            axconfig::TASK_STACK_SIZE,
+            config::TASK_STACK_SIZE,
         )?;
         if let Some(cpu) = cpu {
             task.set_cpumask(AxCpuMask::one_shot(cpu));
         }
         let task = task.into_arc();
         *poll.task.lock() = Arc::downgrade(&task);
-        axtask::spawn_task_ref(task);
+        task::spawn_task_ref(task);
         Ok(())
     }
 
@@ -173,10 +173,10 @@ impl IoUringState {
             let head = poll.consumed_head.load(Ordering::Acquire);
             if self.shared.sq_pending(head) != 0 {
                 if let Some(cpu) = report_cpu.take() {
-                    axlog::info!(
+                    kernel_log::info!(
                         "SQPOLL affinity requested={} running={}",
                         cpu,
-                        axhal::percpu::this_cpu_id()
+                        hal::percpu::this_cpu_id()
                     );
                 }
                 self.submit_sqes(self.shared.layout().sq_entries, &owner);
@@ -192,12 +192,12 @@ impl IoUringState {
                 self.shared.clear_sq_need_wakeup();
                 deadline = monotonic_time() + idle;
             }
-            axtask::yield_now();
+            task::yield_now();
         }
         // An inherited mapping must direct its next publisher to enter, which reports
         // EOWNERDEAD once the owner's poller has exited.
         self.shared.set_sq_need_wakeup();
-        axlog::debug!(
+        kernel_log::debug!(
             "SQPOLL stopped ring={} owner={}",
             self.ring_id,
             poll.owner_pid
@@ -218,7 +218,7 @@ impl IoUringState {
         let poll = self.sqpoll.as_ref().expect("SQPOLL enter");
         #[cfg(feature = "guest-checks")]
         if self.sqpoll_service_cpu().is_some() {
-            axlog::info!(
+            kernel_log::info!(
                 "SQPOLL enter ring={} wakeup={wakeup} wait={wait}",
                 self.ring_id
             );

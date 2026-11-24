@@ -9,10 +9,10 @@ repository.workspace = true
 
 [features]
 default = ["irq", "ext4"]
-irq = ["axtask/irq"]
+irq = ["task/irq"]
 ext4 = ["axfs/ext4"]
 fat = ["axfs/fat"]
-bpf-trace = ["axtask/bpf-trace", "pulse_core/bpf-trace"]
+bpf-trace = ["task/bpf-trace", "pulse_core/bpf-trace"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 guest-checks = ["pulse_core/guest-checks"]
 file-io-test = ["axfs/file-io-test", "pulse_core/file-io-test"]
@@ -28,13 +28,13 @@ spin.workspace = true
 
 [target.'cfg(target_os = "none")'.dependencies]
 ipc.workspace = true
-axcpu.workspace = true
-axalloc.workspace = true
+cpu.workspace = true
+kernel_alloc.workspace = true
 axmm.workspace = true
-axhal.workspace = true
-axlog.workspace = true
-axtask = { workspace = true, features = ["multitask"] }
-axconfig.workspace = true
+hal.workspace = true
+kernel_log.workspace = true
+task = { workspace = true, features = ["multitask"] }
+config.workspace = true
 axnet.workspace = true
 axio.workspace = true
 axpoll.workspace = true

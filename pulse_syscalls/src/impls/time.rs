@@ -39,18 +39,18 @@ fn write_zero_timespec(user_addr: usize) -> Result<(), LinuxError> {
 
 fn clock_now(clockid: i32) -> Result<Duration, LinuxError> {
     match parse_clock(clockid)? {
-        ClockSource::Realtime => Ok(axhal::time::wall_time()),
-        ClockSource::Monotonic => Ok(axhal::time::monotonic_time()),
+        ClockSource::Realtime => Ok(hal::time::wall_time()),
+        ClockSource::Monotonic => Ok(hal::time::monotonic_time()),
         ClockSource::ProcessCpu => {
             let thread = pulse_core::task::current_thread().map_err(LinuxError::from)?;
             let process = thread.process();
-            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            let now_ns = hal::time::monotonic_time_nanos() as u64;
             let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
             Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
         }
         ClockSource::ThreadCpu => {
             let thread = pulse_core::task::current_thread().map_err(LinuxError::from)?;
-            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            let now_ns = hal::time::monotonic_time_nanos() as u64;
             let (utime_ns, stime_ns) = thread.snapshot_cpu_time_ns(now_ns);
             Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
         }
@@ -82,21 +82,21 @@ fn sleep_for_duration_interruptible(dur: Duration) -> Result<Duration, LinuxErro
     if current_has_pending_signal() || current_is_group_exiting() {
         return Ok(dur);
     }
-    let start = axhal::time::monotonic_time();
+    let start = hal::time::monotonic_time();
     let deadline = start.saturating_add(dur);
     loop {
-        let now = axhal::time::monotonic_time();
+        let now = hal::time::monotonic_time();
         if now >= deadline {
             return Ok(Duration::ZERO);
         }
         if current_has_pending_signal() || current_is_group_exiting() {
             return Ok(deadline.saturating_sub(now));
         }
-        axtask::sleep_until(deadline);
+        task::sleep_until(deadline);
     }
 }
 
-static REALTIME_SLEEPERS: spin::Mutex<alloc::vec::Vec<axtask::AxTaskRef>> =
+static REALTIME_SLEEPERS: spin::Mutex<alloc::vec::Vec<task::AxTaskRef>> =
     spin::Mutex::new(alloc::vec::Vec::new());
 
 fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Duration, LinuxError> {
@@ -107,13 +107,13 @@ fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Dur
 
     loop {
         let target_mono = if clockid as u32 == CLOCK_REALTIME {
-            let offset = Duration::from_nanos(axhal::time::current_epochoffset_nanos());
+            let offset = Duration::from_nanos(hal::time::current_epochoffset_nanos());
             target.saturating_sub(offset)
         } else {
             target
         };
 
-        let now = axhal::time::monotonic_time();
+        let now = hal::time::monotonic_time();
         if now >= target_mono {
             return Ok(Duration::ZERO);
         }
@@ -123,14 +123,14 @@ fn sleep_until_clock_interruptible(clockid: i32, target: Duration) -> Result<Dur
         }
 
         if clockid as u32 == CLOCK_REALTIME {
-            let current_task = axtask::current().as_task_ref().clone();
+            let current_task = task::current().as_task_ref().clone();
             REALTIME_SLEEPERS.lock().push(current_task);
         }
 
-        axtask::sleep_until(target_mono);
+        task::sleep_until(target_mono);
 
         if clockid as u32 == CLOCK_REALTIME {
-            let current_task = axtask::current().as_task_ref().clone();
+            let current_task = task::current().as_task_ref().clone();
             let mut guard = REALTIME_SLEEPERS.lock();
             if let Some(pos) = guard
                 .iter()
@@ -161,7 +161,7 @@ pulse_user_abi::impl_user_abi_struct! {
 }
 
 pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
-    axlog::trace!("sys_nanosleep: req={:#x}, rem={:#x}", req, rem);
+    kernel_log::trace!("sys_nanosleep: req={:#x}, rem={:#x}", req, rem);
 
     if req == 0 {
         return -LinuxError::EFAULT.code() as isize;
@@ -170,7 +170,7 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
     let req_ts = match read_user_timespec(req).and_then(timespec_to_duration) {
         Ok(ts) => ts,
         Err(e) => {
-            axlog::warn!("read user timespec failed: addr={:#x}, err={:?}", req, e);
+            kernel_log::warn!("read user timespec failed: addr={:#x}, err={:?}", req, e);
             return -e.code() as isize;
         }
     };
@@ -180,7 +180,7 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
             Ok(remaining) if remaining > Duration::ZERO => {
                 if rem != 0 {
                     if let Err(e) = write_user_timespec(rem, duration_to_timespec(remaining)) {
-                        axlog::warn!("write user timespec failed: addr={:#x}, err={:?}", rem, e);
+                        kernel_log::warn!("write user timespec failed: addr={:#x}, err={:?}", rem, e);
                         return -e.code() as isize;
                     }
                 }
@@ -193,7 +193,7 @@ pub fn sys_nanosleep(req: usize, rem: usize) -> isize {
 
     if rem != 0 {
         if let Err(e) = write_zero_timespec(rem) {
-            axlog::warn!("write user timespec failed: addr={:#x}, err={:?}", rem, e);
+            kernel_log::warn!("write user timespec failed: addr={:#x}, err={:?}", rem, e);
             return -e.code() as isize;
         }
     }
@@ -258,7 +258,7 @@ pub fn sys_clock_getres(clockid: i32, res: usize) -> isize {
 
 /// sys_clock_gettime - 获取时钟时间
 pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
-    axlog::trace!("sys_clock_gettime: clockid={}, tp={:#x}", clockid, tp);
+    kernel_log::trace!("sys_clock_gettime: clockid={}, tp={:#x}", clockid, tp);
     if tp == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -269,14 +269,14 @@ pub fn sys_clock_gettime(clockid: i32, tp: usize) -> isize {
     };
 
     write_user_timespec(tp, now).map(|_| 0).unwrap_or_else(|e| {
-        axlog::warn!("write user timespec failed: addr={:#x}, err={:?}", tp, e);
+        kernel_log::warn!("write user timespec failed: addr={:#x}, err={:?}", tp, e);
         -LinuxError::EFAULT.code() as isize
     })
 }
 
 /// sys_clock_settime - 设置时钟时间
 pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
-    axlog::trace!("sys_clock_settime: clockid={}, tp={:#x}", clockid, tp);
+    kernel_log::trace!("sys_clock_settime: clockid={}, tp={:#x}", clockid, tp);
 
     if tp == 0 {
         return -LinuxError::EFAULT.code() as isize;
@@ -289,7 +289,7 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
     let ts = match read_user_timespec(tp) {
         Ok(ts) => ts,
         Err(e) => {
-            axlog::warn!("read user timespec failed: addr={:#x}, err={:?}", tp, e);
+            kernel_log::warn!("read user timespec failed: addr={:#x}, err={:?}", tp, e);
             return -e.code() as isize;
         }
     };
@@ -308,11 +308,11 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
 
     let req_ts = Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
 
-    let now_mono_ns = axhal::time::monotonic_time_nanos();
+    let now_mono_ns = hal::time::monotonic_time_nanos();
     let new_wall_ns = req_ts.as_nanos() as u64;
     let new_offset = new_wall_ns.wrapping_sub(now_mono_ns);
 
-    axhal::time::set_epochoffset_nanos(new_offset);
+    hal::time::set_epochoffset_nanos(new_offset);
 
     // Synchronize vDSO wall time instantly
     starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
@@ -324,7 +324,7 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
         core::mem::take(&mut *guard)
     };
     for task in sleepers {
-        axtask::wake_task(task, true);
+        task::wake_task(task, true);
     }
 
     // Adjust absolute POSIX timers
@@ -332,8 +332,8 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
 
     // Check if any timers expired due to the clock jump, and reprogram the timer
     let _guard = kernel_guard::NoPreemptIrqSave::new();
-    axtask::check_events();
-    axtask::reprogram_timer();
+    task::check_events();
+    task::reprogram_timer();
     drop(_guard);
 
     0
@@ -341,26 +341,26 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
 
 /// sys_gettimeofday - 获取墙上时间
 pub fn sys_gettimeofday(tv: usize, tz: usize) -> isize {
-    axlog::trace!("sys_gettimeofday: tv={:#x}, tz={:#x}", tv, tz);
+    kernel_log::trace!("sys_gettimeofday: tv={:#x}, tz={:#x}", tv, tz);
 
     if tv == 0 {
         return 0;
     }
 
-    let now = axhal::time::wall_time();
+    let now = hal::time::wall_time();
     let timeval = timeval {
         tv_sec: now.as_secs() as _,
         tv_usec: now.subsec_micros() as _,
     };
     write_user_value(tv, &timeval).map(|_| 0).unwrap_or_else(|e| {
-        axlog::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
+        kernel_log::warn!("sys_gettimeofday: user write failed at {:#x}: {:?}", tv, e);
         -LinuxError::EFAULT.code() as isize
     })
 }
 
 /// sys_settimeofday - 设置墙上时间
 pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
-    axlog::trace!("sys_settimeofday: tv={:#x}, tz={:#x}", tv, tz);
+    kernel_log::trace!("sys_settimeofday: tv={:#x}, tz={:#x}", tv, tz);
 
     if tv == 0 {
         return 0;
@@ -369,7 +369,7 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
     let req_tv = match read_user_timeval(tv) {
         Ok(t) => t,
         Err(e) => {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_settimeofday: read user timeval failed: addr={:#x}, err={:?}",
                 tv,
                 e
@@ -398,10 +398,10 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
         None => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let now_mono_ns = axhal::time::monotonic_time_nanos();
+    let now_mono_ns = hal::time::monotonic_time_nanos();
     let new_offset = new_wall_ns.wrapping_sub(now_mono_ns);
 
-    axhal::time::set_epochoffset_nanos(new_offset);
+    hal::time::set_epochoffset_nanos(new_offset);
 
     // Synchronize vDSO wall time instantly
     starry_vdso::vdso::set_vdso_epoch_offset(new_offset);
@@ -413,7 +413,7 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
         core::mem::take(&mut *guard)
     };
     for task in sleepers {
-        axtask::wake_task(task, true);
+        task::wake_task(task, true);
     }
 
     // Adjust absolute POSIX timers
@@ -421,15 +421,15 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
 
     // Check if any timers expired due to the clock jump, and reprogram the timer
     let _guard = kernel_guard::NoPreemptIrqSave::new();
-    axtask::check_events();
-    axtask::reprogram_timer();
+    task::check_events();
+    task::reprogram_timer();
     drop(_guard);
 
     0
 }
 
 pub fn sys_times(tbuf: usize) -> isize {
-    axlog::debug!("sys_times: tbuf={:#x}", tbuf);
+    kernel_log::debug!("sys_times: tbuf={:#x}", tbuf);
 
     let thread = match pulse_core::task::current_thread() {
         Ok(thread) => thread,
@@ -437,7 +437,7 @@ pub fn sys_times(tbuf: usize) -> isize {
     };
     let process = thread.process();
 
-    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+    let now_ns = hal::time::monotonic_time_nanos() as u64;
     let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
     let (cutime_ns, cstime_ns) = process.snapshot_children_cpu_time_ns();
 
@@ -451,7 +451,7 @@ pub fn sys_times(tbuf: usize) -> isize {
             tms_cstime: ns_to_clk_ticks(cstime_ns) as c_long,
         };
         if let Err(e) = write_user_value(tbuf, &tms) {
-            axlog::warn!("sys_times: user write failed at {:#x}: {:?}", tbuf, e);
+            kernel_log::warn!("sys_times: user write failed at {:#x}: {:?}", tbuf, e);
             return -LinuxError::EFAULT.code() as isize;
         }
     }
@@ -507,7 +507,7 @@ fn write_user_itimerval(addr: usize, val: &Itimerval) -> Result<(), LinuxError> 
 }
 
 pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_setitimer: which={}, new_value={:#x}, old_value={:#x}",
         which,
         new_value,
@@ -614,7 +614,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
 }
 
 pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_getitimer: which={}, curr_value={:#x}",
         which,
         curr_value
@@ -752,7 +752,7 @@ static GLOBAL_TIMEX: spin::Mutex<timex> = spin::Mutex::new(timex {
 });
 
 pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
-    axlog::trace!("sys_clock_adjtime: clockid={}, buf={:#x}", clockid, buf);
+    kernel_log::trace!("sys_clock_adjtime: clockid={}, buf={:#x}", clockid, buf);
 
     if clockid != CLOCK_REALTIME as i32 {
         return -LinuxError::EINVAL.code() as isize;
@@ -826,7 +826,7 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
         }
     }
 
-    let now = axhal::time::wall_time();
+    let now = hal::time::wall_time();
     if (g.status & STA_NANO) != 0 {
         g.time.tv_sec = now.as_secs() as _;
         g.time.tv_usec = now.subsec_nanos() as _;
@@ -849,7 +849,7 @@ pub fn sys_adjtimex(buf: usize) -> isize {
 }
 
 pub fn sys_timer_create(clockid: i32, sevp: usize, timerid: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_timer_create: clockid={}, sevp={:#x}, timerid={:#x}",
         clockid,
         sevp,
@@ -914,7 +914,7 @@ pub fn sys_timer_settime(
     new_value: usize,
     old_value: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_timer_settime: timerid={}, flags={}, new_value={:#x}, old_value={:#x}",
         timerid,
         flags,
@@ -958,7 +958,7 @@ pub fn sys_timer_settime(
     let generation = proc.next_posix_timer_generation();
 
     if old_value != 0 {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         let prev_val_ns = if timer.next_deadline_ns == 0 {
             0
         } else if now_ns >= timer.next_deadline_ns {
@@ -986,11 +986,11 @@ pub fn sys_timer_settime(
     if val_dur.is_zero() {
         timer.next_deadline_ns = 0;
     } else {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         let deadline = if (flags & TIMER_ABSTIME as usize) != 0 {
             let req_ns = val_dur.as_nanos() as u64;
             if timer.clock_id as u32 == CLOCK_REALTIME {
-                let offset = axhal::time::current_epochoffset_nanos();
+                let offset = hal::time::current_epochoffset_nanos();
                 req_ns.saturating_sub(offset)
             } else {
                 req_ns
@@ -1006,7 +1006,7 @@ pub fn sys_timer_settime(
 }
 
 pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_timer_gettime: timerid={}, curr_value={:#x}",
         timerid,
         curr_value
@@ -1030,7 +1030,7 @@ pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
         None => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+    let now_ns = hal::time::monotonic_time_nanos() as u64;
     let prev_val_ns = if timer.next_deadline_ns == 0 {
         0
     } else if now_ns >= timer.next_deadline_ns {
@@ -1049,7 +1049,7 @@ pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
 }
 
 pub fn sys_timer_getoverrun(timerid: usize) -> isize {
-    axlog::debug!("sys_timer_getoverrun: timerid={}", timerid);
+    kernel_log::debug!("sys_timer_getoverrun: timerid={}", timerid);
 
     if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
         return -LinuxError::EINVAL.code() as isize;
@@ -1068,7 +1068,7 @@ pub fn sys_timer_getoverrun(timerid: usize) -> isize {
 }
 
 pub fn sys_timer_delete(timerid: usize) -> isize {
-    axlog::debug!("sys_timer_delete: timerid={}", timerid);
+    kernel_log::debug!("sys_timer_delete: timerid={}", timerid);
 
     if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
         return -LinuxError::EINVAL.code() as isize;
@@ -1089,7 +1089,7 @@ pub fn sys_timer_delete(timerid: usize) -> isize {
 }
 
 pub fn sys_timerfd_create(clockid: i32, flags: u32) -> isize {
-    axlog::debug!("sys_timerfd_create: clockid={}, flags={:#x}", clockid, flags);
+    kernel_log::debug!("sys_timerfd_create: clockid={}, flags={:#x}", clockid, flags);
     let entry = match pulse_core::fd_table::timerfd_entry(clockid, flags) {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
@@ -1114,7 +1114,7 @@ fn lookup_timerfd(fd: usize) -> Result<pulse_core::fd_table::FdEntry, LinuxError
 }
 
 pub fn sys_timerfd_settime(fd: usize, flags: u32, new_value: usize, old_value: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_timerfd_settime: fd={}, flags={:#x}, new_value={:#x}, old_value={:#x}",
         fd,
         flags,
@@ -1162,7 +1162,7 @@ pub fn sys_timerfd_settime(fd: usize, flags: u32, new_value: usize, old_value: u
 }
 
 pub fn sys_timerfd_gettime(fd: usize, curr_value: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_timerfd_gettime: fd={}, curr_value={:#x}",
         fd,
         curr_value

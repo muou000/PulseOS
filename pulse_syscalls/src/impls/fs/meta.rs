@@ -133,7 +133,7 @@ pub fn sys_fstatfs(fd: usize, buf: usize) -> isize {
 }
 
 pub fn sys_fstat(fd: usize, statbuf: usize) -> isize {
-    axlog::debug!("sys_fstat: fd={}, statbuf={:#x}", fd, statbuf);
+    kernel_log::debug!("sys_fstat: fd={}, statbuf={:#x}", fd, statbuf);
     if statbuf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -177,7 +177,7 @@ pub fn sys_readlinkat(dirfd: i32, pathname: usize, buf: usize, bufsiz: usize) ->
         Ok(loc) => loc,
         Err(e) => return -e.code() as isize,
     };
-    let target = match axtask::future::block_on(location.read_link()) {
+    let target = match task::future::block_on(location.read_link()) {
         Ok(target) => target,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -282,7 +282,7 @@ pub fn sys_statx(
 }
 
 pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_utimensat: dirfd={}, pathname={:#x}, times={:#x}, flags={:#x}, sizeof(timespec)={}",
         dirfd,
         pathname,
@@ -299,7 +299,7 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         match resolve_location_at_ptr(dirfd, pathname, flags | AT_EMPTY_PATH as usize) {
             Ok(location) => location,
             Err(e) => {
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_utimensat: resolve_location failed for pathname=NULL: {:?}",
                     e
                 );
@@ -310,13 +310,13 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         match resolve_location_at_ptr(dirfd, pathname, flags) {
             Ok(location) => location,
             Err(e) => {
-                axlog::warn!("sys_utimensat: resolve_location failed: {:?}", e);
+                kernel_log::warn!("sys_utimensat: resolve_location failed: {:?}", e);
                 return -e.code() as isize;
             }
         }
     };
 
-    let now = axhal::time::wall_time();
+    let now = hal::time::wall_time();
     let (atime, mtime) = if times == 0 {
         (Some(now), Some(now))
     } else {
@@ -324,7 +324,7 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         {
             Ok(atime) => atime,
             Err(e) => {
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_utimensat: read_user_timespec(atime) failed at {:#x}: {:?}",
                     times,
                     e
@@ -337,7 +337,7 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
             match read_user_timespec(mtime_addr).and_then(|ts| timespec_to_update_time(ts, now)) {
                 Ok(mtime) => mtime,
                 Err(e) => {
-                    axlog::warn!(
+                    kernel_log::warn!(
                         "sys_utimensat: read_user_timespec(mtime) failed at {:#x}: {:?}",
                         mtime_addr,
                         e
@@ -362,14 +362,14 @@ pub fn sys_utimensat(dirfd: i32, pathname: usize, times: usize, flags: usize) ->
         return -LinuxError::EROFS.code() as isize;
     }
 
-    match axtask::future::block_on(location.update_metadata(update)) {
+    match task::future::block_on(location.update_metadata(update)) {
         Ok(()) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
 }
 
 pub fn sys_faccessat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_faccessat: dirfd={}, pathname={:#x}, mode={:#o}, flags={:#x}",
         dirfd,
         pathname,
@@ -427,7 +427,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
     } else {
         "<null>"
     };
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_fchmodat: dirfd={}, pathname={:#x} (\"{}\"), mode={:#o}, flags={:#x}",
         dirfd,
         pathname,
@@ -439,7 +439,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
     // AT_SYMLINK_NOFOLLOW 和 AT_EMPTY_PATH 是允许的 flags
     let supported_flags = AT_SYMLINK_NOFOLLOW as usize | AT_EMPTY_PATH as usize;
     if (flags & !supported_flags) != 0 {
-        axlog::warn!(
+        kernel_log::warn!(
             "sys_fchmodat: unsupported flags={:#x}, returning EINVAL",
             flags
         );
@@ -458,7 +458,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
             if crate::impls::fs::common::is_location_readonly(&location) {
                 return -LinuxError::EROFS.code() as isize;
             }
-            let current_meta = match axtask::future::block_on(location.metadata()) {
+            let current_meta = match task::future::block_on(location.metadata()) {
                 Ok(meta) => meta,
                 Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
             };
@@ -487,7 +487,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
                     _ => false,
                 };
                 if should_clear {
-                    axlog::debug!(
+                    kernel_log::debug!(
                         "sys_fchmodat: clearing S_ISGID on \"{}\" (non-root, GID mismatch)",
                         path_str
                     );
@@ -495,12 +495,12 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
                 }
             }
 
-            match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+            match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
                 mode: Some(perm),
                 ..Default::default()
             })) {
                 Ok(()) => {
-                    axlog::debug!(
+                    kernel_log::debug!(
                         "sys_fchmodat: path \"{}\" resolved and metadata updated OK, returning 0",
                         path_str
                     );
@@ -508,7 +508,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
                 }
                 Err(e) => {
                     let err = LinuxError::from(e.canonicalize());
-                    axlog::warn!(
+                    kernel_log::warn!(
                         "sys_fchmodat: path \"{}\" update_metadata failed: {:?}, returning {}",
                         path_str,
                         err,
@@ -519,7 +519,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
             }
         }
         Err(e) => {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_fchmodat: path \"{}\" resolve failed: {:?} (code={}), returning {}",
                 path_str,
                 e,
@@ -533,7 +533,7 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
 
 /// `fchmod(fd, mode)` — 设置打开文件的权限位。
 pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
-    axlog::debug!("sys_fchmod: fd={}, mode={:#o}", fd, mode);
+    kernel_log::debug!("sys_fchmod: fd={}, mode={:#o}", fd, mode);
 
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
@@ -551,7 +551,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         return -LinuxError::EROFS.code() as isize;
     }
 
-    let current_meta = match axtask::future::block_on(location.metadata()) {
+    let current_meta = match task::future::block_on(location.metadata()) {
         Ok(meta) => meta,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -580,7 +580,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
             _ => false,
         };
         if should_clear {
-            axlog::debug!(
+            kernel_log::debug!(
                 "sys_fchmod: clearing S_ISGID on fd={} (non-root, GID mismatch)",
                 fd
             );
@@ -588,12 +588,12 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         }
     }
 
-    match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+    match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
         mode: Some(perm),
         ..Default::default()
     })) {
         Ok(()) => {
-            axlog::debug!(
+            kernel_log::debug!(
                 "sys_fchmod: fd={} resolved and metadata updated OK, returning 0",
                 fd
             );
@@ -601,7 +601,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         }
         Err(e) => {
             let err = LinuxError::from(e.canonicalize());
-            axlog::debug!(
+            kernel_log::debug!(
                 "sys_fchmod: fd={} update_metadata failed: {:?}, returning {}",
                 fd,
                 err,
@@ -628,7 +628,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
     } else {
         "<null>"
     };
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_fchownat: dirfd={}, path=\"{}\", uid={}, gid={}, flags={:#x}",
         dirfd,
         path_str,
@@ -642,7 +642,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
             if crate::impls::fs::common::is_location_readonly(&location) {
                 return -LinuxError::EROFS.code() as isize;
             }
-            let current_meta = match axtask::future::block_on(location.metadata()) {
+            let current_meta = match task::future::block_on(location.metadata()) {
                 Ok(meta) => meta,
                 Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
             };
@@ -705,7 +705,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
                 }
             }
 
-            match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+            match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
                 owner: Some((new_uid, new_gid)),
                 mode: Some(new_mode),
                 ..Default::default()
@@ -720,7 +720,7 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
 
 /// `fchown(fd, uid, gid)` — 设置打开文件的所有者。
 pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
-    axlog::debug!("sys_fchown: fd={}, uid={}, gid={}", fd, uid, gid);
+    kernel_log::debug!("sys_fchown: fd={}, uid={}, gid={}", fd, uid, gid);
 
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
@@ -738,7 +738,7 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
         return -LinuxError::EROFS.code() as isize;
     }
 
-    let current_meta = match axtask::future::block_on(location.metadata()) {
+    let current_meta = match task::future::block_on(location.metadata()) {
         Ok(meta) => meta,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -801,7 +801,7 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
         }
     }
 
-    match axtask::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+    match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
         owner: Some((new_uid, new_gid)),
         mode: Some(new_mode),
         ..Default::default()

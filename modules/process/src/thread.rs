@@ -5,8 +5,8 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axhal::context::TrapFrame;
-use axtask::{
+use hal::context::TrapFrame;
+use task::{
     AxTaskRef, AxTaskWeak, TaskExtSwitch, TaskId, WaitQueue, WakeContext, WakeSource, def_task_ext,
 };
 use kspin::SpinNoIrq;
@@ -49,8 +49,8 @@ pub struct ThreadHandle(Arc<Thread>);
 def_task_ext!(ThreadHandle);
 
 #[cfg(feature = "guest-checks")]
-static USER_DISPATCHES: [AtomicU64; axconfig::plat::MAX_CPU_NUM] =
-    [const { AtomicU64::new(0) }; axconfig::plat::MAX_CPU_NUM];
+static USER_DISPATCHES: [AtomicU64; config::plat::MAX_CPU_NUM] =
+    [const { AtomicU64::new(0) }; config::plat::MAX_CPU_NUM];
 
 /// Cumulative scheduler switches into user threads on this logical CPU.
 #[cfg(feature = "guest-checks")]
@@ -188,7 +188,7 @@ impl Thread {
     pub(crate) fn set_tid_for_exec(&self, tid: u64) {
         self.tid.store(tid, Ordering::Release);
         #[cfg(feature = "bpf-trace")]
-        if let Some(task) = axtask::current_may_uninit() {
+        if let Some(task) = task::current_may_uninit() {
             task.set_bpf_identity(self.sampling_pid, tid);
         }
     }
@@ -239,7 +239,7 @@ impl Thread {
             None
         };
         if let Some(task) = target_task {
-            axtask::interrupt_task_with_context(task, true, wake_context);
+            task::interrupt_task_with_context(task, true, wake_context);
         }
         deliverable
     }
@@ -339,7 +339,7 @@ impl Thread {
     }
 
     pub fn prepare_for_user_entry(&self) -> AxResult<()> {
-        axlog::debug!(
+        kernel_log::debug!(
             "prepare_for_user_entry: tid={}, group_exiting={}",
             self.tid(),
             self.process().group_exiting()
@@ -361,7 +361,7 @@ impl Thread {
     }
 
     pub fn mark_user_resume(&self) {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         self.mark_user_resume_at(now_ns);
     }
 
@@ -407,10 +407,10 @@ impl Thread {
         if robust_list_head != 0
             && let Err(e) = self.process().exit_robust_list(robust_list_head)
         {
-            axlog::warn!("failed to exit robust list: {:?}", e);
+            kernel_log::warn!("failed to exit robust list: {:?}", e);
         }
         if let Err(e) = self.clear_child_tid_on_exit() {
-            axlog::warn!("failed to clear child tid on exit: {:?}", e);
+            kernel_log::warn!("failed to clear child tid on exit: {:?}", e);
         }
         self.process().futex_prune_empty();
     }
@@ -418,7 +418,7 @@ impl Thread {
     pub fn exit_current(&self, exit_code: i32) -> ! {
         #[cfg(feature = "bpf-trace")]
         let mapping_transition = crate::bpf::mappings::MutationGuard::task(self.sampling_task_id());
-        axlog::debug!(
+        kernel_log::debug!(
             "exit_current: tid={}, group_exiting={}, exit_code={}",
             self.tid(),
             self.process().group_exiting(),
@@ -434,7 +434,7 @@ impl Thread {
         self.process().finish_thread_exit(tid, final_code);
         #[cfg(feature = "bpf-trace")]
         drop(mapping_transition);
-        axtask::exit(final_code);
+        task::exit(final_code);
     }
 
     /// Immutable process identity, available without upgrading a Weak in IRQ.
@@ -467,19 +467,19 @@ impl Thread {
 
     pub fn on_enter_cpu(self: &Arc<Self>) {
         let _irq_guard = kernel_guard::IrqSave::new();
-        self.sampling_clock.lock().enter(axhal::time::monotonic_time_nanos());
+        self.sampling_clock.lock().enter(hal::time::monotonic_time_nanos());
     }
 
     pub fn on_leave_cpu(&self) {
         let _irq_guard = kernel_guard::IrqSave::new();
-        self.sampling_clock.lock().leave(axhal::time::monotonic_time_nanos());
+        self.sampling_clock.lock().leave(hal::time::monotonic_time_nanos());
     }
 }
 
 impl TaskExtSwitch for ThreadHandle {
     fn on_enter(&self) {
         #[cfg(feature = "guest-checks")]
-        USER_DISPATCHES[axhal::percpu::this_cpu_id()].fetch_add(1, Ordering::Relaxed);
+        USER_DISPATCHES[hal::percpu::this_cpu_id()].fetch_add(1, Ordering::Relaxed);
         self.0.on_enter_cpu();
     }
 

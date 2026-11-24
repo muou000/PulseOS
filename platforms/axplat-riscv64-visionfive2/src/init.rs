@@ -10,14 +10,14 @@ impl InitIf for InitIfImpl {
     fn init_early(_cpu_id: usize, mbi: usize) {
         crate::console::init_early();
         crate::topology::init_platform_from_dtb(mbi);
-        axcpu::init::init_trap();
+        cpu::init::init_trap();
         crate::time::init_early(mbi);
     }
 
     /// Initializes the platform at the early stage for secondary cores.
     #[cfg(feature = "smp")]
     fn init_early_secondary(_cpu_id: usize) {
-        axcpu::init::init_trap();
+        cpu::init::init_trap();
     }
 
     /// Initializes the platform at the later stage for the primary core.

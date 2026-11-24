@@ -3,9 +3,9 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use axalloc::GlobalPage;
+use kernel_alloc::GlobalPage;
 use axerrno::{AxError, AxResult, LinuxError, ax_err};
-use axhal::paging::MappingFlags;
+use hal::paging::MappingFlags;
 use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 use spin::{Lazy, Mutex};
 

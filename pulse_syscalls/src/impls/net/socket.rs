@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
 
 use axerrno::LinuxError;
-use axlog::*;
+use kernel_log::*;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{AF_INET, AF_INET6, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP},

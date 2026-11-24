@@ -4,15 +4,15 @@
 use alloc::sync::Arc;
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, File, OpenOptions, ROOT_FS_CONTEXT};
-use axhal::{paging::MappingFlags, trap::PageFaultFlags};
+use hal::{paging::MappingFlags, trap::PageFaultFlags};
 use axmm::{
     FileMappingPageBatch, FileMappingSource, FilePageIo, FilePageLoad, MappingPlacement,
     PageFaultOutcome, PageFaultResult, PageFaultWork, PreparedMapping,
 };
-use axtask::future::block_on;
+use task::future::block_on;
 use memory_addr::{PhysAddr, VirtAddr, PAGE_SIZE_4K};
 
-use axconfig::user::{USER_SPACE_BASE, USER_SPACE_SIZE};
+use config::user::{USER_SPACE_BASE, USER_SPACE_SIZE};
 use crate::AddressSpaceLock;
 
 const TEST_VA: usize = 0x1000000;
@@ -21,7 +21,7 @@ const TEST_PATH: &str = "/.pulse-mapping-lifecycle-check";
 const CONTENTS: [[u8; 16]; 3] = [[0x31; 16], [0x52; 16], [0x73; 16]];
 
 fn failure(case: &str, assertion: &str) -> AxError {
-    axlog::ax_println!("MLC_KERNEL ASSERT FAIL {case} {assertion}");
+    kernel_log::ax_println!("MLC_KERNEL ASSERT FAIL {case} {assertion}");
     AxError::BadState
 }
 
@@ -39,14 +39,14 @@ fn checked<T, E: core::fmt::Debug>(
     result: Result<T, E>,
 ) -> AxResult<T> {
     result.map_err(|error| {
-        axlog::ax_println!("MLC_KERNEL ASSERT FAIL {case} {operation}: {error:?}");
+        kernel_log::ax_println!("MLC_KERNEL ASSERT FAIL {case} {operation}: {error:?}");
         AxError::BadState
     })
 }
 
 fn frame_refs(case: &str, frame: PhysAddr) -> AxResult<usize> {
-    axalloc::frame_table().try_get_ref(frame).ok_or_else(|| {
-        axlog::ax_println!("MLC_KERNEL ASSERT FAIL {case} frame {frame:#x} outside frame table");
+    kernel_alloc::frame_table().try_get_ref(frame).ok_or_else(|| {
+        kernel_log::ax_println!("MLC_KERNEL ASSERT FAIL {case} frame {frame:#x} outside frame table");
         AxError::BadState
     })
 }
@@ -54,7 +54,7 @@ fn frame_refs(case: &str, frame: PhysAddr) -> AxResult<usize> {
 fn expect_refs(case: &str, frame: PhysAddr, expected: usize) -> AxResult<()> {
     let actual = frame_refs(case, frame)?;
     if actual != expected {
-        axlog::ax_println!(
+        kernel_log::ax_println!(
             "MLC_KERNEL ASSERT FAIL {case} frame {frame:#x} refs={actual} expected={expected}"
         );
         return Err(AxError::BadState);
@@ -110,7 +110,7 @@ fn file_request(case: &str, result: PageFaultResult) -> AxResult<FilePageLoad> {
     match result {
         PageFaultResult::NeedFilePage(load) => Ok(load),
         other => {
-            axlog::ax_println!("MLC_KERNEL ASSERT FAIL {case} expected NeedFilePage, got {other:?}");
+            kernel_log::ax_println!("MLC_KERNEL ASSERT FAIL {case} expected NeedFilePage, got {other:?}");
             // Even an unexpected result can own a shootdown; complete it unlocked.
             checked(case, "complete unexpected fault", other.complete_after_unlock())?;
             Err(AxError::BadState)
@@ -572,7 +572,7 @@ pub fn run() -> AxResult<()> {
     let fixture = match Fixture::new() {
         Ok(fixture) => fixture,
         Err(error) => {
-            axlog::ax_println!("MLC_KERNEL RESULT FAIL setup");
+            kernel_log::ax_println!("MLC_KERNEL RESULT FAIL setup");
             return Err(error);
         }
     };
@@ -589,11 +589,11 @@ pub fn run() -> AxResult<()> {
     ];
     for (case, run_case) in cases {
         if let Err(error) = run_case(&fixture) {
-            axlog::ax_println!("MLC_KERNEL RESULT FAIL {case}");
+            kernel_log::ax_println!("MLC_KERNEL RESULT FAIL {case}");
             return Err(error);
         }
-        axlog::ax_println!("MLC_KERNEL PASS {case}");
+        kernel_log::ax_println!("MLC_KERNEL PASS {case}");
     }
-    axlog::ax_println!("MLC_KERNEL RESULT PASS");
+    kernel_log::ax_println!("MLC_KERNEL RESULT PASS");
     Ok(())
 }

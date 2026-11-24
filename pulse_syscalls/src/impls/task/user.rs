@@ -24,7 +24,7 @@ pub fn sys_setuid(raw_uid: usize) -> isize {
         return -LinuxError::EPERM.code() as isize;
     }
     let (new_ruid, new_euid, new_suid) = process.uid_snapshot();
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_setuid: uid={}, old=({},{},{}), new=({},{},{})",
         uid,
         old_ruid,
@@ -55,7 +55,7 @@ pub fn sys_setgid(raw_gid: usize) -> isize {
         return -LinuxError::EPERM.code() as isize;
     }
     let (new_rgid, new_egid, new_sgid) = process.gid_snapshot();
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_setgid: gid={}, old=({},{},{}), new=({},{},{})",
         gid,
         old_rgid,
@@ -100,7 +100,7 @@ pub fn sys_setreuid(raw_ruid: usize, raw_euid: usize) -> isize {
         old_suid
     };
     process.set_uids(final_ruid, final_euid, final_suid);
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_setreuid: ruid={:?}, euid={:?}, old=({},{},{}), new=({},{},{})",
         new_ruid,
         new_euid,
@@ -146,7 +146,7 @@ pub fn sys_setregid(raw_rgid: usize, raw_egid: usize) -> isize {
         old_sgid
     };
     process.set_gids(final_rgid, final_egid, final_sgid);
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_setregid: rgid={:?}, egid={:?}, old=({},{},{}), new=({},{},{})",
         new_rgid,
         new_egid,
@@ -196,7 +196,7 @@ pub fn sys_setresuid(raw_ruid: usize, raw_euid: usize, raw_suid: usize) -> isize
     let final_euid = new_euid.unwrap_or(old_euid);
     let final_suid = new_suid.unwrap_or(old_suid);
     process.set_uids(final_ruid, final_euid, final_suid);
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_setresuid: ruid={:?}, euid={:?}, suid={:?}, old=({},{},{}), new=({},{},{})",
         new_ruid,
         new_euid,
@@ -247,7 +247,7 @@ pub fn sys_setresgid(raw_rgid: usize, raw_egid: usize, raw_sgid: usize) -> isize
     let final_egid = new_egid.unwrap_or(old_egid);
     let final_sgid = new_sgid.unwrap_or(old_sgid);
     process.set_gids(final_rgid, final_egid, final_sgid);
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_setresgid: rgid={:?}, egid={:?}, sgid={:?}, old=({},{},{}), new=({},{},{})",
         new_rgid,
         new_egid,
@@ -432,7 +432,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
     }
 
     if header.pid != 0 && header.pid != process.pid() as i32 {
-        axlog::warn!(
+        kernel_log::warn!(
             "capget: lookup for pid {} not fully implemented, returning ESRCH",
             header.pid
         );

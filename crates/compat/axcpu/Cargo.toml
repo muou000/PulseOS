@@ -1,0 +1,18 @@
+[package]
+name = "axcpu"
+version = "0.2.2"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
+description = "Compatibility re-export for platform crates that depend on axcpu"
+
+[features]
+default = ["cpu/default"]
+arm-el2 = ["cpu/arm-el2"]
+fp-simd = ["cpu/fp-simd"]
+ls2k1000 = ["cpu/ls2k1000"]
+tls = ["cpu/tls"]
+uspace = ["cpu/uspace"]
+
+[dependencies]
+cpu = { path = "../../../modules/cpu", default-features = false }

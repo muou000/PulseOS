@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use axfs::{CachedFile, FileFlags};
-use axhal::paging::MappingFlags;
+use hal::paging::MappingFlags;
 use linux_raw_sys::general::{
     MADV_DOFORK, MADV_DONTFORK, MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM,
     MADV_SEQUENTIAL, MADV_WILLNEED,
@@ -55,7 +55,7 @@ fn file_flags_for_mapping(map_flags: MappingFlags) -> FileFlags {
 }
 
 pub fn sys_brk(addr: usize) -> isize {
-    axlog::debug!("sys_brk: addr={:#x}", addr);
+    kernel_log::debug!("sys_brk: addr={:#x}", addr);
 
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,
@@ -74,7 +74,7 @@ pub fn sys_brk(addr: usize) -> isize {
         .checked_add(pulse_core::config::USER_SPACE_SIZE)
         .expect("user address-space range must not overflow");
     if addr < brk_state.start() || addr > user_space_end {
-        axlog::debug!("sys_brk: rejected out-of-range addr {:#x}", addr);
+        kernel_log::debug!("sys_brk: rejected out-of-range addr {:#x}", addr);
         return old_heap_top as isize;
     }
 
@@ -85,7 +85,7 @@ pub fn sys_brk(addr: usize) -> isize {
     let requested_data_size =
         (addr - brk_state.start()) as u128 + brk_state.data_segment_size() as u128;
     if data_limit != u64::MAX && requested_data_size > data_limit as u128 {
-        axlog::debug!(
+        kernel_log::debug!(
             "sys_brk: addr {:#x} exceeds RLIMIT_DATA {:#x}",
             addr,
             data_limit
@@ -118,7 +118,7 @@ pub fn sys_brk(addr: usize) -> isize {
             if end > start {
                 let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
                 if let Err(e) = aspace.map_alloc(VirtAddr::from(start), end - start, flags, false) {
-                    axlog::debug!("sys_brk: failed to expand heap: {:?}", e);
+                    kernel_log::debug!("sys_brk: failed to expand heap: {:?}", e);
                     return old_heap_top as isize;
                 }
                 need_map = true;
@@ -139,7 +139,7 @@ pub fn sys_brk(addr: usize) -> isize {
                     .into_parts();
                 pending_shootdown = shootdown;
                 if let Err(e) = unmap_result {
-                    axlog::debug!("sys_brk: failed to shrink heap: {:?}", e);
+                    kernel_log::debug!("sys_brk: failed to shrink heap: {:?}", e);
                     drop(aspace);
                     if let Some(shootdown) = pending_shootdown.take() {
                         let _ = shootdown.complete_after_unlock();
@@ -156,7 +156,7 @@ pub fn sys_brk(addr: usize) -> isize {
     if let Some(shootdown) = pending_shootdown
         && let Err(error) = shootdown.complete_after_unlock()
     {
-        axlog::error!("sys_brk: TLB shootdown failed: {error:?}");
+        kernel_log::error!("sys_brk: TLB shootdown failed: {error:?}");
         return old_heap_top as isize;
     }
 
@@ -167,7 +167,7 @@ pub fn sys_brk(addr: usize) -> isize {
                 aspace.unmap(VirtAddr::from(map_start), map_len)
             };
             if let Err(unmap_e) = rollback.complete_after_unlock() {
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_brk: rollback unmap failed at {:#x}, len={:#x}, err={:?}",
                     map_start,
                     map_len,
@@ -183,7 +183,7 @@ pub fn sys_brk(addr: usize) -> isize {
     }
 
     brk_state.set_current(new_heap_top);
-    axlog::debug!("sys_brk: updated heap_top to {:#x}", new_heap_top);
+    kernel_log::debug!("sys_brk: updated heap_top to {:#x}", new_heap_top);
     new_heap_top as isize
 }
 
@@ -195,7 +195,7 @@ pub fn sys_mmap(
     fd: i32,
     offset: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_mmap: addr={:#x}, length={:#x}, prot={:#x}, flags={:#x}, fd={}, offset={:#x}",
         addr,
         length,
@@ -375,7 +375,7 @@ pub fn sys_mmap(
     }
     if let Err(error) = proc.maybe_lock_future_range(map_addr, aligned_length) {
         if let Err(unmap_error) = aspace.unmap(VirtAddr::from(map_addr), aligned_length) {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_mmap: rollback failed at {:#x}, len={:#x}: {:?}",
                 map_addr,
                 aligned_length,
@@ -386,7 +386,7 @@ pub fn sys_mmap(
     }
     if flags & MAP_POPULATE as usize != 0 {
         if let Err(error) = proc.prefault_user_range(map_addr, aligned_length) {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_mmap: MAP_POPULATE prefault failed at {:#x}, len={:#x}: {:?}",
                 map_addr,
                 aligned_length,
@@ -398,7 +398,7 @@ pub fn sys_mmap(
 }
 
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
-    axlog::debug!("sys_munmap: addr={:#x}, length={:#x}", addr, length);
+    kernel_log::debug!("sys_munmap: addr={:#x}, length={:#x}", addr, length);
 
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,
@@ -424,7 +424,7 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
     {
         Ok(_) => {
             let _ = proc.memlock_unlock_range(aligned_addr, aligned_length);
-            axlog::debug!(
+            kernel_log::debug!(
                 "sys_munmap: unmapped {:#x} length {:#x}",
                 aligned_addr,
                 aligned_length
@@ -432,14 +432,14 @@ pub fn sys_munmap(addr: usize, length: usize) -> isize {
             0
         }
         Err(e) => {
-            axlog::debug!("sys_munmap: failed: {:?}", e);
+            kernel_log::debug!("sys_munmap: failed: {:?}", e);
             -LinuxError::from(e).code() as isize
         }
     }
 }
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_madvise: addr={:#x}, length={:#x}, advice={}",
         addr,
         length,
@@ -499,7 +499,7 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> isize {
     match mutation.complete_after_unlock() {
         Ok(()) => 0,
         Err(error) => {
-            axlog::error!(
+            kernel_log::error!(
                 "sys_madvise: discard failed at {:#x}, len={:#x}: {error:?}",
                 addr,
                 aligned_length
@@ -516,7 +516,7 @@ pub fn sys_mremap(
     flags: usize,
     new_address: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_mremap: old_address={:#x}, old_size={:#x}, new_size={:#x}, flags={:#x}, \
          new_address={:#x}",
         old_address,
@@ -606,7 +606,7 @@ pub fn sys_mremap(
         Ok(addr) => {
             let _ = proc.memlock_unlock_range(old_address, aligned_old_size);
             if let Err(e) = proc.maybe_lock_future_range(addr.as_usize(), aligned_new_size) {
-                axlog::warn!("sys_mremap: maybe_lock_future_range failed: {:?}", e);
+                kernel_log::warn!("sys_mremap: maybe_lock_future_range failed: {:?}", e);
             }
             addr.as_usize() as isize
         }
@@ -696,7 +696,7 @@ pub fn sys_mincore(addr: usize, len: usize, vec_addr: usize) -> isize {
 }
 
 pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_mprotect: addr={:#x}, length={:#x}, prot={:#x}",
         addr,
         length,
@@ -747,7 +747,7 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
     match mutation.complete_after_unlock() {
         Ok(_) => 0,
         Err(e) => {
-            axlog::debug!(
+            kernel_log::debug!(
                 "sys_mprotect: failed to protect [{:#x}, {:#x}): {:?}",
                 addr,
                 addr.saturating_add(aligned_length),
@@ -794,7 +794,7 @@ pub fn sys_munlockall() -> isize {
 }
 
 pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_msync: addr={:#x}, length={:#x}, flags={:#x}",
         addr,
         length,

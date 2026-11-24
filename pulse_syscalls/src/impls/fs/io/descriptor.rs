@@ -35,7 +35,7 @@ pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
 }
 
 pub fn sys_fdatasync(fd: usize) -> isize {
-    axlog::debug!("sys_fdatasync: fd={}", fd);
+    kernel_log::debug!("sys_fdatasync: fd={}", fd);
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
@@ -50,7 +50,7 @@ pub fn sys_fdatasync(fd: usize) -> isize {
     }
 }
 pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
-    axlog::debug!("sys_pipe2: fds={:#x}, flags={:#x}", fds, flags);
+    kernel_log::debug!("sys_pipe2: fds={:#x}, flags={:#x}", fds, flags);
     if let Err(e) = crate::validation::fd::validate_pipe2(fds, flags) {
         return -e.code() as isize;
     }
@@ -61,7 +61,7 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
             Ok(fd) => fd,
             Err(e) => {
                 if let Err(remove_e) = process.remove_fd_entry(read_fd) {
-                    axlog::warn!(
+                    kernel_log::warn!(
                         "sys_pipe2: rollback failed to remove read fd {} after write insert \
                          error: {:?}",
                         read_fd,
@@ -78,14 +78,14 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
     };
     if let Err(e) = write_user_value(fds, &new_fds) {
         if let Err(remove_e) = remove_fd_entry(new_fds[0] as usize) {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_pipe2: rollback failed to remove read fd {}: {:?}",
                 new_fds[0],
                 remove_e
             );
         }
         if let Err(remove_e) = remove_fd_entry(new_fds[1] as usize) {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_pipe2: rollback failed to remove write fd {}: {:?}",
                 new_fds[1],
                 remove_e
@@ -97,7 +97,7 @@ pub fn sys_pipe2(fds: usize, flags: usize) -> isize {
 }
 
 pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_lseek: fd={}, offset={:#x}, whence={}",
         fd,
         offset,
@@ -130,7 +130,7 @@ pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
 }
 
 pub fn sys_fsync(fd: usize) -> isize {
-    axlog::debug!("sys_fsync: fd={}", fd);
+    kernel_log::debug!("sys_fsync: fd={}", fd);
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
@@ -153,20 +153,20 @@ pub fn sys_fsync(fd: usize) -> isize {
 /// meant to prevent. The finite timeout still prevents a broken device from
 /// hanging shutdown forever.
 pub(crate) fn flush_filesystems_for_shutdown() -> Result<(), LinuxError> {
-    match axtask::future::block_on(axtask::future::timeout(
+    match task::future::block_on(task::future::timeout(
         Some(SYNC_TIMEOUT),
         axfs::flush_all_filesystems_async(),
     )) {
         Ok(Ok(())) => Ok(()),
         Err(_) => {
-            axlog::error!(
+            kernel_log::error!(
                 "shutdown writeback timed out after {:?}; power transition cancelled",
                 SYNC_TIMEOUT
             );
             Err(LinuxError::ETIMEDOUT)
         }
         Ok(Err(error)) => {
-            axlog::error!(
+            kernel_log::error!(
                 "shutdown filesystem writeback failed: {:?}; power transition cancelled",
                 error
             );
@@ -176,7 +176,7 @@ pub(crate) fn flush_filesystems_for_shutdown() -> Result<(), LinuxError> {
 }
 
 pub fn sys_sync() -> isize {
-    axlog::debug!("sys_sync: global flush");
+    kernel_log::debug!("sys_sync: global flush");
     // The filesystem registry already owns every dirty file cache and flushes
     // each mounted filesystem exactly once. Walking every process descriptor
     // first caused repeated inode-wide and disk-wide flushes, while the final
@@ -184,24 +184,24 @@ pub fn sys_sync() -> isize {
     // Keep the syscall interruptible: a lost SD/MMC completion must not make
     // Ctrl-C unable to return the terminal to its shell. The timeout is a
     // second line of defense for signals or timer delivery that arrive late.
-    match axtask::future::block_on(axtask::future::interruptible(axtask::future::timeout(
+    match task::future::block_on(task::future::interruptible(task::future::timeout(
         Some(SYNC_TIMEOUT),
         axfs::flush_all_filesystems_async(),
     ))) {
         Ok(Ok(Ok(()))) => 0,
         Err(_) => {
-            axlog::warn!("sys_sync: interrupted while flushing filesystems");
+            kernel_log::warn!("sys_sync: interrupted while flushing filesystems");
             -LinuxError::EINTR.code() as isize
         }
         Ok(Err(_)) => {
-            axlog::error!(
+            kernel_log::error!(
                 "sys_sync: filesystem flush timed out after {:?}",
                 SYNC_TIMEOUT
             );
             -LinuxError::ETIMEDOUT.code() as isize
         }
         Ok(Ok(Err(error))) => {
-            axlog::error!("sys_sync: filesystem flush failed: {:?}", error);
+            kernel_log::error!("sys_sync: filesystem flush failed: {:?}", error);
             -LinuxError::EIO.code() as isize
         }
     }

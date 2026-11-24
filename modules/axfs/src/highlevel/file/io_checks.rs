@@ -402,7 +402,7 @@ async fn legacy_nonregular_writeall() -> VfsResult<()> {
 
 /// Runs only when the explicit test-kernel control operation requests it.
 pub fn run_file_io_checks() -> VfsResult<()> {
-    axtask::future::block_on(async {
+    task::future::block_on(async {
         macro_rules! run_check {
             ($case:ident) => {
                 if let Err(error) = $case().await {

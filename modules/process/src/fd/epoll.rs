@@ -11,14 +11,14 @@ pub struct EpollRegistration {
 
 pub struct EpollObject {
     pub events: Mutex<BTreeMap<usize, EpollRegistration>>,
-    control_wait_queue: Arc<axtask::WaitQueue>,
+    control_wait_queue: Arc<task::WaitQueue>,
 }
 
 impl EpollObject {
     pub fn new() -> Self {
         Self {
             events: Mutex::new(BTreeMap::new()),
-            control_wait_queue: Arc::new(axtask::WaitQueue::new()),
+            control_wait_queue: Arc::new(task::WaitQueue::new()),
         }
     }
 

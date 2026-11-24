@@ -80,7 +80,7 @@ impl BlockDriverOps for LoopBlockDevice {
         let file = self.backing();
         if let Some(file) = file {
             let offset = block_id * self.block_size() as u64;
-            axtask::future::block_on(file.read_at(buf, offset)).map_err(|_| DevError::Io)?;
+            task::future::block_on(file.read_at(buf, offset)).map_err(|_| DevError::Io)?;
             Ok(())
         } else {
             Err(DevError::BadState)
@@ -91,7 +91,7 @@ impl BlockDriverOps for LoopBlockDevice {
         let file = self.backing();
         if let Some(file) = file {
             let offset = block_id * self.block_size() as u64;
-            axtask::future::block_on(file.write_at(buf, offset)).map_err(|_| DevError::Io)?;
+            task::future::block_on(file.write_at(buf, offset)).map_err(|_| DevError::Io)?;
             Ok(())
         } else {
             Err(DevError::BadState)
@@ -100,7 +100,7 @@ impl BlockDriverOps for LoopBlockDevice {
 
     fn flush(&mut self) -> DevResult {
         if let Some(file) = self.backing() {
-            axtask::future::block_on(file.sync(false)).map_err(|_| DevError::Io)?;
+            task::future::block_on(file.sync(false)).map_err(|_| DevError::Io)?;
         }
         Ok(())
     }

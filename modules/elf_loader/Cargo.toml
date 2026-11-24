@@ -8,15 +8,15 @@ repository.workspace = true
 description = "ELF user image preparation for PulseOS"
 
 [dependencies]
-axconfig.workspace = true
-axcpu.workspace = true
+config.workspace = true
+cpu.workspace = true
 axerrno.workspace = true
 axfs.workspace = true
 axfs-ng-vfs.workspace = true
-axhal = { workspace = true, features = ["paging"] }
-axlog.workspace = true
+hal = { workspace = true, features = ["paging"] }
+kernel_log.workspace = true
 axmm.workspace = true
-axtask = { workspace = true, features = ["multitask"] }
+task = { workspace = true, features = ["multitask"] }
 kernel-elf-parser.workspace = true
 linux-raw-sys = { workspace = true, features = ["elf_uapi"] }
 memory_addr.workspace = true

@@ -85,7 +85,7 @@ impl OutputMarkerScanner {
         if let Some((boundary, phase)) = phase_marker_from_line(&self.line[..self.line_len]) {
             #[cfg(feature = "bpf-trace")]
             {
-                axtask::bpf_trace::phase_marker(boundary as u32, phase);
+                task::bpf_trace::phase_marker(boundary as u32, phase);
             }
         }
     }

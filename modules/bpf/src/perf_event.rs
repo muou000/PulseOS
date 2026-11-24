@@ -334,7 +334,7 @@ impl PerfBuffer {
             return Err(LinuxError::EINVAL);
         }
         let page_count = 1 + nr_data_pages;
-        let vaddr = axalloc::global_allocator()
+        let vaddr = kernel_alloc::global_allocator()
             .alloc_pages(page_count, memory_addr::PAGE_SIZE_4K)
             .map_err(|_| LinuxError::ENOMEM)?;
         unsafe {
@@ -655,7 +655,7 @@ pub struct PerfEvent {
     runtime_cancelled: AtomicU64,
     runtime_invalid: AtomicU64,
     #[cfg(target_os = "none")]
-    read_wait_queue: axtask::WaitQueue,
+    read_wait_queue: task::WaitQueue,
 }
 
 impl PerfEvent {
@@ -692,7 +692,7 @@ impl PerfEvent {
             runtime_cancelled: AtomicU64::new(0),
             runtime_invalid: AtomicU64::new(0),
             #[cfg(target_os = "none")]
-            read_wait_queue: axtask::WaitQueue::new(),
+            read_wait_queue: task::WaitQueue::new(),
         }
     }
 
@@ -1155,7 +1155,7 @@ impl PerfEvent {
 
 // Serialize count transitions with the producer-mask update. Otherwise an old
 // last-detach could clear the mask after a new first-attach has set it. Producers
-// only read axtask's atomic mask and never acquire this control-plane lock.
+// only read task's atomic mask and never acquire this control-plane lock.
 static TRACEPOINT_SUBSCRIBER_CONTROL: spin::Mutex<()> = spin::Mutex::new(());
 
 /// System-wide attached tracepoint subscriptions, including disabled sources.
@@ -1206,7 +1206,7 @@ fn register_tracepoint_probe(tp_id: pulse_bpf_schema::TracepointId) {
     if idx < TRACEPOINT_SUBSCRIBER_COUNTS.len() {
         if TRACEPOINT_SUBSCRIBER_COUNTS[idx].fetch_add(1, Ordering::SeqCst) == 0 {
             #[cfg(all(target_os = "none", feature = "bpf-trace"))]
-            axtask::bpf_trace::register_probe(tp_id);
+            task::bpf_trace::register_probe(tp_id);
         }
     }
 }
@@ -1217,7 +1217,7 @@ fn unregister_tracepoint_probe(tp_id: pulse_bpf_schema::TracepointId) {
     if idx < TRACEPOINT_SUBSCRIBER_COUNTS.len() {
         if TRACEPOINT_SUBSCRIBER_COUNTS[idx].fetch_sub(1, Ordering::SeqCst) == 1 {
             #[cfg(all(target_os = "none", feature = "bpf-trace"))]
-            axtask::bpf_trace::unregister_probe(tp_id);
+            task::bpf_trace::unregister_probe(tp_id);
         }
     }
 }
@@ -1297,7 +1297,7 @@ impl PerfEvent {
     }
 
     #[cfg(target_os = "none")]
-    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn read_wait_queue(&self) -> &task::WaitQueue {
         &self.read_wait_queue
     }
 

@@ -1,7 +1,7 @@
 //! System V shared memory syscall implementations.
 
 use axerrno::LinuxError;
-use axhal::mem::virt_to_phys;
+use hal::mem::virt_to_phys;
 use ipc::{
     IPC_CREAT, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT,
     shm::{
@@ -16,7 +16,7 @@ use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 /// args[1] = size (usize)
 /// args[2] = shmflg (i32, permission + IPC_CREAT/IPC_EXCL)
 pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_shmget: key={}, size={}, shmflg={:#o}",
         key,
         size,
@@ -75,7 +75,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> isize {
 /// args[1] = shmaddr (usize, preferred address or 0)
 /// args[2] = shmflg (i32, e.g. SHM_RDONLY, SHM_REMAP, SHM_RND)
 pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_shmat: shmid={}, shmaddr={:#x}, shmflg={:#o}",
         shmid,
         shmaddr,
@@ -123,7 +123,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         let length = inner.mapping_size();
         let mut mapping_flags = inner.mapping_flags;
         if (shmflg as u32) & SHM_RDONLY != 0 {
-            mapping_flags.remove(axhal::paging::MappingFlags::WRITE);
+            mapping_flags.remove(hal::paging::MappingFlags::WRITE);
         }
 
         // Determine the virtual address to map at.
@@ -152,7 +152,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
             ) {
                 Some(vaddr) => vaddr.as_usize(),
                 None => {
-                    axlog::debug!("sys_shmat: no free area found");
+                    kernel_log::debug!("sys_shmat: no free area found");
                     return -LinuxError::ENOMEM.code() as isize;
                 }
             }
@@ -164,7 +164,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
                 aspace.unmap(VirtAddr::from(map_addr), length).into_parts();
             pending_shootdown = shootdown;
             if let Err(error) = unmap_result {
-                axlog::warn!("sys_shmat: SHM_REMAP pre-unmap failed: {error:?}");
+                kernel_log::warn!("sys_shmat: SHM_REMAP pre-unmap failed: {error:?}");
             }
         }
 
@@ -182,15 +182,15 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         if let Some(shootdown) = pending_shootdown
             && let Err(error) = shootdown.complete_after_unlock()
         {
-            axlog::error!("sys_shmat: SHM_REMAP TLB shootdown failed: {error:?}");
+            kernel_log::error!("sys_shmat: SHM_REMAP TLB shootdown failed: {error:?}");
             return -LinuxError::EIO.code() as isize;
         }
         if let Err(e) = map_result {
-            axlog::debug!("sys_shmat: map_linear failed: {:?}", e);
+            kernel_log::debug!("sys_shmat: map_linear failed: {:?}", e);
             return -LinuxError::from(e).code() as isize;
         }
 
-        axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
+        kernel_log::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
         map_addr as isize
     })
 }
@@ -199,7 +199,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
 ///
 /// args[0] = shmaddr (usize, the address returned by shmat)
 pub fn sys_shmdt(shmaddr: usize) -> isize {
-    axlog::debug!("sys_shmdt: shmaddr={:#x}", shmaddr);
+    kernel_log::debug!("sys_shmdt: shmaddr={:#x}", shmaddr);
 
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,
@@ -220,7 +220,7 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
         let mutation = aspace.unmap(addr, length);
         drop(aspace);
         if let Err(e) = mutation.complete_after_unlock() {
-            axlog::warn!("sys_shmdt: unmap or TLB shootdown failed: {:?}", e);
+            kernel_log::warn!("sys_shmdt: unmap or TLB shootdown failed: {:?}", e);
             registry.insert(addr, segment);
             return -LinuxError::from(e).code() as isize;
         }
@@ -236,7 +236,7 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
 /// args[1] = cmd (i32)
 /// args[2] = buf (usize, pointer to ShmidDs or 0)
 pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
-    axlog::debug!("sys_shmctl: shmid={}, cmd={}, buf={:#x}", shmid, cmd, buf);
+    kernel_log::debug!("sys_shmctl: shmid={}, cmd={}, buf={:#x}", shmid, cmd, buf);
 
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,

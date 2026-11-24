@@ -4,7 +4,7 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::time::Duration;
 
 use axerrno::{LinuxError, LinuxResult};
-use axtask::WaitQueue;
+use task::WaitQueue;
 use spin::{Mutex, MutexGuard};
 
 use crate::{IPC_CREAT, IPC_EXCL, IPC_PRIVATE, IpcPerm};
@@ -44,7 +44,7 @@ pulse_user_abi::impl_user_abi_struct! {
 
 impl SemidDs {
     fn new(key: i32, nsems: usize, mode: u16, pid: i32) -> Self {
-        let now = axhal::time::wall_time().as_secs() as i64;
+        let now = hal::time::wall_time().as_secs() as i64;
         Self {
             sem_perm: IpcPerm {
                 key,
@@ -121,7 +121,7 @@ impl SetState {
             self.sems[index].value = values[index];
             self.sems[index].pid = pid;
         }
-        self.status.sem_otime = axhal::time::wall_time().as_secs() as i64;
+        self.status.sem_otime = hal::time::wall_time().as_secs() as i64;
         self.revision = self.revision.wrapping_add(1);
         true
     }
@@ -251,7 +251,7 @@ impl SemSet {
         current.uid = perms.uid;
         current.gid = perms.gid;
         current.mode = (perms.mode & 0o777) | (current.mode & !0o777);
-        state.status.sem_ctime = axhal::time::wall_time().as_secs() as i64;
+        state.status.sem_ctime = hal::time::wall_time().as_secs() as i64;
         Ok(())
     }
 
@@ -299,7 +299,7 @@ impl SemSet {
     }
 
     fn values_updated(&self, mut state: MutexGuard<'_, SetState>) {
-        state.status.sem_ctime = axhal::time::wall_time().as_secs() as i64;
+        state.status.sem_ctime = hal::time::wall_time().as_secs() as i64;
         state.revision = state.revision.wrapping_add(1);
         drop(state);
         self.wait_queue.notify_all(true);
@@ -316,7 +316,7 @@ impl SemSet {
         signal_queue: &WaitQueue,
         signal_pending: impl Fn() -> bool,
     ) -> LinuxResult {
-        let start = axhal::time::monotonic_time();
+        let start = hal::time::monotonic_time();
         let mut state = self.live_state()?;
         if ops.is_empty() {
             return Err(LinuxError::EINVAL);
@@ -334,7 +334,7 @@ impl SemSet {
             if ops.iter().any(|op| op.sem_flg & IPC_NOWAIT != 0) {
                 return Err(LinuxError::EAGAIN);
             }
-            let elapsed = axhal::time::monotonic_time().saturating_sub(start);
+            let elapsed = hal::time::monotonic_time().saturating_sub(start);
             let remaining = timeout.map(|limit| limit.saturating_sub(elapsed));
             if remaining == Some(Duration::ZERO) {
                 return Err(LinuxError::EAGAIN);

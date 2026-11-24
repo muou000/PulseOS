@@ -69,7 +69,7 @@ pub(crate) fn resolve_location_at_str(
 
     let is_absolute = path.starts_with('/');
     let dirfd = if is_absolute { AT_FDCWD as i32 } else { dirfd };
-    axlog::debug!(
+    kernel_log::debug!(
         "resolve_location_at_ptr: dirfd={}, path=\"{}\", flags={:#x}",
         dirfd,
         path,
@@ -77,11 +77,11 @@ pub(crate) fn resolve_location_at_str(
     );
     if let Some(result) = try_resolve_location_fast(dirfd, path, flags) {
         match &result {
-            Ok(_loc) => axlog::debug!(
+            Ok(_loc) => kernel_log::debug!(
                 "resolve_location_at_ptr: fast path resolved OK for \"{}\"",
                 path
             ),
-            Err(e) => axlog::debug!(
+            Err(e) => kernel_log::debug!(
                 "resolve_location_at_ptr: fast path failed for \"{}\": {:?}",
                 path,
                 e
@@ -91,15 +91,15 @@ pub(crate) fn resolve_location_at_str(
     }
     let ctx = context_for_dirfd(dirfd)?;
     let result = if (flags & AT_SYMLINK_NOFOLLOW as usize) != 0 {
-        axtask::future::block_on(ctx.resolve_no_follow(path))
+        task::future::block_on(ctx.resolve_no_follow(path))
             .map_err(|e| LinuxError::from(e.canonicalize()))
     } else {
-        axtask::future::block_on(ctx.resolve(path))
+        task::future::block_on(ctx.resolve(path))
             .map_err(|e| LinuxError::from(e.canonicalize()))
     };
     match &result {
-        Ok(_loc) => axlog::debug!("resolve_location_at_ptr: resolved OK for \"{}\"", path),
-        Err(e) => axlog::debug!(
+        Ok(_loc) => kernel_log::debug!("resolve_location_at_ptr: resolved OK for \"{}\"", path),
+        Err(e) => kernel_log::debug!(
             "resolve_location_at_ptr: resolve failed for \"{}\": {:?}",
             path,
             e
@@ -133,7 +133,7 @@ fn try_resolve_location_fast(
         return Some(Err(LinuxError::ENOTDIR));
     }
     Some(
-        axtask::future::block_on(base.lookup_no_follow(path))
+        task::future::block_on(base.lookup_no_follow(path))
             .map_err(|e| LinuxError::from(e.canonicalize())),
     )
 }

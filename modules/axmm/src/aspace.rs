@@ -1,8 +1,8 @@
 use core::fmt;
 
-use axalloc::frame_table;
+use kernel_alloc::frame_table;
 use axerrno::{AxError, AxResult, ax_err};
-use axhal::{
+use hal::{
     mem::{flush_dcache_range, phys_to_virt, PhysAddr},
     paging::{MappingFlags, PageSize, PageTable, PagingError, PagingResult, TlbFlush},
     trap::PageFaultFlags,
@@ -207,14 +207,14 @@ impl TlbShootdown {
                         end,
                         changed_pages,
                     } => {
-                        axipi::flush_tlb_asid_range_cpus(
+                        ipi::flush_tlb_asid_range_cpus(
                             asid,
                             start.as_usize(),
                             end - start,
                             changed_pages,
                         )
                     }
-                    TlbInvalidation::FullAsid => axipi::flush_tlb_asid_cpus(asid),
+                    TlbInvalidation::FullAsid => ipi::flush_tlb_asid_cpus(asid),
                 };
                 if let Err(shootdown_error) = flush_result {
                     if shootdown_error.completion_guaranteed() {
@@ -902,7 +902,7 @@ impl AddrSpace {
     pub fn new_empty(base: VirtAddr, size: usize) -> AxResult<Self> {
         let asid = ASID_ALLOCATOR.lock().alloc();
         #[cfg(feature = "ipi")]
-        axipi::reset_asid_active_cpu_mask(asid);
+        ipi::reset_asid_active_cpu_mask(asid);
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
@@ -1903,9 +1903,9 @@ impl AddrSpace {
         if let Some((frame, flags)) = pte_before {
             if frame.as_usize() != 0 && flags.contains(access_flags) {
                 #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
-                axhal::asm::flush_tlb_asid_vaddr(self.asid, page);
+                hal::asm::flush_tlb_asid_vaddr(self.asid, page);
                 #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
-                axhal::asm::flush_tlb(Some(page));
+                hal::asm::flush_tlb(Some(page));
                 return PageFaultResult::Handled(true);
             }
         }
@@ -2351,21 +2351,21 @@ unsafe fn flush_tlb_invalidation(asid: usize, invalidation: TlbInvalidation) {
     const RANGE_PAGE_LIMIT: usize = 32;
 
     match invalidation {
-        TlbInvalidation::FullAsid => axhal::asm::flush_tlb_asid(asid),
+        TlbInvalidation::FullAsid => hal::asm::flush_tlb_asid(asid),
         TlbInvalidation::Range { start, end, .. }
             if (end - start) / PAGE_SIZE_4K <= RANGE_PAGE_LIMIT =>
         {
             for page in PageIter4K::new(start, end).unwrap() {
                 #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
-                axhal::asm::flush_tlb_asid_vaddr(asid, page);
+                hal::asm::flush_tlb_asid_vaddr(asid, page);
                 #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
                 {
                     let _ = asid;
-                    axhal::asm::flush_tlb(Some(page));
+                    hal::asm::flush_tlb(Some(page));
                 }
             }
         }
-        TlbInvalidation::Range { .. } => axhal::asm::flush_tlb_asid(asid),
+        TlbInvalidation::Range { .. } => hal::asm::flush_tlb_asid(asid),
     }
 }
 

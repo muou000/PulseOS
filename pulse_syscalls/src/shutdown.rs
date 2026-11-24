@@ -19,7 +19,7 @@ pub fn run_mapping_shutdown_checks() -> axerrno::AxResult<()> {
     if result.is_err() || !reset_reached {
         return Err(axerrno::AxError::BadState);
     }
-    axlog::info!("MLC_KERNEL PASS sync_failure_refuses_reset");
+    kernel_log::info!("MLC_KERNEL PASS sync_failure_refuses_reset");
     Ok(())
 }
 

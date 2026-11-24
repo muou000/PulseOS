@@ -1,7 +1,7 @@
 //! Trap 处理模块 - 处理 page fault 和其他异常
 
 use axerrno::AxError;
-use axhal::{
+use hal::{
     context::TrapFrame,
     paging::MappingFlags,
     trap::{
@@ -24,9 +24,9 @@ pub struct TrapIrqEnableGuard {
 
 impl TrapIrqEnableGuard {
     pub fn new() -> Self {
-        let restore_disabled = !axhal::asm::irqs_enabled();
+        let restore_disabled = !hal::asm::irqs_enabled();
         if restore_disabled {
-            axhal::asm::enable_irqs();
+            hal::asm::enable_irqs();
         }
         Self {
             restore_disabled,
@@ -38,7 +38,7 @@ impl TrapIrqEnableGuard {
 impl Drop for TrapIrqEnableGuard {
     fn drop(&mut self) {
         if self.restore_disabled {
-            axhal::asm::disable_irqs();
+            hal::asm::disable_irqs();
         }
     }
 }
@@ -52,8 +52,8 @@ fn emulate_user_unaligned(
     let access = unsafe { tf.decode_unaligned_access_at(fault_address as u64) }.map_err(|_| ())?;
     let address = usize::try_from(access.address()).map_err(|_| ())?;
     let mapping_flags = match access.access_type() {
-        axcpu::UnalignedAccessType::Read => MappingFlags::READ,
-        axcpu::UnalignedAccessType::Write => MappingFlags::WRITE,
+        cpu::UnalignedAccessType::Read => MappingFlags::READ,
+        cpu::UnalignedAccessType::Write => MappingFlags::WRITE,
     };
 
     process
@@ -91,7 +91,7 @@ fn handle_illegal_instruction(tf: &mut TrapFrame, _vaddr: usize, is_user: bool) 
             #[cfg(target_arch = "loongarch64")]
             let pc = tf.era;
 
-            axlog::warn!(
+            kernel_log::warn!(
                 "Illegal instruction! pid={} exe={:?} ip={:#x}",
                 thread.process().pid(),
                 thread.process().exec_path(),
@@ -134,7 +134,7 @@ fn handle_address_error(
                 }
             }
 
-            axlog::warn!(
+            kernel_log::warn!(
                 "Address error! pid={} exe={:?} ip={:#x} vaddr={:#x} kind={error:?}",
                 thread.process().pid(),
                 thread.process().exec_path(),
@@ -174,7 +174,7 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
     let process = thread.process();
     thread.exit_if_exec_requested();
     if process.group_exiting() {
-        axlog::debug!(
+        kernel_log::debug!(
             "Process group exiting: pid={} exit_code={}",
             process.pid(),
             process.group_exit_code()
@@ -184,7 +184,7 @@ fn deliver_pending_signal(tf: &mut TrapFrame) {
     if thread.signal().has_pending_or_skip_once() {
         if let Some(delivery) = crate::check_signals_and_deliver(thread.as_ref(), tf) {
             use crate::{DefaultSignalAction, SignalAction};
-            axlog::debug!(
+            kernel_log::debug!(
                 "Delivering signal: pid={} sig={} action={:?}",
                 process.pid(),
                 delivery.sig,
@@ -235,7 +235,7 @@ fn handle_user_return(tf: &mut TrapFrame) {
         // the group is parked again.
         process.wait_while_group_stopped(thread.as_ref());
     }
-    axtask::check_preempt_pending();
+    task::check_preempt_pending();
 }
 
 #[register_trap_handler(PAGE_FAULT)]
@@ -250,11 +250,11 @@ fn handle_page_fault(
     // a failed stack read must not allocate, block, or perturb fault accounting.
     #[cfg(all(feature = "bpf-trace", any(target_arch = "riscv64", target_arch = "loongarch64")))]
     if !is_user && access_flags.contains(MappingFlags::READ)
-        && axcpu::sampling::fixup_read_fault(tf)
+        && cpu::sampling::fixup_read_fault(tf)
     {
         return true;
     }
-    axlog::debug!(
+    kernel_log::debug!(
         "Page fault @ VA:{:#x}, flags:{:?}, user={}",
         vaddr,
         access_flags,
@@ -262,7 +262,7 @@ fn handle_page_fault(
     );
 
     let thread_result = crate::current_thread();
-    let is_kernel_address = vaddr.as_usize() >= axconfig::plat::KERNEL_ASPACE_BASE;
+    let is_kernel_address = vaddr.as_usize() >= config::plat::KERNEL_ASPACE_BASE;
 
     if thread_result.is_err() || (!is_user && is_kernel_address) {
         if !is_user {
@@ -277,7 +277,7 @@ fn handle_page_fault(
 
     let thread = thread_result.unwrap();
     let proc = thread.process();
-    let enter_ns = axhal::time::monotonic_time_nanos() as u64;
+    let enter_ns = hal::time::monotonic_time_nanos() as u64;
 
     if is_user {
         thread.exit_if_exec_requested();
@@ -291,7 +291,7 @@ fn handle_page_fault(
         let _irq_guard = is_user.then(TrapIrqEnableGuard::new);
         #[cfg(feature = "bpf-trace")]
         let observation = {
-            use axtask::bpf_trace::{PageFaultAccess, PageFaultOrigin, page_fault_begin};
+            use task::bpf_trace::{PageFaultAccess, PageFaultOrigin, page_fault_begin};
             let access = u32::from(access_flags.contains(MappingFlags::READ)) * PageFaultAccess::READ
                 | u32::from(access_flags.contains(MappingFlags::WRITE)) * PageFaultAccess::WRITE
                 | u32::from(access_flags.contains(MappingFlags::EXECUTE)) * PageFaultAccess::EXECUTE;
@@ -301,7 +301,7 @@ fn handle_page_fault(
         let result = proc.handle_page_fault_with_io(vaddr, access_flags);
         #[cfg(feature = "bpf-trace")]
         {
-            use axtask::bpf_trace::{PageFaultClassification, PageFaultOutcome, page_fault_complete};
+            use task::bpf_trace::{PageFaultClassification, PageFaultOutcome, page_fault_complete};
             let outcome = match &result {
                 Ok(resolution) if resolution.handled => PageFaultOutcome::Resolved,
                 Ok(_) => PageFaultOutcome::NotHandled,
@@ -323,40 +323,40 @@ fn handle_page_fault(
     let fault_error = match fault_result {
         Ok(true) => {
             if is_user {
-                let leave_ns = axhal::time::monotonic_time_nanos() as u64;
+                let leave_ns = hal::time::monotonic_time_nanos() as u64;
                 proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
                 if proc.group_exiting() {
                     thread.exit_current(proc.group_exit_code());
                 }
                 proc.mark_user_resume_at(leave_ns);
             }
-            axlog::debug!("Page fault handled successfully");
+            kernel_log::debug!("Page fault handled successfully");
             return true;
         }
         Ok(false) => None,
         Err(error) => {
-            axlog::error!("page fault resolution failed: {error:?}");
+            kernel_log::error!("page fault resolution failed: {error:?}");
             Some(error)
         }
     };
 
     if !is_user {
         if tf.fixup_exception() {
-            axlog::debug!("Kernel page fault fixup applied for vaddr={:#x}", vaddr);
+            kernel_log::debug!("Kernel page fault fixup applied for vaddr={:#x}", vaddr);
             return true;
         }
         panic!("Unhandled page fault in kernel space: vaddr={:#x}", vaddr);
     }
-    let leave_ns = axhal::time::monotonic_time_nanos() as u64;
+    let leave_ns = hal::time::monotonic_time_nanos() as u64;
     proc.add_sys_time_ns(leave_ns.saturating_sub(enter_ns));
-    axlog::warn!(
+    kernel_log::warn!(
         "Failed to handle page fault! pid={} exe={:?}",
         proc.pid(),
         proc.exec_path()
     );
-    axlog::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
+    kernel_log::warn!("  vaddr={:#x}, flags={:?}", vaddr, access_flags);
     #[cfg(target_arch = "loongarch64")]
-    axlog::warn!(
+    kernel_log::warn!(
         "  era={:#x}, badi={:#010x}, ra={:#x}, sp={:#x}, tp={:#x}, a0={:#x}, a1={:#x}, a2={:#x}",
         tf.era,
         tf.bad_instruction(),
@@ -402,14 +402,14 @@ fn handle_page_fault(
     let blocked_mask = signal.blocked_mask();
     let signal_bit = 1u64 << (signo - 1);
     let action = crate::resolve_action(&signal.shared(), signo as usize);
-    axlog::warn!(
+    kernel_log::warn!(
         "  heap_top={:#x}, area={:?}, previous_area={:?}, next_area={:?}",
         proc.get_heap_top(),
         fault_area,
         previous_area,
         next_area
     );
-    axlog::warn!(
+    kernel_log::warn!(
         "  synchronous signal: signo={}, action={:?}, blocked={}, blocked_mask={:#x}, \
          in_handler={}",
         signo,
@@ -441,7 +441,7 @@ fn handle_page_fault(
         }
         None => crate::force_signal_to_thread(thread.as_ref(), signo as usize),
     };
-    axlog::warn!(
+    kernel_log::warn!(
         "  synchronous signal newly_queued={}, pending_mask={:#x}",
         newly_queued,
         signal.pending_mask()
@@ -452,6 +452,6 @@ fn handle_page_fault(
 
 /// Ensure the module is linked and register memory reclaim callbacks.
 pub fn init() {
-    axalloc::register_page_reclaim_fn(axfs::page_cache_reclaim);
-    axlog::info!("page cache reclaim function registered");
+    kernel_alloc::register_page_reclaim_fn(axfs::page_cache_reclaim);
+    kernel_log::info!("page cache reclaim function registered");
 }

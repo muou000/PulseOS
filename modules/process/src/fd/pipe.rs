@@ -204,10 +204,10 @@ fn pipe_available_write_bytes(capacity: usize, ring_bytes: usize, zero_copy_byte
 }
 
 fn dealloc_physical_frame(frame: PhysAddr) {
-    if axalloc::frame_table().contains(frame) {
-        if axalloc::frame_table().dec_ref(frame) == 0 {
-            axalloc::global_allocator()
-                .dealloc_pages(axhal::mem::phys_to_virt(frame).as_usize(), 1);
+    if kernel_alloc::frame_table().contains(frame) {
+        if kernel_alloc::frame_table().dec_ref(frame) == 0 {
+            kernel_alloc::global_allocator()
+                .dealloc_pages(hal::mem::phys_to_virt(frame).as_usize(), 1);
         }
     }
 }
@@ -221,7 +221,7 @@ fn dealloc_physical_frames(frames: &[PhysAddr]) {
         return;
     }
 
-    let table = axalloc::frame_table();
+    let table = kernel_alloc::frame_table();
     let mut eligible = alloc::vec::Vec::with_capacity(frames.len());
     for &frame in frames {
         if table.contains(frame) && table.dec_ref(frame) == 0 {
@@ -237,11 +237,11 @@ fn dealloc_physical_frames(frames: &[PhysAddr]) {
     let mut run_len = 1;
     for &frame in &eligible[1..] {
         let paddr = frame.as_usize();
-        if paddr == run_start.saturating_add(run_len * axhal::mem::PAGE_SIZE_4K) {
+        if paddr == run_start.saturating_add(run_len * hal::mem::PAGE_SIZE_4K) {
             run_len += 1;
         } else {
             runs.push((
-                axhal::mem::phys_to_virt(PhysAddr::from(run_start)).as_usize(),
+                hal::mem::phys_to_virt(PhysAddr::from(run_start)).as_usize(),
                 run_len,
             ));
             run_start = paddr;
@@ -249,10 +249,10 @@ fn dealloc_physical_frames(frames: &[PhysAddr]) {
         }
     }
     runs.push((
-        axhal::mem::phys_to_virt(PhysAddr::from(run_start)).as_usize(),
+        hal::mem::phys_to_virt(PhysAddr::from(run_start)).as_usize(),
         run_len,
     ));
-    axalloc::global_allocator().dealloc_pages_batch(&runs);
+    kernel_alloc::global_allocator().dealloc_pages_batch(&runs);
 }
 
 const EVENTFD_COUNTER_MAX: u64 = u64::MAX - 1;
@@ -261,8 +261,8 @@ pub struct EventFdObject {
     counter: AtomicU64,
     semaphore: bool,
     nonblocking: AtomicBool,
-    read_wait_queue: axtask::WaitQueue,
-    write_wait_queue: axtask::WaitQueue,
+    read_wait_queue: task::WaitQueue,
+    write_wait_queue: task::WaitQueue,
     readable_sequence: AtomicU64,
     writable_sequence: AtomicU64,
 }
@@ -273,8 +273,8 @@ impl EventFdObject {
             counter: AtomicU64::new(initval as u64),
             semaphore,
             nonblocking: AtomicBool::new(nonblocking),
-            read_wait_queue: axtask::WaitQueue::new(),
-            write_wait_queue: axtask::WaitQueue::new(),
+            read_wait_queue: task::WaitQueue::new(),
+            write_wait_queue: task::WaitQueue::new(),
             readable_sequence: AtomicU64::new(0),
             writable_sequence: AtomicU64::new(0),
         }
@@ -413,7 +413,7 @@ impl EventFdObject {
 
     fn wait_for_ready(
         &self,
-        wait_queue: &axtask::WaitQueue,
+        wait_queue: &task::WaitQueue,
         wait_for_read: bool,
         wait_for_write: bool,
         deadline: Option<Duration>,
@@ -423,7 +423,7 @@ impl EventFdObject {
 
         match deadline {
             Some(deadline) => {
-                let now = axhal::time::monotonic_time();
+                let now = hal::time::monotonic_time();
                 if now >= deadline {
                     return Ok(self.ready_for(wait_for_read, wait_for_write));
                 }
@@ -515,7 +515,7 @@ impl FdObject for EventFdObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut Vec<&'a axtask::WaitQueue>,
+        wqs: &mut Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         let mut supported = false;
         if (events & POLLIN as i16) != 0 {
@@ -555,8 +555,8 @@ impl FdObject for EventFdObject {
 
 pub struct PipeShared {
     buffer: SpinNoPreempt<PipeRingBuffer>,
-    read_wait_queue: axtask::WaitQueue,
-    write_wait_queue: axtask::WaitQueue,
+    read_wait_queue: task::WaitQueue,
+    write_wait_queue: task::WaitQueue,
     reader_count: AtomicUsize,
     writer_count: AtomicUsize,
     pub zc_pages: SpinNoPreempt<alloc::collections::VecDeque<ZeroCopyPage>>,
@@ -566,8 +566,8 @@ impl PipeShared {
     fn new() -> Self {
         Self {
             buffer: SpinNoPreempt::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
-            read_wait_queue: axtask::WaitQueue::new(),
-            write_wait_queue: axtask::WaitQueue::new(),
+            read_wait_queue: task::WaitQueue::new(),
+            write_wait_queue: task::WaitQueue::new(),
             reader_count: AtomicUsize::new(1),
             writer_count: AtomicUsize::new(1),
             zc_pages: SpinNoPreempt::new(alloc::collections::VecDeque::new()),
@@ -577,8 +577,8 @@ impl PipeShared {
     fn new_fifo() -> Self {
         Self {
             buffer: SpinNoPreempt::new(PipeRingBuffer::new(DEFAULT_PIPE_CAPACITY)),
-            read_wait_queue: axtask::WaitQueue::new(),
-            write_wait_queue: axtask::WaitQueue::new(),
+            read_wait_queue: task::WaitQueue::new(),
+            write_wait_queue: task::WaitQueue::new(),
             reader_count: AtomicUsize::new(0),
             writer_count: AtomicUsize::new(0),
             zc_pages: SpinNoPreempt::new(alloc::collections::VecDeque::new()),
@@ -718,7 +718,7 @@ impl PipeObject {
             }
 
             for page in &pages_to_copy {
-                let src_kvaddr = axhal::mem::phys_to_virt(page.paddr) + page.offset;
+                let src_kvaddr = hal::mem::phys_to_virt(page.paddr) + page.offset;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         src_kvaddr.as_ptr(),
@@ -730,7 +730,7 @@ impl PipeObject {
             }
 
             if let Some((paddr, offset, len)) = partial_copy {
-                let src_kvaddr = axhal::mem::phys_to_virt(paddr) + offset;
+                let src_kvaddr = hal::mem::phys_to_virt(paddr) + offset;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         src_kvaddr.as_ptr(),
@@ -1261,7 +1261,7 @@ impl FdObject for PipeObject {
 
         match deadline {
             Some(deadline) => {
-                let now = axhal::time::monotonic_time();
+                let now = hal::time::monotonic_time();
                 if now >= deadline {
                     return Ok(self.ready_for(wait_for_read, wait_for_write));
                 }
@@ -1291,7 +1291,7 @@ impl FdObject for PipeObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+        wqs: &mut alloc::vec::Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         let mut supported = false;
         if self.readable && (events & (POLLIN as i16)) != 0 {
@@ -1461,18 +1461,18 @@ pub fn create_fifo_entry(
 
 #[cfg(feature = "guest-checks")]
 pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
-    axlog::ax_println!("[PIPE_GUEST] Starting pipe zero-copy and batch dealloc checks...");
+    kernel_log::ax_println!("[PIPE_GUEST] Starting pipe zero-copy and batch dealloc checks...");
 
     let process = crate::current_process()?;
     let aspace = process.aspace_handle();
 
     // Helper to allocate and mark a physical frame
     let alloc_frame = || -> Result<PhysAddr, LinuxError> {
-        let vaddr = axalloc::global_allocator()
-            .alloc_pages(1, axhal::mem::PAGE_SIZE_4K)
+        let vaddr = kernel_alloc::global_allocator()
+            .alloc_pages(1, hal::mem::PAGE_SIZE_4K)
             .map_err(|_| LinuxError::ENOMEM)?;
-        let frame = axhal::mem::virt_to_phys(VirtAddr::from(vaddr));
-        let table = axalloc::frame_table();
+        let frame = hal::mem::virt_to_phys(VirtAddr::from(vaddr));
+        let table = kernel_alloc::frame_table();
         if table.contains(frame) {
             table.mark_used(frame);
         }
@@ -1488,11 +1488,11 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
         let f2 = alloc_frame()?;
 
         unsafe {
-            let p0 = axhal::mem::phys_to_virt(f0).as_mut_ptr();
+            let p0 = hal::mem::phys_to_virt(f0).as_mut_ptr();
             core::ptr::write_bytes(p0, 0x11, PIPE_PAGE_SIZE);
-            let p1 = axhal::mem::phys_to_virt(f1).as_mut_ptr();
+            let p1 = hal::mem::phys_to_virt(f1).as_mut_ptr();
             core::ptr::write_bytes(p1, 0x22, PIPE_PAGE_SIZE);
-            let p2 = axhal::mem::phys_to_virt(f2).as_mut_ptr();
+            let p2 = hal::mem::phys_to_virt(f2).as_mut_ptr();
             core::ptr::write_bytes(p2, 0x33, PIPE_PAGE_SIZE);
         }
 
@@ -1523,14 +1523,14 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
 
         let _ = aspace.write().unmap(VirtAddr::from(test_va), 3 * PIPE_PAGE_SIZE);
     }
-    axlog::ax_println!("[PIPE_GUEST] Multi-page zero-copy read: PASS");
+    kernel_log::ax_println!("[PIPE_GUEST] Multi-page zero-copy read: PASS");
 
     // 2. Partial page fallback:
     {
         let (read_end, _write_end) = PipeObject::new_pair();
         let f = alloc_frame()?;
         unsafe {
-            let p = axhal::mem::phys_to_virt(f).as_mut_ptr();
+            let p = hal::mem::phys_to_virt(f).as_mut_ptr();
             core::ptr::write_bytes(p.add(64), 0x77, 128);
         }
         {
@@ -1538,7 +1538,7 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
             zc.push_back(ZeroCopyPage { paddr: f, offset: 64, len: 128 });
         }
 
-        let test_va = axconfig::user::USER_STACK_TOP - 0x10000;
+        let test_va = config::user::USER_STACK_TOP - 0x10000;
         let bytes_read = read_end.read_zerocopy(test_va, PIPE_PAGE_SIZE)?;
         assert_eq!(bytes_read, 128, "partial-page fallback byte count");
         assert!(read_end.shared.zc_pages.lock().is_empty(), "partial page should be consumed");
@@ -1547,7 +1547,7 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
         process.read_user_bytes(test_va, &mut verify_buf)?;
         assert!(verify_buf.iter().all(|&b| b == 0x77), "partial page content verified");
     }
-    axlog::ax_println!("[PIPE_GUEST] Partial-page fallback: PASS");
+    kernel_log::ax_println!("[PIPE_GUEST] Partial-page fallback: PASS");
 
     // 3. Remap failure rollback & FIFO restoration:
     // 3a. Failure on first page (unaligned user address): returns error, all pages restored in FIFO order
@@ -1581,7 +1581,7 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
         drop(zc);
         dealloc_physical_frames(&paddrs);
     }
-    axlog::ax_println!("[PIPE_GUEST] Remap failure total rollback: PASS");
+    kernel_log::ax_println!("[PIPE_GUEST] Remap failure total rollback: PASS");
 
     // 3b. Failure on subsequent page: short read returned, remaining pages restored in FIFO order
     {
@@ -1598,7 +1598,7 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
         }
 
         // Address at the end of user space so page 0 succeeds but page 1 is out of range
-        let border_va = axconfig::user::USER_SPACE_BASE + axconfig::user::USER_SPACE_SIZE - PIPE_PAGE_SIZE;
+        let border_va = config::user::USER_SPACE_BASE + config::user::USER_SPACE_SIZE - PIPE_PAGE_SIZE;
         let bytes_read = read_end.read_zerocopy(border_va, 3 * PIPE_PAGE_SIZE)?;
         assert_eq!(bytes_read, PIPE_PAGE_SIZE, "short read returns mapped page count");
 
@@ -1616,7 +1616,7 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
 
         let _ = aspace.write().unmap(VirtAddr::from(border_va), PIPE_PAGE_SIZE);
     }
-    axlog::ax_println!("[PIPE_GUEST] Remap partial failure short read & restoration: PASS");
+    kernel_log::ax_println!("[PIPE_GUEST] Remap partial failure short read & restoration: PASS");
 
     // 4. PipeObject::read multi-page consumption & lock-free batch frame deallocation
     {
@@ -1627,13 +1627,13 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
         let f3 = alloc_frame()?;
 
         unsafe {
-            let p0 = axhal::mem::phys_to_virt(f0).as_mut_ptr();
+            let p0 = hal::mem::phys_to_virt(f0).as_mut_ptr();
             core::ptr::write_bytes(p0, 0x41, PIPE_PAGE_SIZE);
-            let p1 = axhal::mem::phys_to_virt(f1).as_mut_ptr();
+            let p1 = hal::mem::phys_to_virt(f1).as_mut_ptr();
             core::ptr::write_bytes(p1, 0x42, PIPE_PAGE_SIZE);
-            let p2 = axhal::mem::phys_to_virt(f2).as_mut_ptr();
+            let p2 = hal::mem::phys_to_virt(f2).as_mut_ptr();
             core::ptr::write_bytes(p2, 0x43, PIPE_PAGE_SIZE);
-            let p3 = axhal::mem::phys_to_virt(f3).as_mut_ptr();
+            let p3 = hal::mem::phys_to_virt(f3).as_mut_ptr();
             core::ptr::write_bytes(p3, 0x44, PIPE_PAGE_SIZE);
         }
 
@@ -1656,13 +1656,13 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
         assert_eq!(read_buf[3 * PIPE_PAGE_SIZE], 0x44);
 
         // Frames were freed; verify refcount dropped to 0
-        let table = axalloc::frame_table();
+        let table = kernel_alloc::frame_table();
         assert_eq!(table.get_ref(f0), 0);
         assert_eq!(table.get_ref(f1), 0);
         assert_eq!(table.get_ref(f2), 0);
         assert_eq!(table.get_ref(f3), 0);
     }
-    axlog::ax_println!("[PIPE_GUEST] Lock-outside batch dealloc in read: PASS");
+    kernel_log::ax_println!("[PIPE_GUEST] Lock-outside batch dealloc in read: PASS");
 
     // 5. Closed-pipe unconsumed pages cleanup during rollback:
     {
@@ -1687,13 +1687,13 @@ pub fn run_pipe_guest_checks() -> Result<(), LinuxError> {
         // Because read_end_closed() was true, rollback directly frees unconsumed pages outside lock
         assert!(read_end.shared.zc_pages.lock().is_empty(), "zc_pages must be empty");
 
-        let table = axalloc::frame_table();
+        let table = kernel_alloc::frame_table();
         assert_eq!(table.get_ref(f0), 0, "frame 0 freed");
         assert_eq!(table.get_ref(f1), 0, "frame 1 freed");
     }
-    axlog::ax_println!("[PIPE_GUEST] Closed-pipe cleanup: PASS");
+    kernel_log::ax_println!("[PIPE_GUEST] Closed-pipe cleanup: PASS");
 
-    axlog::ax_println!("[PIPE_GUEST] All pipe checks PASSED!");
+    kernel_log::ax_println!("[PIPE_GUEST] All pipe checks PASSED!");
     Ok(())
 }
 

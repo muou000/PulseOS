@@ -1,5 +1,5 @@
---- a/modules/axtask/src/run_queue.rs
-+++ b/modules/axtask/src/run_queue.rs
+--- a/modules/task/src/run_queue.rs
++++ b/modules/task/src/run_queue.rs
 @@ -876,8 +876,19 @@
          crate::bpf_trace::task_block(&curr, trace_sequence, _context);
          drop(woke);
@@ -9,13 +9,13 @@
 +        let observe = curr.name().starts_with("io-uring-wk-");
 +        if observe {
 +            info!("io_uring worker wait task={} phase=block cpu={}",
-+                curr.id().as_u64(), axhal::percpu::this_cpu_id());
++                curr.id().as_u64(), hal::percpu::this_cpu_id());
 +        }
          trace!("task block woke: {}", curr.id_name());
          self.resched();
 +        if observe {
 +            info!("io_uring worker wait task={} phase=resume cpu={}",
-+                curr.id().as_u64(), axhal::percpu::this_cpu_id());
++                curr.id().as_u64(), hal::percpu::this_cpu_id());
 +        }
      }
 

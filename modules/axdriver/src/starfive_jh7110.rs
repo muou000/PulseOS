@@ -5,7 +5,7 @@ use core::{
     time::Duration,
 };
 
-use axalloc::global_allocator;
+use kernel_alloc::global_allocator;
 use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use axdriver_net::{
     EthernetAddress, NetBufPtr, NetDriverOps,
@@ -14,7 +14,7 @@ use axdriver_net::{
         Jh7110InterruptStatus,
     },
 };
-use axhal::mem::{PAGE_SIZE_4K, flush_dcache_range, phys_to_virt, virt_to_phys};
+use hal::mem::{PAGE_SIZE_4K, flush_dcache_range, phys_to_virt, virt_to_phys};
 use axpoll::PollSet;
 use fdt_raw::{Fdt, Node};
 use kspin::{SpinNoIrq, SpinNoPreempt};
@@ -141,8 +141,8 @@ struct IrqRegistration {
 
 impl Drop for IrqRegistration {
     fn drop(&mut self) {
-        axhal::irq::set_enable(self.irq, false);
-        let _ = axhal::irq::unregister(self.irq);
+        hal::irq::set_enable(self.irq, false);
+        let _ = hal::irq::unregister(self.irq);
         let mut slot = JH7110_DWMAC_IRQ.lock();
         if slot.as_ref().is_some_and(|(irq, _)| *irq == self.irq) {
             *slot = None;
@@ -209,7 +209,7 @@ pub(crate) fn probe() -> Option<Jh7110DwmacDevice> {
     let phy_status = device.phy_status();
     let phy_extended_status = device.phy_extended_status();
     let next_phy_poll_ns =
-        axhal::time::monotonic_time_nanos().saturating_add(PHY_POLL_INTERVAL_NANOS);
+        hal::time::monotonic_time_nanos().saturating_add(PHY_POLL_INTERVAL_NANOS);
     let irq_endpoint = device.irq_endpoint();
     let inner = Arc::new(Jh7110DwmacInner {
         device: SpinNoPreempt::new(device),
@@ -350,7 +350,7 @@ pub(crate) fn probe() -> Option<Jh7110DwmacDevice> {
 }
 
 fn boot_fdt() -> Option<Fdt<'static>> {
-    let dtb_paddr = axhal::get_bootarg();
+    let dtb_paddr = hal::get_bootarg();
     if dtb_paddr == 0 {
         return None;
     }
@@ -543,7 +543,7 @@ fn configure_starfive_gmac_resources(
         core::ptr::write_volatile(reset, reset_control & !AON_CRG_GMAC0_RESET_MASK);
     }
     fence(Ordering::SeqCst);
-    axhal::time::busy_wait(AON_CRG_RESET_SETTLE);
+    hal::time::busy_wait(AON_CRG_RESET_SETTLE);
 
     let status_ptr = unsafe { mmio_base.add(AON_CRG_RESET_STATUS).cast::<u32>() };
     let mut reset_status_after = unsafe { core::ptr::read_volatile(status_ptr) };
@@ -746,12 +746,12 @@ fn register_irq(irq: usize, device: &Arc<Jh7110DwmacInner>) -> DevResult {
         return Err(DevError::AlreadyExists);
     }
     *slot = Some((irq, Arc::downgrade(device)));
-    if !axhal::irq::register(irq, dwmac_irq_handler) {
+    if !hal::irq::register(irq, dwmac_irq_handler) {
         *slot = None;
         return Err(DevError::AlreadyExists);
     }
     drop(slot);
-    axhal::irq::set_enable(irq, true);
+    hal::irq::set_enable(irq, true);
     Ok(())
 }
 
@@ -814,7 +814,7 @@ fn phy_link_speed_duplex(status: u16) -> Option<(u16, bool)> {
 }
 
 fn refresh_phy_link(inner: &Jh7110DwmacInner, device: &Dwmac) {
-    let now = axhal::time::monotonic_time_nanos();
+    let now = hal::time::monotonic_time_nanos();
     let deadline = inner.next_phy_poll_ns.load(Ordering::Relaxed);
     if now < deadline
         || inner

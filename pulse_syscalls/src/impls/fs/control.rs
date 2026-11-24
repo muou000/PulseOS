@@ -32,7 +32,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
         ((metadata.st_rdev >> 8) & 0xfff) as u32 | ((metadata.st_rdev >> 32) & !0xfff) as u32;
     let minor = (metadata.st_rdev & 0xff) as u32 | ((metadata.st_rdev >> 12) & !0xff) as u32;
 
-    axlog::debug!(
+    kernel_log::debug!(
         "do_handle_loop_ioctl: fd={}, cmd={:#x}, major={}, minor={}",
         fd,
         cmd,
@@ -129,7 +129,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                 return Ok(0);
             }
             0x301 => {
-                axlog::debug!(
+                kernel_log::debug!(
                     "do_handle_loop_ioctl: handling HDIO_GETGEO for loop{}",
                     loop_id
                 );
@@ -163,7 +163,7 @@ fn handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> isize {
 
 fn warn_tty_ioctl_stub_once(fd: usize, cmd: u32) {
     if !TTY_IOCTL_STUB_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!(
+        kernel_log::warn!(
             "sys_ioctl: tty compatibility stub is active (fd={}, cmd={:#x}); semantics are \
              simplified",
             fd,
@@ -205,11 +205,11 @@ fn write_rtc_time(arg: usize) -> Result<(), LinuxError> {
     if arg == 0 {
         return Err(LinuxError::EFAULT);
     }
-    if axhal::time::epochoffset_nanos() == 0 {
+    if hal::time::epochoffset_nanos() == 0 {
         return Err(LinuxError::ENODEV);
     }
 
-    let wall_time = axhal::time::wall_time();
+    let wall_time = hal::time::wall_time();
     let datetime = chrono::DateTime::<Utc>::from_timestamp(
         wall_time.as_secs() as i64,
         wall_time.subsec_nanos(),
@@ -233,7 +233,7 @@ fn write_rtc_time(arg: usize) -> Result<(), LinuxError> {
 }
 
 pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
-    axlog::debug!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+    kernel_log::debug!("sys_ioctl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
 
     let cmd32 = cmd as u32;
 

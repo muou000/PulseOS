@@ -9,10 +9,10 @@ use alloc::{
 use core::{future::poll_fn, task::Poll, time::Duration};
 
 use axerrno::{LinuxError, LinuxResult};
-use axhal::time::{monotonic_time, wall_time};
+use hal::time::{monotonic_time, wall_time};
 use axio::{IoBuf, IoBufMut, Write};
 use axpoll::IoEvents;
-use axtask::future::sleep_until;
+use task::future::sleep_until;
 use linux_raw_sys::{
     general::{POLLERR, POLLNVAL, RLIMIT_FSIZE, iovec},
     io_uring::{__kernel_timespec, io_uring_op},
@@ -889,7 +889,7 @@ fn spawn_file_sync_op(
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;
             }
-            let res = axtask::future::block_on(run_file_sync_op(&entry, op));
+            let res = task::future::block_on(run_file_sync_op(&entry, op));
             drop(entry);
             let code = res.map(|()| 0).unwrap_or_else(|err| -err.code());
             state_cloned.complete_request(req_id, code, 0, true);
@@ -1529,7 +1529,7 @@ fn execute_regular_file_rw(
             return;
         }
 
-        let res = axtask::future::block_on(async {
+        let res = task::future::block_on(async {
             let file_obj = entry
                 .object
                 .as_any()
@@ -2018,7 +2018,7 @@ fn transfer_obj_chunk(
         let mut wake_on_completion = None;
         // A pending worker holds an inflight guard. Teardown must be able to wake it
         // even when no peer ever makes the stream ready (for example a linked write).
-        let result = axtask::future::block_on(poll_fn(|cx| {
+        let result = task::future::block_on(poll_fn(|cx| {
             registrations.clear();
             if let Some(reg) = wake_on_completion.take() {
                 ring.cq_wait_queue.unregister_waker(reg);

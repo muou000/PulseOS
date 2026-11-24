@@ -19,9 +19,9 @@ pub use cow_fault::{CowPageLoad, CowPagePrepared};
 
 pub use lifecycle::{MappingPlacement, MappingReservation, MappingWait, PreparedMapping};
 
-use axalloc::init_frame_table;
+use kernel_alloc::init_frame_table;
 use axerrno::{AxError, AxResult};
-use axhal::{
+use hal::{
     mem::{MemRegionFlags, PhysMemRegion, phys_to_virt},
     paging::MappingFlags,
 };
@@ -79,10 +79,10 @@ fn reg_flag_to_map_flag(f: MemRegionFlags) -> MappingFlags {
 /// Creates a new address space for kernel itself.
 pub fn new_kernel_aspace() -> AxResult<AddrSpace> {
     let mut aspace = AddrSpace::new_empty(
-        va!(axconfig::plat::KERNEL_ASPACE_BASE),
-        axconfig::plat::KERNEL_ASPACE_SIZE,
+        va!(config::plat::KERNEL_ASPACE_BASE),
+        config::plat::KERNEL_ASPACE_SIZE,
     )?;
-    for r in axhal::mem::memory_regions() {
+    for r in hal::mem::memory_regions() {
         // mapped range should contain the whole region if it is not aligned.
         let start = r.paddr.align_down_4k();
         let end = (r.paddr + r.size).align_up_4k();
@@ -170,9 +170,9 @@ pub fn init_memory_management() {
     info!("Initialize virtual memory management...");
 
     let (min_paddr, max_paddr) =
-        frame_table_bounds(axhal::mem::memory_regions()).unwrap_or_else(|| {
-            let start = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
-            (start, start + axconfig::plat::PHYS_MEMORY_SIZE)
+        frame_table_bounds(hal::mem::memory_regions()).unwrap_or_else(|| {
+            let start = PhysAddr::from(config::plat::PHYS_MEMORY_BASE);
+            (start, start + config::plat::PHYS_MEMORY_SIZE)
         });
 
     let total_memory_size = max_paddr.as_usize() - min_paddr.as_usize();
@@ -187,24 +187,24 @@ pub fn init_memory_management() {
     debug!("kernel address space init OK: {:#x?}", kernel_aspace);
     KERNEL_ASPACE.init_once(SpinNoIrq::new(kernel_aspace));
     unsafe {
-        axhal::asm::write_kernel_page_table(kernel_page_table_root());
-        axhal::asm::flush_tlb(None);
+        hal::asm::write_kernel_page_table(kernel_page_table_root());
+        hal::asm::flush_tlb(None);
     }
     #[cfg(target_arch = "riscv64")]
     {
-        let hardware_asid_mask = axhal::asm::hardware_asid_mask();
+        let hardware_asid_mask = hal::asm::hardware_asid_mask();
         debug!(
             "RISC-V hardware ASID: {} bits (mask {:#x}), global sfence: {}",
             hardware_asid_mask.count_ones(),
             hardware_asid_mask,
-            axhal::asm::global_sfence_required()
+            hal::asm::global_sfence_required()
         );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use axhal::mem::PhysMemRegion;
+    use hal::mem::PhysMemRegion;
     use memory_addr::PhysAddr;
 
     use super::frame_table_bounds;
@@ -224,7 +224,7 @@ mod tests {
 /// Initializes kernel paging for secondary CPUs.
 pub fn init_memory_management_secondary() {
     unsafe {
-        axhal::asm::write_kernel_page_table(kernel_page_table_root());
-        axhal::asm::flush_tlb(None);
+        hal::asm::write_kernel_page_table(kernel_page_table_root());
+        hal::asm::flush_tlb(None);
     }
 }

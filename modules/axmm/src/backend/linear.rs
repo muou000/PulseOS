@@ -1,4 +1,4 @@
-use axhal::paging::{MappingFlags, PageTable};
+use hal::paging::{MappingFlags, PageTable};
 use memory_addr::{PhysAddr, VirtAddr};
 use memory_set::MappingMutation;
 

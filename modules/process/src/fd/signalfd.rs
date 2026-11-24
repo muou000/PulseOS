@@ -101,7 +101,7 @@ fn minimal_siginfo(sig: usize) -> [u8; SIGNALFD_SIGINFO_SIZE] {
 pub struct SignalFdObject {
     mask: AtomicU64,
     nonblocking: AtomicBool,
-    mask_wait_queue: axtask::WaitQueue,
+    mask_wait_queue: task::WaitQueue,
 }
 
 impl SignalFdObject {
@@ -109,7 +109,7 @@ impl SignalFdObject {
         Self {
             mask: AtomicU64::new(mask),
             nonblocking: AtomicBool::new(nonblocking),
-            mask_wait_queue: axtask::WaitQueue::new(),
+            mask_wait_queue: task::WaitQueue::new(),
         }
     }
 
@@ -162,7 +162,7 @@ impl SignalFdObject {
 
     fn wait_for_signal(&self, thread: &Arc<crate::Thread>) {
         let wait_queues = [thread.signal_wait_queue(), &self.mask_wait_queue];
-        let _ = axtask::WaitQueue::wait_multiple_timeout_until(&wait_queues, None, || {
+        let _ = task::WaitQueue::wait_multiple_timeout_until(&wait_queues, None, || {
             self.is_readable(thread.as_ref()) || thread.has_pending_signal()
         });
     }
@@ -190,7 +190,7 @@ impl SignalFdObject {
 
         let remaining = match deadline {
             Some(deadline) => {
-                let now = axhal::time::monotonic_time();
+                let now = hal::time::monotonic_time();
                 if now >= deadline {
                     return Ok(false);
                 }
@@ -199,7 +199,7 @@ impl SignalFdObject {
             None => None,
         };
         let wait_queues = [thread.signal_wait_queue(), &self.mask_wait_queue];
-        let _ = axtask::WaitQueue::wait_multiple_timeout_until(
+        let _ = task::WaitQueue::wait_multiple_timeout_until(
             &wait_queues,
             remaining,
             || self.is_readable(thread.as_ref()) || thread.has_pending_signal(),
@@ -298,7 +298,7 @@ impl FdObject for SignalFdObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+        wqs: &mut alloc::vec::Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         if (events & POLLIN as i16) != 0 {
             // The caller's signal queue is registered separately by the

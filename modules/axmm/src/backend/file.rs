@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use axerrno::{AxError, AxResult};
-use axhal::{
+use hal::{
     mem::{flush_dcache_range, phys_to_virt},
     paging::{MappingFlags, PageSize, PageTable},
 };
@@ -337,7 +337,7 @@ impl OwnedFramePin {
     }
 
     fn from_mapping(frame: PhysAddr) -> AxResult<Self> {
-        let table = axalloc::frame_table();
+        let table = kernel_alloc::frame_table();
         if frame.as_usize() == 0
             || !frame.is_aligned_4k()
             || !table.try_get_ref(frame).is_some_and(|count| count != 0)

@@ -5,8 +5,8 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axhal::context::TrapFrame;
-use axtask::WaitQueue;
+use hal::context::TrapFrame;
+use task::WaitQueue;
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
@@ -151,9 +151,9 @@ impl SignalAltStack {
 }
 
 #[cfg(target_arch = "riscv64")]
-type SignalFpState = axcpu::FpState;
+type SignalFpState = cpu::FpState;
 #[cfg(target_arch = "loongarch64")]
-type SignalFpState = axcpu::FpuState;
+type SignalFpState = cpu::FpuState;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedSignalContext {
@@ -167,7 +167,7 @@ struct SavedSignalContext {
 struct SavedSignalFrame {
     context: SavedSignalContext,
     #[cfg(target_arch = "riscv64")]
-    vectors: Option<axcpu::riscv_vector::VectorState>,
+    vectors: Option<cpu::riscv_vector::VectorState>,
 }
 
 /// The Linux limit is a per-real-UID count, while each queued record keeps the
@@ -1165,7 +1165,7 @@ impl ThreadSignal {
         self.restore_altstack_from_frame(restored_altstack, current_sp(tf));
         self.in_handler.store(still_in_handler, Ordering::Release);
         self.skip_once.store(true, Ordering::Release);
-        axlog::debug!(
+        kernel_log::debug!(
             "restore_from_sigreturn complete: ip={:#x}, sp={:#x}, nested={}",
             current_ip(tf),
             current_sp(tf),
@@ -1231,7 +1231,7 @@ impl ThreadSignal {
         fp: SignalFpState,
     ) -> AxResult<()> {
         #[cfg(target_arch = "riscv64")]
-        let vectors = axcpu::riscv_vector::VectorState::capture().map_err(|_| AxError::NoMemory)?;
+        let vectors = cpu::riscv_vector::VectorState::capture().map_err(|_| AxError::NoMemory)?;
         self.saved_ctx.lock().push(SavedSignalFrame {
             context: SavedSignalContext { tf: *tf, old_mask, user_ucontext, fp },
             #[cfg(target_arch = "riscv64")]
@@ -1350,11 +1350,11 @@ fn restore_user_signal_context(
         tf.regs.s8 = gregs[31] as usize;
     }
 
-    if current_sp(&tf) >= axconfig::plat::KERNEL_ASPACE_BASE {
+    if current_sp(&tf) >= config::plat::KERNEL_ASPACE_BASE {
         return Err(AxError::BadAddress);
     }
     let pc = read_user_signal_pc(process, user_ucontext)?;
-    if pc >= axconfig::plat::KERNEL_ASPACE_BASE {
+    if pc >= config::plat::KERNEL_ASPACE_BASE {
         return Err(AxError::BadAddress);
     }
     set_ip(&mut tf, pc);
@@ -2390,7 +2390,7 @@ fn write_user_signal_fp_state(
 fn restore_user_signal_fp_state(
     process: &Process,
     saved: SavedSignalContext,
-) -> AxResult<axcpu::FpState> {
+) -> AxResult<cpu::FpState> {
     let Some(user_ucontext) = saved.user_ucontext else {
         return Ok(saved.fp);
     };
@@ -2431,7 +2431,7 @@ fn restore_user_signal_fp_state(
 fn restore_user_signal_fp_state(
     process: &Process,
     saved: SavedSignalContext,
-) -> AxResult<axcpu::FpuState> {
+) -> AxResult<cpu::FpuState> {
     let Some(user_ucontext) = saved.user_ucontext else {
         return Ok(saved.fp);
     };
@@ -2441,7 +2441,7 @@ fn restore_user_signal_fp_state(
         signal_context_addr(user_ucontext, LOONGARCH_SC_FLAGS_OFFSET)?,
     )?;
     if flags & LOONGARCH_SC_USED_FP == 0 {
-        return Ok(axcpu::FpuState::default());
+        return Ok(cpu::FpuState::default());
     }
 
     let extcontext = signal_context_addr(user_ucontext, LOONGARCH_SC_EXTCONTEXT_OFFSET)?;
@@ -2777,7 +2777,7 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
                     set_sp(tf, siginfo_addr);
                 }
                 Err(e) => {
-                    axlog::warn!("failed to build signal frame for sig {}: {:?}", sig, e);
+                    kernel_log::warn!("failed to build signal frame for sig {}: {:?}", sig, e);
                     sig_state.set_blocked_mask(restore_mask);
                     return Some(SignalDelivery {
                         sig: SIGSEGV as usize,

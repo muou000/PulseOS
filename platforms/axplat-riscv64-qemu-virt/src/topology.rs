@@ -47,7 +47,7 @@ pub(super) fn init_platform_from_dtb(dtb_paddr: usize) {
         // Firmware enters primary boot in S-mode with interrupts masked, before
         // secondary startup and user task creation.
         // Each secondary verifies its hardware width before joining the scheduler.
-        unsafe { axcpu::riscv_vector::initialize() };
+        unsafe { cpu::riscv_vector::initialize() };
     }
     if !parse_plic_topology(&fdt) {
         warn!("incomplete PLIC topology in DTB; using legacy QEMU virt context mapping");

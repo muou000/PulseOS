@@ -55,7 +55,7 @@ pub fn file_io_test_snapshot() -> FileIoTestSnapshot {
 
 fn selected() -> bool {
     let selected = TASK.load(Ordering::Acquire);
-    selected != 0 && axtask::current_may_uninit().is_some_and(|task| task.id().as_u64() == selected)
+    selected != 0 && task::current_may_uninit().is_some_and(|task| task.id().as_u64() == selected)
 }
 
 pub(super) fn position_acquired() {

@@ -96,7 +96,7 @@ impl Process {
     }
 
     pub fn read_sys_time_ns(&self) -> u64 {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         self.snapshot_cpu_time_ns(now_ns).1
     }
 
@@ -104,7 +104,7 @@ impl Process {
     /// `value_ns` is the initial timeout in nanoseconds (0 = disarm).
     /// `interval_ns` is the repeat interval (0 = one-shot).
     pub fn set_itimer_real(&self, value_ns: u64, interval_ns: u64) -> (u64, u64) {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         let old_deadline = self
             .time_context
             .itimer_real_deadline_ns
@@ -144,7 +144,7 @@ impl Process {
 
     /// Get ITIMER_REAL. Returns (remaining_ns, interval_ns).
     pub fn get_itimer_real(&self) -> (u64, u64) {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         let deadline = self
             .time_context
             .itimer_real_deadline_ns
@@ -290,7 +290,7 @@ impl Process {
             let _ = queue_signal_to_process(self, 27 /* SIGPROF */);
         }
 
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         if (work & TIMER_WORK_ITIMER_REAL) != 0 {
             self.drain_itimer_real_expiry(now_ns);
         }

@@ -52,7 +52,7 @@ resolver = "2"
 targets = ["loongarch64-unknown-none"]
 
 [features]
-fp-simd = ["axcpu/fp-simd"]
+fp-simd = ["cpu/fp-simd"]
 irq = ["axplat/irq"]
 rtc = ["dep:chrono"]
 smp = [
@@ -67,8 +67,8 @@ path = "src/lib.rs"
 [dependencies.axconfig-macros]
 version = "0.2"
 
-[dependencies.axcpu]
-version = "0.2"
+[dependencies.cpu]
+path = "../../modules/cpu"
 
 [dependencies.axplat]
 version = "0.3.0"

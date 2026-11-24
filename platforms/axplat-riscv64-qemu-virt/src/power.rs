@@ -33,7 +33,7 @@ impl PowerIf for PowerImpl {
         sbi_rt::system_reset(sbi_rt::Shutdown, sbi_rt::NoReason);
         warn!("It should shutdown!");
         loop {
-            axcpu::asm::halt();
+            cpu::asm::halt();
         }
     }
 
@@ -47,7 +47,7 @@ impl PowerIf for PowerImpl {
             // stay halted until the reset takes effect.
             warn!("SBI reset returned success unexpectedly; waiting for reset");
             loop {
-                axcpu::asm::halt();
+                cpu::asm::halt();
             }
         }
         if result.error == sbi_rt::SbiRet::not_supported().error {

@@ -6,7 +6,7 @@ pub use process::fd::{cpu_dma_latency, flock, record_lock};
 pub use process::{bpf, fd as fd_table, io_uring, socket as net, trap};
 
 pub mod config {
-    pub use axconfig::{KERNEL_STACK_SIZE, user::*};
+    pub use ::config::{KERNEL_STACK_SIZE, user::*};
 }
 
 pub mod mm {

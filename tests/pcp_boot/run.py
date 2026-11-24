@@ -42,7 +42,7 @@ def boot(command, path, timeout, require_early):
                     raise PermissionError(line)
             if verdict is None:
                 if b'panicked at' in raw or b'kernel panic' in raw:
-                    verdict='pcp_assertion' if b'panicked at modules/axalloc/src/buddy_slab.rs:' in raw else 'other_panic'
+                    verdict='panic'
                     finish_at=time.monotonic()+0.2
                 elif PASS in raw:
                     verdict='pcp_pass';finish_at=time.monotonic()+0.02
@@ -61,11 +61,11 @@ def boot(command, path, timeout, require_early):
         path.write_bytes(data)
         proc.stdout.close()
         if proc.stdin is not None:proc.stdin.close()
-    if verdict in ('pcp_assertion','other_panic'):
+    if verdict=='panic':
         # The first read may contain only the panic prefix. Classify from the
         # complete grace-period output, not that possibly fragmented prefix.
         verdict='pcp_assertion' if (b'[PCP_GUEST] Starting' in data and
-            b'panicked at modules/axalloc/src/buddy_slab.rs:' in data) else 'other_panic'
+            b'panicked at modules/kernel_alloc/src/buddy_slab.rs:' in data) else 'other_panic'
     if verdict=='pcp_pass' and require_early:
         raw=bytes(data)
         start=raw.find(b'[PCP_GUEST] Starting')

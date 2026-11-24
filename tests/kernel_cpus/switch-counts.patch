@@ -1,7 +1,7 @@
-diff --git a/modules/axtask/src/lib.rs b/modules/axtask/src/lib.rs
+diff --git a/modules/task/src/lib.rs b/modules/task/src/lib.rs
 index b470c6ee..bc845d57 100644
---- a/modules/axtask/src/lib.rs
-+++ b/modules/axtask/src/lib.rs
+--- a/modules/task/src/lib.rs
++++ b/modules/task/src/lib.rs
 @@ -43,6 +43,7 @@ cfg_if::cfg_if! {
 
          #[macro_use]
@@ -10,17 +10,17 @@ index b470c6ee..bc845d57 100644
          mod task;
          mod task_ext;
          #[cfg(feature = "bpf-trace")]
-diff --git a/modules/axtask/src/reservation_counts.rs b/modules/axtask/src/reservation_counts.rs
+diff --git a/modules/task/src/reservation_counts.rs b/modules/task/src/reservation_counts.rs
 new file mode 100644
 index 00000000..35f9300b
 --- /dev/null
-+++ b/modules/axtask/src/reservation_counts.rs
++++ b/modules/task/src/reservation_counts.rs
 @@ -0,0 +1,83 @@
 +//! First-user-switch-to-poweroff observations for the kernel CPU reservation guest test.
 +
 +use kspin::SpinNoIrq;
 +
-+const MAX_CPUS: usize = axconfig::plat::MAX_CPU_NUM;
++const MAX_CPUS: usize = config::plat::MAX_CPU_NUM;
 +
 +#[derive(Clone, Copy)]
 +struct Counts {
@@ -51,19 +51,19 @@ index 00000000..35f9300b
 +/// Called only by the incoming user thread's task-extension switch hook.
 +pub fn user_switch(tid: u64, task: u64) {
 +    let mut observation = OBSERVATION.lock();
-+    let cpu = axhal::percpu::this_cpu_id();
++    let cpu = hal::percpu::this_cpu_id();
 +    observation.cpus[cpu].user_switches += 1;
 +    observation.cpus[cpu].last_user_task = task;
 +    observation
 +        .first_user
-+        .get_or_insert_with(|| (cpu, tid, task, axhal::time::monotonic_time_nanos()));
++        .get_or_insert_with(|| (cpu, tid, task, hal::time::monotonic_time_nanos()));
 +}
 +
 +/// Count only an involuntary switch to a different task from the last user
 +/// task dispatched on this CPU. Scheduler task IDs are unique across its life.
 +pub(crate) fn preempted(task: u64) {
 +    let mut observation = OBSERVATION.lock();
-+    let counts = &mut observation.cpus[axhal::percpu::this_cpu_id()];
++    let counts = &mut observation.cpus[hal::percpu::this_cpu_id()];
 +    if counts.last_user_task == task {
 +        counts.user_preemptions += 1;
 +    }
@@ -75,7 +75,7 @@ index 00000000..35f9300b
 +    if observation.first_user.is_none() {
 +        return;
 +    }
-+    let counts = &mut observation.cpus[axhal::percpu::this_cpu_id()];
++    let counts = &mut observation.cpus[hal::percpu::this_cpu_id()];
 +    counts.gc_task = task;
 +    counts.gc_iterations += 1;
 +}
@@ -83,14 +83,14 @@ index 00000000..35f9300b
 +pub fn report() {
 +    let (snapshot, end_ns) = {
 +        let observation = OBSERVATION.lock();
-+        (*observation, axhal::time::monotonic_time_nanos())
++        (*observation, hal::time::monotonic_time_nanos())
 +    };
 +    let (cpu, tid, task, start_ns) = snapshot.first_user.expect("no user thread switched in");
 +    info!(
 +        "RESERVED_CPU_COUNTS first_cpu={cpu} first_tid={tid} first_task={task} end_ns={end_ns} \
 +         start_ns={start_ns}"
 +    );
-+    for (cpu, counts) in snapshot.cpus.iter().enumerate().take(axhal::cpu_num()) {
++    for (cpu, counts) in snapshot.cpus.iter().enumerate().take(hal::cpu_num()) {
 +        info!(
 +            "RESERVED_CPU_COUNT cpu={cpu} user_switches={} gc_task={} gc_iterations={} \
 +             user_preemptions={}",
@@ -99,10 +99,10 @@ index 00000000..35f9300b
 +    }
 +    info!("RESERVED_CPU_COUNTS_END");
 +}
-diff --git a/modules/axtask/src/run_queue.rs b/modules/axtask/src/run_queue.rs
+diff --git a/modules/task/src/run_queue.rs b/modules/task/src/run_queue.rs
 index 8a22ba18..ed1deef5 100644
---- a/modules/axtask/src/run_queue.rs
-+++ b/modules/axtask/src/run_queue.rs
+--- a/modules/task/src/run_queue.rs
++++ b/modules/task/src/run_queue.rs
 @@ -768,7 +768,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                  true,
                  WakeContext::unknown(),
@@ -122,7 +122,7 @@ index 8a22ba18..ed1deef5 100644
 +    fn resched_with_preemption(&mut self, preempt: bool) {
          let next = {
              let mut scheduler = self.inner.scheduler.lock();
-             let now_ns = axhal::time::monotonic_time_nanos();
+             let now_ns = hal::time::monotonic_time_nanos();
 @@ -1004,6 +1008,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
              next.id_name(),
              next.state()
@@ -147,8 +147,8 @@ index 89c1224e..444d41c5 100644
 +++ b/modules/process/src/thread.rs
 @@ -481,4 +481,5 @@
          #[cfg(feature = "guest-checks")]
-         USER_DISPATCHES[axhal::percpu::this_cpu_id()].fetch_add(1, Ordering::Relaxed);
-+        axtask::reservation_counts::user_switch(self.0.tid(), self.0.sampling_task_id());
+         USER_DISPATCHES[hal::percpu::this_cpu_id()].fetch_add(1, Ordering::Relaxed);
++        task::reservation_counts::user_switch(self.0.tid(), self.0.sampling_task_id());
          self.0.on_enter_cpu();
      }
 diff --git a/pulse_syscalls/src/impls/misc/system.rs b/pulse_syscalls/src/impls/misc/system.rs
@@ -159,10 +159,10 @@ index a00d08d3..94ebda54 100644
      match action {
          RebootAction::Restart => reset_system(),
          RebootAction::Restart2 => reset_system(),
--        RebootAction::Halt | RebootAction::PowerOff => axhal::power::system_off(),
+-        RebootAction::Halt | RebootAction::PowerOff => hal::power::system_off(),
 +        RebootAction::Halt | RebootAction::PowerOff => {
-+            axtask::reservation_counts::report();
-+            axhal::power::system_off()
++            task::reservation_counts::report();
++            hal::power::system_off()
 +        }
          RebootAction::SetCad(enabled) => {
              CAD_ENABLED.store(enabled, Ordering::Release);

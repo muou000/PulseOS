@@ -74,7 +74,7 @@ pub(crate) fn check_faccess_permission(
         return Ok(());
     }
 
-    let meta = axtask::future::block_on(location.metadata())
+    let meta = task::future::block_on(location.metadata())
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
 
     check_faccess_permission_with_metadata(location, &meta, mode, uid, gid)
@@ -99,7 +99,7 @@ pub(crate) fn check_faccess_permission_with_metadata(
         return Ok(());
     }
 
-    axlog::debug!(
+    kernel_log::debug!(
         "check_faccess_permission: location={:?}, mode={:#o}, uid={}, gid={}, meta.mode={:#o}, \
          meta.uid={}, meta.gid={}",
         location,

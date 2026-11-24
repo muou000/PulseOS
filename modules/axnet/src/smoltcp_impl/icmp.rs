@@ -7,7 +7,7 @@ use core::{
 use axerrno::{AxError, AxResult, ax_err, ax_err_type};
 use axio::PollState;
 use axpoll::{IoEvents, Pollable};
-use axsync::Mutex;
+use sync::Mutex;
 use smoltcp::{
     iface::SocketHandle,
     socket::icmp::{self, BindError, RecvError, SendError},
@@ -192,11 +192,11 @@ impl IcmpSocket {
         self.wait_queues.register_owned(waker, events)
     }
 
-    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn read_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.read
     }
 
-    pub fn write_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn write_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.write
     }
 
@@ -257,7 +257,7 @@ impl IcmpSocket {
     fn block_on<F, T>(
         &self,
         events: IoEvents,
-        deadline: Option<axhal::time::TimeValue>,
+        deadline: Option<hal::time::TimeValue>,
         mut operation: F,
     ) -> AxResult<T>
     where

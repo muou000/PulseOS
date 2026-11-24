@@ -7,7 +7,7 @@ use crate::impls::{
 };
 
 pub fn sys_getcwd(buf: usize, size: usize) -> isize {
-    axlog::debug!("sys_getcwd: buf={:#x}, size={}", buf, size);
+    kernel_log::debug!("sys_getcwd: buf={:#x}, size={}", buf, size);
     if buf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -41,17 +41,17 @@ pub fn sys_getcwd(buf: usize, size: usize) -> isize {
 }
 
 pub fn sys_chdir(path: usize) -> isize {
-    axlog::debug!("sys_chdir: path={:#x}", path);
+    kernel_log::debug!("sys_chdir: path={:#x}", path);
     let res = crate::impls::utils::with_user_path_str(path, |path| {
         with_process(|process| -> Result<(), LinuxError> {
             let dir = {
                 let fs = process.fs_context_handle().lock().clone();
-                match axtask::future::block_on(fs.resolve(path)) {
+                match task::future::block_on(fs.resolve(path)) {
                     Ok(dir) => dir,
                     Err(e) => {
                         let errno = LinuxError::from(e.canonicalize());
                         if errno == LinuxError::EFAULT {
-                            axlog::warn!(
+                            kernel_log::warn!(
                                 "sys_chdir: resolve returned EFAULT: pid={}, path={:?}, err={:?}",
                                 process.pid(),
                                 path,
@@ -82,7 +82,7 @@ pub fn sys_chdir(path: usize) -> isize {
 }
 
 pub fn sys_fchdir(fd: usize) -> isize {
-    axlog::debug!("sys_fchdir: fd={}", fd);
+    kernel_log::debug!("sys_fchdir: fd={}", fd);
     let object = match get_fd_object(fd) {
         Ok(object) => object,
         Err(e) => return -e.code() as isize,
@@ -111,7 +111,7 @@ pub fn sys_fchdir(fd: usize) -> isize {
 }
 
 pub fn sys_chroot(path: usize) -> isize {
-    axlog::debug!("sys_chroot: path={:#x}", path);
+    kernel_log::debug!("sys_chroot: path={:#x}", path);
     let dir = match resolve_location_at_ptr(linux_raw_sys::general::AT_FDCWD as i32, path, 0) {
         Ok(loc) => loc,
         Err(e) => return -e.code() as isize,

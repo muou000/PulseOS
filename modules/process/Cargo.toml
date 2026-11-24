@@ -11,13 +11,13 @@ repository.workspace = true
 bpf.workspace = true
 elf_loader.workspace = true
 ipc.workspace = true
-axhal = { workspace = true, features = ["paging", "uspace"] }
-axcpu.workspace = true
-axlog = { workspace = true }
-axconfig = { workspace = true }
-axalloc.workspace = true
-axtask = { workspace = true, features = ["multitask"] }
-axsync = { workspace = true, features = ["multitask"] }
+hal = { workspace = true, features = ["paging", "uspace"] }
+cpu.workspace = true
+kernel_log = { workspace = true }
+config = { workspace = true }
+kernel_alloc.workspace = true
+task = { workspace = true, features = ["multitask"] }
+sync = { workspace = true, features = ["multitask"] }
 axfs.workspace = true
 axfs-ng-vfs.workspace = true
 axpoll.workspace = true
@@ -42,8 +42,8 @@ heapless.workspace = true
 sha2 = { version = "0.10", default-features = false, optional = true }
 
 [features]
-ls2k1000 = ["axcpu/ls2k1000"]
-bpf-trace = ["bpf/bpf-trace", "axtask/bpf-trace", "axmm/mapping-observer", "dep:sha2"]
+ls2k1000 = ["cpu/ls2k1000"]
+bpf-trace = ["bpf/bpf-trace", "task/bpf-trace", "axmm/mapping-observer", "dep:sha2"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 file-io-test = ["axfs/file-io-test"]
 guest-checks = []

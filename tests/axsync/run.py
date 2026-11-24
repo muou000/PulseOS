@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the boot-time axsync checks with the repository's prescribed QEMU setup."""
+"""Run the boot-time sync checks with the repository's prescribed QEMU setup."""
 
 import argparse
 import hashlib
@@ -12,7 +12,7 @@ import time
 
 
 REPO = Path(__file__).resolve().parents[2]
-PASS = b"[AXSYNC_GUEST] All axsync lock stress & concurrency checks PASSED!"
+PASS = b"[AXSYNC_GUEST] All sync lock stress & concurrency checks PASSED!"
 
 
 def main():

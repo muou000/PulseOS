@@ -2,16 +2,16 @@
 #![no_main]
 
 #[macro_use]
-extern crate axlog;
+extern crate kernel_log;
 extern crate alloc;
-extern crate axhal;
+extern crate hal;
 #[cfg(all(target_arch = "loongarch64", feature = "ls2k1000"))]
 extern crate axplat_loongarch64_ls2k1000;
 #[cfg(all(target_arch = "riscv64", feature = "visionfive2"))]
 extern crate axplat_riscv64_visionfive2;
-extern crate axruntime;
+extern crate runtime;
 extern crate axnet;
-extern crate axsync;
+extern crate sync;
 extern crate pulse_core;
 extern crate pulse_syscalls;
 extern crate starry_vdso;
@@ -32,10 +32,10 @@ fn power_off_after_writeback() -> ! {
             result
         );
         loop {
-            axtask::yield_now();
+            task::yield_now();
         }
     }
-    axhal::power::system_off()
+    hal::power::system_off()
 }
 
 #[unsafe(no_mangle)]
@@ -43,7 +43,7 @@ fn main() {
     cpu_reservation::init();
 
     starry_vdso::vdso::init_vdso_data();
-    axruntime::vdso::set_update_hook(starry_vdso::vdso::update_vdso_data);
+    runtime::vdso::set_update_hook(starry_vdso::vdso::update_vdso_data);
 
     pulse_core::task::init_itimer_hook();
     info!("itimer hook registered");
@@ -83,7 +83,7 @@ fn main() {
             pulse_core::task::run_process_registry_guest_checks().expect("process registry guest checks failed");
             axfs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
             axnet::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
-            axsync::run_lock_stress_checks().expect("axsync lock stress checks failed");
+            sync::run_lock_stress_checks().expect("sync lock stress checks failed");
 
             // Start the sampling worker after isolated boot checks: its timer
             // wakeups/allocations must not race allocator accounting assertions
@@ -137,13 +137,13 @@ fn main() {
 
             let init_task = pulse_core::task::spawn_task_with_thread(inner, init_thread.clone(), true);
             loop {
-                axtask::yield_now();
+                task::yield_now();
             }
         }
         Err(e) => {
             error!("Failed to create user process: {:?}", e);
             loop {
-                axtask::yield_now();
+                task::yield_now();
             }
         }
     }

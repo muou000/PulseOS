@@ -327,7 +327,7 @@ pub fn sys_perf_event_open(
         Ok(thread) => thread.tid(),
         Err(e) => return -e.code() as isize,
     };
-    let max_cpus = axconfig::plat::MAX_CPU_NUM;
+    let max_cpus = config::plat::MAX_CPU_NUM;
 
     let scope_params = ScopeValidationParams {
         pid,

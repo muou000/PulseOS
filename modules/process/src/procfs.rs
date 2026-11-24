@@ -31,12 +31,12 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                 locked.numbered_entries_snapshot()
             };
             let timer = crate::bpf::sampling::stats_snapshot();
-            let trace = axtask::bpf_trace::total_drop_stats();
-            let fault = axtask::bpf_trace::page_fault_stats();
+            let trace = task::bpf_trace::total_drop_stats();
+            let fault = task::bpf_trace::page_fault_stats();
             // Capability version is independent of the diagnostics row format.
             // Freeze the actual online set rather than the configured maximum.
             let mut text = alloc::format!("PULSE_BPF_STATS version=1 pid={} available=1 capabilities_version=1 online_mask={} cpu_clock=1 task_clock=1 sched=1 fault=1 min_period_ns=1 stack_context_version=3 stack_depth={} stack_bytes={} registered_events={} trace_subscriptions={}\n",
-                process.pid(), axhal::online_cpu_mask(), pulse_bpf_schema::DEFAULT_STACK_DEPTH,
+                process.pid(), hal::online_cpu_mask(), pulse_bpf_schema::DEFAULT_STACK_DEPTH,
                 pulse_bpf_schema::DEFAULT_STACK_BYTE_LIMIT, crate::bpf::registered_perf_event_count(),
                 crate::bpf::tracepoint_subscription_count());
             writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_full={} trace_recursive={} fault_started={} fault_completed={} fault_clock_errors={}",
@@ -202,7 +202,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         };
 
         let ppid = proc.parent_pid();
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         let (utime_ns, stime_ns) = proc.snapshot_cpu_time_ns(now_ns);
         let utime = utime_ns / 10_000_000;
         let stime = stime_ns / 10_000_000;
@@ -302,17 +302,17 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         let mut out = String::new();
 
         for (start, end, flags, backend) in areas {
-            let r = if flags.contains(axhal::paging::MappingFlags::READ) {
+            let r = if flags.contains(hal::paging::MappingFlags::READ) {
                 "r"
             } else {
                 "-"
             };
-            let w = if flags.contains(axhal::paging::MappingFlags::WRITE) {
+            let w = if flags.contains(hal::paging::MappingFlags::WRITE) {
                 "w"
             } else {
                 "-"
             };
-            let x = if flags.contains(axhal::paging::MappingFlags::EXECUTE) {
+            let x = if flags.contains(hal::paging::MappingFlags::EXECUTE) {
                 "x"
             } else {
                 "-"
@@ -343,7 +343,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
                     let cached_file = mapping.file().as_any().downcast_ref::<axfs::CachedFile>();
                     if let Some(cached_file) = cached_file {
                         let loc = cached_file.location();
-                        if let Ok(meta) = axtask::future::block_on(loc.metadata()) {
+                        if let Ok(meta) = task::future::block_on(loc.metadata()) {
                             inode = meta.inode;
                             dev_major = meta.device >> 8;
                             dev_minor = meta.device & 0xff;
@@ -521,7 +521,7 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
         };
 
         let handle = thread_handle_from_task(&task)?;
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         let (utime_ns, stime_ns) = handle.snapshot_cpu_time_ns(now_ns);
         let utime = utime_ns / 10_000_000;
         let stime = stime_ns / 10_000_000;

@@ -5,7 +5,7 @@ use pulse_core::fd_table::{FdFlags, eventfd_entry};
 use crate::impls::fs::common::insert_fd_entry;
 
 pub fn sys_eventfd2(initval: u32, flags: u32) -> isize {
-    axlog::debug!("sys_eventfd2: initval={}, flags={:#x}", initval, flags);
+    kernel_log::debug!("sys_eventfd2: initval={}, flags={:#x}", initval, flags);
 
     let allowed = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
     if flags & !allowed != 0 {

@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use axhal::context::TrapFrame;
+use hal::context::TrapFrame;
 use linux_raw_sys::general::{
     MINSIGSTKSZ, O_CLOEXEC, O_NONBLOCK, SIGSEGV, SS_DISABLE, SS_ONSTACK, sigaction,
 };
@@ -49,7 +49,7 @@ pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize:
         let new_bits = match process.read_user_usize(set) {
             Ok(v) => v as u64,
             Err(e) => {
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_rt_sigprocmask: failed to read new mask: pid={}, tid={}, set={:#x}, \
                      err={:?}",
                     process.pid(),
@@ -70,7 +70,7 @@ pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize:
     if oldset != 0
         && let Err(e) = process.write_user_usize(oldset, old_mask as usize)
     {
-        axlog::warn!(
+        kernel_log::warn!(
             "sys_rt_sigprocmask: failed to write old mask: pid={}, tid={}, oldset={:#x}, err={:?}",
             process.pid(),
             thread.tid(),
@@ -104,7 +104,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
         let raw: SignalAction = match uaccess::read_user_value(&process, act) {
             Ok(v) => v,
             Err(e) => {
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_rt_sigaction: failed to read new action: pid={}, tid={}, signum={}, \
                      act={:#x}, err={:?}",
                     process.pid(),
@@ -146,7 +146,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
             mask: old.mask,
         };
         if let Err(e) = uaccess::write_user_value(&process, oldact, &raw) {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_rt_sigaction: failed to write old action: pid={}, tid={}, signum={}, \
                  oldact={:#x}, err={:?}",
                 process.pid(),
@@ -196,7 +196,7 @@ pub fn sys_rt_sigreturn(tf: &mut TrapFrame) -> isize {
     match thread.restore_from_sigreturn(tf) {
         Ok(ret) => ret as isize,
         Err(err) => {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_rt_sigreturn: invalid signal frame: pid={}, tid={}, err={:?}",
                 thread.process().pid(),
                 thread.tid(),
@@ -224,7 +224,7 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
     thread.begin_sigsuspend(new_mask);
     let signal_wait = thread.signal_wait_queue();
     let wait_context =
-        axtask::WaitContext::new(|| (axtask::WaitReason::Signal, thread.tid(), new_mask));
+        task::WaitContext::new(|| (task::WaitReason::Signal, thread.tid(), new_mask));
     signal_wait.wait_until_with_context(wait_context, || {
         thread.has_pending_signal() || thread.process().group_exiting()
     });
@@ -251,7 +251,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
     };
     let signal_wait = thread.signal_wait_queue();
     let wait_context =
-        axtask::WaitContext::new(|| (axtask::WaitReason::Signal, thread.tid(), waitset));
+        task::WaitContext::new(|| (task::WaitReason::Signal, thread.tid(), waitset));
 
     let deadline_ns = if timeout == 0 {
         None
@@ -261,7 +261,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
             Err(e) => return -e.code() as isize,
         };
         Some(
-            (axhal::time::monotonic_time_nanos() as u64)
+            (hal::time::monotonic_time_nanos() as u64)
                 .saturating_add(duration_to_nanos_saturating(ts)),
         )
     };
@@ -305,7 +305,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
             Some(deadline_ns) => {
                 #[cfg(feature = "irq")]
                 {
-                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                    let now_ns = hal::time::monotonic_time_nanos() as u64;
                     if now_ns >= deadline_ns {
                         return -LinuxError::EAGAIN.code() as isize;
                     }
@@ -328,10 +328,10 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
                 }
                 #[cfg(not(feature = "irq"))]
                 {
-                    if (axhal::time::monotonic_time_nanos() as u64) >= deadline_ns {
+                    if (hal::time::monotonic_time_nanos() as u64) >= deadline_ns {
                         return -LinuxError::EAGAIN.code() as isize;
                     }
-                    axtask::yield_now();
+                    task::yield_now();
                 }
             }
             None => {
@@ -363,7 +363,7 @@ pulse_user_abi::impl_user_abi_struct! {
 }
 
 pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
-    axlog::debug!("sys_sigaltstack: ss={:#x}, oss={:#x}", ss, oss);
+    kernel_log::debug!("sys_sigaltstack: ss={:#x}, oss={:#x}", ss, oss);
 
     let thread = match pulse_core::task::current_thread() {
         Ok(t) => t,

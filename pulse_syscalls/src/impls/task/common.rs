@@ -5,7 +5,7 @@ use pulse_core::task::{Process, uaccess};
 
 pub(super) fn read_user_usize(process: &Process, user_addr: usize) -> Result<usize, isize> {
     process.read_user_usize(user_addr).map_err(|e| {
-        axlog::warn!("read_user_usize failed: addr={:#x}, err={:?}", user_addr, e);
+        kernel_log::warn!("read_user_usize failed: addr={:#x}, err={:?}", user_addr, e);
         -LinuxError::EFAULT.code() as isize
     })
 }
@@ -14,7 +14,7 @@ pub(super) fn read_user_cstring(process: &Process, user_addr: usize) -> Result<S
     let (bytes, terminated) =
         uaccess::read_user_cstring_bytes(process, user_addr, uaccess::DEFAULT_USER_CSTRING_MAX)
             .map_err(|e| {
-                axlog::warn!(
+                kernel_log::warn!(
                     "read_user_cstring failed: addr={:#x}, err={:?}",
                     user_addr,
                     e
@@ -22,11 +22,11 @@ pub(super) fn read_user_cstring(process: &Process, user_addr: usize) -> Result<S
                 -LinuxError::EFAULT.code() as isize
             })?;
     if !terminated {
-        axlog::warn!("read_user_cstring ENAMETOOLONG: addr={:#x}", user_addr);
+        kernel_log::warn!("read_user_cstring ENAMETOOLONG: addr={:#x}", user_addr);
         return Err(-LinuxError::ENAMETOOLONG.code() as isize);
     }
     String::from_utf8(bytes).map_err(|e| {
-        axlog::warn!(
+        kernel_log::warn!(
             "read_user_cstring UTF8 err: addr={:#x}, err={:?}",
             user_addr,
             e
@@ -49,7 +49,7 @@ pub(super) fn read_user_string_array(
         let ptr = match read_user_usize(process, element_addr) {
             Ok(ptr) => ptr,
             Err(e) => {
-                axlog::warn!(
+                kernel_log::warn!(
                     "read_user_string_array: failed to read ptr at idx={} (element_addr={:#x}), \
                      err={}",
                     i,
@@ -65,7 +65,7 @@ pub(super) fn read_user_string_array(
         let s = match read_user_cstring(process, ptr) {
             Ok(s) => s,
             Err(e) => {
-                axlog::warn!(
+                kernel_log::warn!(
                     "read_user_string_array: failed to read cstring at idx={} (ptr={:#x}), err={}",
                     i,
                     ptr,
@@ -76,7 +76,7 @@ pub(super) fn read_user_string_array(
         };
         out.push(s);
     }
-    axlog::warn!(
+    kernel_log::warn!(
         "read_user_string_array: ARG_MAX_COUNT ({}) reached for array at {:#x}",
         ARG_MAX_COUNT,
         array_addr
@@ -89,7 +89,7 @@ pub(super) fn write_user_i32(process: &Process, user_addr: usize, value: i32) ->
         .write_user_i32(user_addr, value)
         .map(|_| 0)
         .unwrap_or_else(|e| {
-            axlog::warn!(
+            kernel_log::warn!(
                 "user write failed: addr={:#x}, value={}, err={:?}",
                 user_addr,
                 value,

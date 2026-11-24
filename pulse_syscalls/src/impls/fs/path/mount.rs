@@ -2,7 +2,7 @@ use super::*;
 
 // `FsContext` owns root/cwd/credentials; `Location` shares mount topology through Arc.
 fn resolve_existing_mount_path(ctx: &axfs::FsContext, path: &str) -> Result<String, LinuxError> {
-    let loc = axtask::future::block_on(ctx.resolve(Path::new(path)))
+    let loc = task::future::block_on(ctx.resolve(Path::new(path)))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
     loc.check_is_dir()
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
@@ -45,7 +45,7 @@ fn lookup_or_probe_fs(
     }
     let alias = axfs::mount_device_alias(source);
     let source = alias.as_deref().unwrap_or(source);
-    let loc = match axtask::future::block_on(ctx.resolve(Path::new(source))) {
+    let loc = match task::future::block_on(ctx.resolve(Path::new(source))) {
         Ok(loc) => loc,
         Err(e) => {
             // Some rootfs images refer to /dev/vda1 for a whole-disk
@@ -79,11 +79,11 @@ fn lookup_or_probe_fs(
             let disk = node
                 .get_block_device()
                 .map_err(|e| LinuxError::from(e.canonicalize()))?;
-            axtask::future::block_on(axfs::ext4::Ext4Filesystem::new(disk))
+            task::future::block_on(axfs::ext4::Ext4Filesystem::new(disk))
         }
         #[cfg(feature = "fat")]
         "vfat" => {
-            let volume = axtask::future::block_on(node.mount_fat());
+            let volume = task::future::block_on(node.mount_fat());
             if volume.is_ok()
                 && let Some(stale) = axfs::lookup_mountable_filesystem(path.as_str())
             {
@@ -103,7 +103,7 @@ fn sys_mount_propagation(target_path: &str, flags: usize) -> isize {
         None => {
             // Target path may not be a mountpoint itself; that's OK for
             // --make-private etc. on already-mounted paths – we just succeed.
-            axlog::debug!(
+            kernel_log::debug!(
                 "sys_mount_propagation: '{}' not a mounted mountpoint, treating as no-op",
                 target_path
             );
@@ -117,7 +117,7 @@ fn sys_mount_propagation(target_path: &str, flags: usize) -> isize {
     let is_private = (flags & MS_PRIVATE as usize) != 0;
     let is_unbindable = (flags & MS_UNBINDABLE as usize) != 0;
 
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_mount_propagation: target='{}' rec={} shared={} slave={} private={} unbindable={}",
         target_path,
         is_rec,
@@ -167,10 +167,10 @@ fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) 
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
-    axlog::debug!("sys_mount_move: '{}' -> '{}'", source_path, target_path);
+    kernel_log::debug!("sys_mount_move: '{}' -> '{}'", source_path, target_path);
 
     // Source must be a mountpoint root.
-    let source_loc = match axtask::future::block_on(ctx.resolve(&source_path)) {
+    let source_loc = match task::future::block_on(ctx.resolve(&source_path)) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -178,7 +178,7 @@ fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) 
         return -LinuxError::EINVAL.code() as isize;
     }
     // Target must exist and not already be a mount.
-    let target_loc = match axtask::future::block_on(ctx.resolve(target_path)) {
+    let target_loc = match task::future::block_on(ctx.resolve(target_path)) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -197,10 +197,10 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
     } else {
         flags
     };
-    axlog::debug!("sys_mount: target={:#x}, flags={:#x}", target, flags);
+    kernel_log::debug!("sys_mount: target={:#x}, flags={:#x}", target, flags);
     // Only warn if data is non-zero (flags may legitimately be set for remount/rdonly)
     if _data != 0 && !MOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!(
+        kernel_log::warn!(
             "sys_mount: mount data is ignored (data={:#x}); semantics are simplified",
             _data
         );
@@ -237,10 +237,10 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
         Err(e) => return -e.code() as isize,
     };
 
-    let target_loc = match axtask::future::block_on(ctx.resolve(Path::new(target_path_str))) {
+    let target_loc = match task::future::block_on(ctx.resolve(Path::new(target_path_str))) {
         Ok(loc) => loc,
         Err(e) => {
-            axlog::debug!(
+            kernel_log::debug!(
                 "sys_mount: failed to resolve target path '{}': {:?}",
                 target_path_str,
                 e
@@ -285,7 +285,7 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
             (true, false) => "ro,relatime",
             (false, false) => "rw,relatime",
         };
-        axlog::debug!("sys_mount: remount '{}' as {}", target_path, options);
+        kernel_log::debug!("sys_mount: remount '{}' as {}", target_path, options);
         axfs::register_mount_for_mountpoint(
             &source_path,
             &target_path,
@@ -322,12 +322,12 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
             Ok(None) => return -LinuxError::EINVAL.code() as isize,
             Err(e) => return -e.code() as isize,
         };
-        axlog::debug!(
+        kernel_log::debug!(
             "sys_mount: bind mount '{}' to '{}'",
             source_path,
             target_path
         );
-        let source_loc = match axtask::future::block_on(ctx.resolve(&source_path)) {
+        let source_loc = match task::future::block_on(ctx.resolve(&source_path)) {
             Ok(loc) => loc,
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
         };
@@ -348,7 +348,7 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
         Err(e) => return -e.code() as isize,
     };
 
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_mount: source={}, target={}, fstype={}",
         source_path,
         target_path,
@@ -361,18 +361,18 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
     match result {
         Ok(_) => 0,
         Err(e) => {
-            axlog::debug!("sys_mount: mount operation failed: {:?}", e);
+            kernel_log::debug!("sys_mount: mount operation failed: {:?}", e);
             -LinuxError::from(e.canonicalize()).code() as isize
         }
     }
 }
 
 pub fn sys_umount2(target: usize, flags: usize) -> isize {
-    axlog::debug!("sys_umount2: target={:#x}, flags={:#x}", target, flags);
+    kernel_log::debug!("sys_umount2: target={:#x}, flags={:#x}", target, flags);
     const UMOUNT_SUPPORTED_FLAGS: usize =
         (MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW) as usize;
     if (flags & !UMOUNT_SUPPORTED_FLAGS) != 0 && !UMOUNT_FLAGS_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!(
+        kernel_log::warn!(
             "sys_umount2: some unmount flags are ignored (flags={:#x}); semantics are simplified",
             flags
         );
@@ -399,7 +399,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
         Ok(ctx) => ctx,
         Err(e) => return -e.code() as isize,
     };
-    let target_loc = match axtask::future::block_on(ctx.resolve(target_path_raw)) {
+    let target_loc = match task::future::block_on(ctx.resolve(target_path_raw)) {
         Ok(loc) => loc,
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
@@ -418,7 +418,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
     // MNT_DETACH: lazy unmount – forcibly remove even if children exist.
     let is_detach = (flags & MNT_DETACH as usize) != 0;
 
-    let result = axtask::future::block_on(axfs::flush_and_unmount(&target_loc, is_detach));
+    let result = task::future::block_on(axfs::flush_and_unmount(&target_loc, is_detach));
 
     match result {
         Ok(()) => 0,

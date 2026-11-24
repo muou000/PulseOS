@@ -23,7 +23,7 @@ fn wait4_status_word(child: &Process, status_type: WaitidStatusType) -> i32 {
 }
 
 pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_wait4: pid={}, status={:#x}, options={}, rusage={:#x}",
         pid,
         status,
@@ -70,7 +70,7 @@ pub fn sys_wait4(pid: isize, status: usize, options: i32, rusage: usize) -> isiz
 }
 
 pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_waitid: idtype={}, id={}, infop={:#x}, options={:#x}",
         idtype,
         id,

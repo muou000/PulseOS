@@ -14,11 +14,12 @@ members = [
     "crates/pulse_user_abi",
     "crates/bpf-capture",
     "crates/bpf-analyzer",
+    "crates/compat/axcpu",
     "tools/bpf-record",
     "crates/virtio-drivers",
-    "modules/axalloc",
-    "modules/axconfig",
-    "modules/axcpu",
+    "modules/kernel_alloc",
+    "modules/config",
+    "modules/cpu",
     "modules/axdisplay",
     "modules/axdriver",
     "modules/axdriver_base",
@@ -29,17 +30,17 @@ members = [
     "modules/axdriver_virtio",
     "modules/axfs",
     "modules/axfs-ng-vfs",
-    "modules/axhal",
+    "modules/hal",
     "modules/axio",
-    "modules/axipi",
-    "modules/axlog",
+    "modules/ipi",
+    "modules/kernel_log",
     "modules/axmm",
     "modules/axnet",
     "modules/axpoll",
-    "modules/axruntime",
-    "modules/axsched",
-    "modules/axsync",
-    "modules/axtask",
+    "modules/runtime",
+    "modules/sched",
+    "modules/sync",
+    "modules/task",
     "modules/bpf",
     "modules/elf_loader",
     "modules/ipc",
@@ -84,19 +85,19 @@ axfeat = { path = "api/axfeat", features = [
     "irq",
 ] }
 
-axconfig = { path = "modules/axconfig" }
-axhal = { path = "modules/axhal", features = ["uspace", "fp-simd"] }
-axlog = { path = "modules/axlog" }
-axruntime = { path = "modules/axruntime" }
+config = { path = "modules/config" }
+hal = { path = "modules/hal", features = ["uspace", "fp-simd"] }
+kernel_log = { path = "modules/kernel_log" }
+runtime = { path = "modules/runtime" }
 axnet = { path = "modules/axnet", features = ["monolithic"] }
-axalloc = { path = "modules/axalloc", default-features = false }
-axtask = { path = "modules/axtask" }
-axsync = { path = "modules/axsync" }
+kernel_alloc = { path = "modules/kernel_alloc", default-features = false }
+task = { path = "modules/task" }
+sync = { path = "modules/sync" }
 axfs = { path = "modules/axfs", features = ["times"] }
 axmm = { path = "modules/axmm" }
 axdisplay = { path = "modules/axdisplay" }
 axdriver = { path = "modules/axdriver" }
-axipi = { path = "modules/axipi" }
+ipi = { path = "modules/ipi" }
 axerrno = "0.2"
 axpoll = { path = "modules/axpoll" }
 
@@ -154,8 +155,8 @@ async-lock = { version = "3.4", default-features = false }
 async-trait = "0.1"
 buddy-slab-allocator = { path = "crates/buddy-slab-allocator" }
 axconfig-macros = "0.2"
-axcpu = { path = "modules/axcpu" }
-axsched = { path = "modules/axsched" }
+cpu = { path = "modules/cpu" }
+sched = { path = "modules/sched" }
 cfg-if = "1.0"
 cpumask = "0.1"
 crate_interface = "0.1.4"
@@ -186,11 +187,10 @@ virtio-drivers = "0.7.4"
 lto = true
 
 [patch.crates-io]
-axsched = { path = "modules/axsched" }
 memory_set = { path = "crates/memory_set" }
 memory_addr = { path = "crates/memory_addr" }
 axfs-ng-vfs = { path = "modules/axfs-ng-vfs" }
-axcpu = { path = "modules/axcpu" }
+axcpu = { path = "crates/compat/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "platforms/axplat-loongarch64-qemu-virt" }
 axplat-loongarch64-ls2k1000 = { path = "platforms/axplat-loongarch64-ls2k1000" }
 axplat-riscv64-qemu-virt = { path = "platforms/axplat-riscv64-qemu-virt" }
@@ -237,7 +237,7 @@ visionfive2 = [
 ls2k1000 = [
     "dep:axplat-loongarch64-ls2k1000",
     "axfeat/driver-ls2k1000-ahci",
-    "axhal/ls2k1000",
+    "hal/ls2k1000",
     "pulse_core/ls2k1000",
 ]
 smp = [
@@ -253,20 +253,20 @@ guest-checks = ["pulse_core/guest-checks", "pulse_syscalls/guest-checks"]
 file-io-test = ["pulse_core/file-io-test", "pulse_syscalls/file-io-test"]
 bpf-trace = [
     "axfeat/bpf-trace",
-    "axtask/bpf-trace",
+    "task/bpf-trace",
     "pulse_core/bpf-trace",
     "pulse_syscalls/bpf-trace",
 ]
 
 [dependencies]
 axerrno.workspace = true
-axhal.workspace = true
-axlog.workspace = true
-axruntime = { workspace = true, features = ["pcp-boot-checks"] }
+hal.workspace = true
+kernel_log.workspace = true
+runtime = { workspace = true, features = ["pcp-boot-checks"] }
 axfs.workspace = true
 axfeat.workspace = true
-axtask.workspace = true
-axsync.workspace = true
+task.workspace = true
+sync.workspace = true
 axnet.workspace = true
 pulse_syscalls.workspace = true
 pulse_core.workspace = true

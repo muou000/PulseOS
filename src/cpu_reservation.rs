@@ -1,7 +1,7 @@
 //! Boot-time CPU reservation policy, loaded before creating PID 1.
 
 use axerrno::AxError;
-use axtask::future::block_on;
+use task::future::block_on;
 
 const RESERVED_CPUS: &str = "/etc/pulse-kernel-cpus";
 const SQPOLL_CPUS: &str = "/etc/pulse-sqpoll-cpus";
@@ -58,11 +58,11 @@ fn read_cpu_list(path: &str) -> usize {
 pub(super) fn init() {
     let reserved = read_cpu_list(RESERVED_CPUS);
     let sqpoll = read_cpu_list(SQPOLL_CPUS);
-    axtask::init_cpu_reservation(reserved, sqpoll).unwrap_or_else(|error| {
+    task::init_cpu_reservation(reserved, sqpoll).unwrap_or_else(|error| {
         panic!(
             "CPU reservation: {error} ({RESERVED_CPUS}={reserved:#x}, {SQPOLL_CPUS}={sqpoll:#x}, \
              online={:#x})",
-            axhal::online_cpu_mask()
+            hal::online_cpu_mask()
         )
     });
 }

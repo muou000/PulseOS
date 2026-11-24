@@ -15,21 +15,21 @@ ext4 = ["dep:ext4plus"]
 times = []
 std = []
 mapping-lifecycle-test = []
-file-io-test = ["axtask/multitask"]
+file-io-test = ["task/multitask"]
 
 [dependencies]
-axalloc.workspace = true
-axconfig.workspace = true
+kernel_alloc.workspace = true
+config.workspace = true
 axmm.workspace = true
-axtask.workspace = true
+task.workspace = true
 axdriver = { workspace = true, features = ["block", "async"] }
 axerrno.workspace = true
 axfs-ng-vfs.workspace = true
-axhal.workspace = true
+hal.workspace = true
 axio = { workspace = true, features = ["alloc"] }
-axlog.workspace = true
+kernel_log.workspace = true
 axpoll.workspace = true
-axsync.workspace = true
+sync.workspace = true
 bitflags.workspace = true
 cfg-if.workspace = true
 chrono.workspace = true

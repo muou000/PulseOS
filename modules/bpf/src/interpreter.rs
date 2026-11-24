@@ -62,7 +62,7 @@ impl BpfEnv for DefaultBpfEnv {
     fn ktime_get_ns(&self) -> u64 {
         #[cfg(target_os = "none")]
         {
-            axhal::time::monotonic_time_nanos()
+            hal::time::monotonic_time_nanos()
         }
         #[cfg(not(target_os = "none"))]
         {
@@ -73,7 +73,7 @@ impl BpfEnv for DefaultBpfEnv {
     fn get_smp_processor_id(&self) -> u32 {
         #[cfg(target_os = "none")]
         {
-            axhal::percpu::this_cpu_id() as u32
+            hal::percpu::this_cpu_id() as u32
         }
         #[cfg(not(target_os = "none"))]
         {

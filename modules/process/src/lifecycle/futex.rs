@@ -23,7 +23,7 @@ impl Process {
                 .query_vaddr(vaddr)
                 .map(|(paddr, ..)| paddr.as_usize())
                 .unwrap_or(addr);
-            axlog::debug!("futex_key: addr={:#x}, paddr={:#x}", addr, paddr);
+            kernel_log::debug!("futex_key: addr={:#x}, paddr={:#x}", addr, paddr);
             (paddr, false)
         }
     }
@@ -78,7 +78,7 @@ impl Process {
                 .query_vaddr(start)
                 .map_err(|_| AxError::BadAddress)?;
             let paddr = paddr.align_down_4k() + start.align_offset_4k();
-            let kvaddr = axhal::mem::phys_to_virt(paddr);
+            let kvaddr = hal::mem::phys_to_virt(paddr);
             kvaddrs.push(kvaddr.as_usize());
         }
         drop(aspace_guard);
@@ -109,13 +109,13 @@ impl Process {
             queue_keys.push((key, is_priv));
         }
 
-        let q_refs: alloc::vec::Vec<&axtask::WaitQueue> =
+        let q_refs: alloc::vec::Vec<&task::WaitQueue> =
             queues.iter().map(|q| q.as_ref()).collect();
 
         let mut mismatch = false;
 
         let resource_id = queue_keys.first().map(|(key, _)| *key as u64).unwrap_or(0);
-        let res = axtask::WaitQueue::wait_multiple_timeout_until_with_context(
+        let res = task::WaitQueue::wait_multiple_timeout_until_with_context(
             &q_refs,
             timeout_ns.map(core::time::Duration::from_nanos),
             WaitContext::new(|| (WaitReason::FutexWaitV, resource_id, nr_futexes as u64)),
@@ -193,7 +193,7 @@ impl Process {
             .query_vaddr(start)
             .map_err(|_| AxError::BadAddress)?;
         let paddr = paddr.align_down_4k() + start.align_offset_4k();
-        let kvaddr = axhal::mem::phys_to_virt(paddr);
+        let kvaddr = hal::mem::phys_to_virt(paddr);
 
         let current_thread = crate::current_thread().ok();
         let signal_pending = || {
@@ -208,7 +208,7 @@ impl Process {
 
         let (key, is_priv) = self.futex_key(addr, is_private);
 
-        axlog::debug!(
+        kernel_log::debug!(
             "futex_wait: tid={}, addr={:#x}, paddr={:#x}, expected={}, is_private={}",
             current_thread
                 .as_ref()
@@ -332,7 +332,7 @@ impl Process {
             }
         };
 
-        axlog::debug!(
+        kernel_log::debug!(
             "futex_wake: tid={}, addr={:#x}, count={}, is_private={}, woken={}",
             current_thread().map(|thread| thread.tid()).unwrap_or(0),
             addr,
@@ -751,7 +751,7 @@ impl FutexTable {
 pub static GLOBAL_FUTEX_TABLE: Lazy<FutexTable> = Lazy::new(FutexTable::new);
 
 pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
-    axlog::ax_println!("[FUTEX_GUEST] Starting FutexTable sharding & scatter/gather checks...");
+    kernel_log::ax_println!("[FUTEX_GUEST] Starting FutexTable sharding & scatter/gather checks...");
 
     let table = FutexTable::new();
 
@@ -802,7 +802,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
     assert_eq!(table.shard_entry_count(1), (1, 0));
     table.remove_if_empty(k1);
     assert_eq!(table.total_entry_count(), (0, 0));
-    axlog::ax_println!("[FUTEX_GUEST] Shard isolation and scatter: PASS");
+    kernel_log::ax_println!("[FUTEX_GUEST] Shard isolation and scatter: PASS");
 
     // 2. Bitset queue sharding & matching
     let bq0_1 = table.queue_mask(k0, 0b01);
@@ -831,7 +831,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
     table.remove_bitset_if_empty(k0);
     table.remove_bitset_if_empty(k1);
     assert_eq!(table.total_entry_count(), (0, 0));
-    axlog::ax_println!("[FUTEX_GUEST] Bitset queues per shard: PASS");
+    kernel_log::ax_println!("[FUTEX_GUEST] Bitset queues per shard: PASS");
 
     // 3. Active bitset wait and wake_mask test with worker task
     {
@@ -842,17 +842,17 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         let b_done = bitset_done.clone();
         let b_started = bitset_started.clone();
         let bq_clone = bq.clone();
-        let waiter = axtask::spawn_raw(
+        let waiter = task::spawn_raw(
             move || {
                 b_started.store(true, Ordering::Release);
                 bq_clone.wait_until(|| b_done.load(Ordering::Acquire));
             },
             "futex_bitset_waiter".into(),
-            axconfig::TASK_STACK_SIZE,
+            config::TASK_STACK_SIZE,
         );
 
         while !bitset_started.load(Ordering::Acquire) || bq.len() == 0 {
-            axtask::yield_now();
+            task::yield_now();
         }
 
         // Waking with non-overlapping mask 0b101 should NOT wake the waiter
@@ -869,7 +869,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         assert_eq!(bq.len(), 0);
         drop(bq);
         table.remove_bitset_if_empty(k0);
-        axlog::ax_println!("[FUTEX_GUEST] Active bitset wait and wake_mask: PASS");
+        kernel_log::ax_println!("[FUTEX_GUEST] Active bitset wait and wake_mask: PASS");
     }
 
     // 4. Active cross-shard requeue waiter migration
@@ -885,17 +885,17 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         let done_clone = waiter_done.clone();
         let started_clone = waiter_started.clone();
         let q_src_clone = q_src.clone();
-        let waiter = axtask::spawn_raw(
+        let waiter = task::spawn_raw(
             move || {
                 started_clone.store(true, Ordering::Release);
                 q_src_clone.wait_until(|| done_clone.load(Ordering::Acquire));
             },
             "futex_test_waiter".into(),
-            axconfig::TASK_STACK_SIZE,
+            config::TASK_STACK_SIZE,
         );
 
         while !waiter_started.load(Ordering::Acquire) || q_src.len() == 0 {
-            axtask::yield_now();
+            task::yield_now();
         }
         assert_eq!(q_src.len(), 1);
         assert_eq!(q_dst.len(), 0);
@@ -922,7 +922,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         drop(q_dst);
         table.remove_if_empty(k_src);
         table.remove_if_empty(k_dst);
-        axlog::ax_println!("[FUTEX_GUEST] Active cross-shard requeue waiter migration: PASS");
+        kernel_log::ax_println!("[FUTEX_GUEST] Active cross-shard requeue waiter migration: PASS");
     }
 
     // 5. Cross-shard requeue full ring traversal
@@ -940,7 +940,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
         let res = table.requeue(src, 0, dst, 10);
         assert_eq!(res, 0); // No active waiters, so 0 moved/woken
     }
-    axlog::ax_println!("[FUTEX_GUEST] Cross-shard requeue traversal: PASS");
+    kernel_log::ax_println!("[FUTEX_GUEST] Cross-shard requeue traversal: PASS");
 
     // 6. Gather operations: wake_all and clear across all shards
     for (shard, &k) in keys_by_shard.iter().enumerate() {
@@ -955,7 +955,7 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
 
     table.clear(); // clears all 32 shards
     assert_eq!(table.total_entry_count(), (0, 0));
-    axlog::ax_println!("[FUTEX_GUEST] Gather wake_all and clear: PASS");
+    kernel_log::ax_println!("[FUTEX_GUEST] Gather wake_all and clear: PASS");
 
     // 7. Arc ownership check in prune_empty_entries:
     // If a waiter holds an Arc, prune_empty_entries must NOT remove it from the shard.
@@ -968,8 +968,8 @@ pub fn run_futex_guest_checks() -> Result<(), axerrno::LinuxError> {
     // Now strong_count == 1, prune_empty_entries will clean it up!
     table.prune_empty_entries();
     assert_eq!(table.total_entry_count(), (0, 0));
-    axlog::ax_println!("[FUTEX_GUEST] Arc ownership retention and pruning: PASS");
+    kernel_log::ax_println!("[FUTEX_GUEST] Arc ownership retention and pruning: PASS");
 
-    axlog::ax_println!("[FUTEX_GUEST] All FutexTable sharding checks PASSED!");
+    kernel_log::ax_println!("[FUTEX_GUEST] All FutexTable sharding checks PASSED!");
     Ok(())
 }

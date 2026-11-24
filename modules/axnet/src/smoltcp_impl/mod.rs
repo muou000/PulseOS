@@ -20,12 +20,12 @@ pub use addr::{from_core_sockaddr, into_core_sockaddr};
 use axdriver::prelude::*;
 use axdriver_net::{DevError, NetBufPtr};
 use axerrno::{AxError, AxResult};
-use axhal::time::{
+use hal::time::{
     NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos as current_time_nanos,
     ticks_to_nanos,
 };
 use axpoll::IoEvents;
-use axsync::Mutex;
+use sync::Mutex;
 use lazyinit::LazyInit;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
@@ -66,28 +66,28 @@ static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
 static SOCKET_SET: LazyInit<SocketSetWrapper> = LazyInit::new();
 static SOCKET_WAIT_QUEUES: LazyInit<Mutex<BTreeMap<SocketHandle, SocketWaitEntry>>> =
     LazyInit::new();
-pub static NET_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+pub static NET_WAIT_QUEUE: task::WaitQueue = task::WaitQueue::new();
 // Keep background scheduling separate from the public readiness queue so a
 // successful stack poll cannot wake the poller into a self-sustaining loop.
-static NET_POLL_WAIT_QUEUE: axtask::WaitQueue = axtask::WaitQueue::new();
+static NET_POLL_WAIT_QUEUE: task::WaitQueue = task::WaitQueue::new();
 static NET_POLL_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct SocketWaitQueues {
-    read: axtask::WaitQueue,
-    write: axtask::WaitQueue,
-    any: axtask::WaitQueue,
+    read: task::WaitQueue,
+    write: task::WaitQueue,
+    any: task::WaitQueue,
 }
 
 impl SocketWaitQueues {
     pub(crate) const fn new() -> Self {
         Self {
-            read: axtask::WaitQueue::new(),
-            write: axtask::WaitQueue::new(),
-            any: axtask::WaitQueue::new(),
+            read: task::WaitQueue::new(),
+            write: task::WaitQueue::new(),
+            any: task::WaitQueue::new(),
         }
     }
 
-    fn queue(&self, events: IoEvents) -> &axtask::WaitQueue {
+    fn queue(&self, events: IoEvents) -> &task::WaitQueue {
         if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
             &self.read
         } else {
@@ -149,9 +149,9 @@ impl SocketWaitQueues {
 /// RAII handle owning per-socket waker registrations across read/write/any wait queues.
 pub struct SocketPollRegistration {
     queues: Arc<SocketWaitQueues>,
-    read: Option<axtask::WakerRegistration>,
-    write: Option<axtask::WakerRegistration>,
-    any: Option<axtask::WakerRegistration>,
+    read: Option<task::WakerRegistration>,
+    write: Option<task::WakerRegistration>,
+    any: Option<task::WakerRegistration>,
 }
 
 impl Drop for SocketPollRegistration {
@@ -702,7 +702,7 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
     LISTEN_TABLE.init_once(ListenTable::new());
 
     #[cfg(feature = "multitask")]
-    axtask::spawn(|| {
+    task::spawn(|| {
         struct NetWaker;
         impl alloc::task::Wake for NetWaker {
             fn wake(self: Arc<Self>) {
@@ -731,10 +731,10 @@ pub(crate) fn init(_net_dev: AxNetDevice) {
             poll_interfaces();
 
             let delay = next_poll_delay();
-            let wait_context = axtask::WaitContext::new(|| {
+            let wait_context = task::WaitContext::new(|| {
                 (
-                    axtask::WaitReason::NetworkPoll,
-                    &NET_POLL_WAIT_QUEUE as *const axtask::WaitQueue as usize as u64,
+                    task::WaitReason::NetworkPoll,
+                    &NET_POLL_WAIT_QUEUE as *const task::WaitQueue as usize as u64,
                     0,
                 )
             });
@@ -788,7 +788,7 @@ pub(crate) fn socket_deadline(ticks: u64) -> Option<TimeValue> {
 }
 
 pub(crate) fn block_on_socket_io<F, T>(
-    queue: &axtask::WaitQueue,
+    queue: &task::WaitQueue,
     nonblocking: bool,
     deadline: Option<TimeValue>,
     mut op: F,
@@ -825,8 +825,8 @@ where
         }
     };
 
-    axtask::future::block_on(async {
-        axtask::future::interruptible(axtask::future::timeout_at(deadline, wait_for_io))
+    task::future::block_on(async {
+        task::future::interruptible(task::future::timeout_at(deadline, wait_for_io))
             .await
             .map_err(AxError::from)?
             .map_err(|_| AxError::TimedOut)?

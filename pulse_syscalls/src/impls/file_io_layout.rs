@@ -2,7 +2,7 @@
 //! The probe faults its own pages before calling this test-build-only hook.
 
 use axerrno::LinuxError;
-use axhal::paging::MappingFlags;
+use hal::paging::MappingFlags;
 use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 
 pub(super) fn query_layout(address: usize, size: usize) -> Result<usize, LinuxError> {

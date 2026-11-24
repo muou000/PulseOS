@@ -29,7 +29,7 @@ impl Process {
                 if let Err(e) = thread.prepare_for_user_entry() {
                     panic!("fork child failed to prepare user entry: {:?}", e);
                 }
-                let kstack_top = axtask::current()
+                let kstack_top = task::current()
                     .kernel_stack_top()
                     .expect("child task has no kernel stack")
                     .as_usize();
@@ -37,7 +37,7 @@ impl Process {
                     child_uctx.enter_uspace(va!(kstack_top));
                 }
             },
-            axtask::current().name(),
+            task::current().name(),
             TASK_STACK_SIZE,
         )?;
 
@@ -105,7 +105,7 @@ impl Process {
                 if let Err(e) = thread.prepare_for_user_entry() {
                     panic!("clone child failed to prepare user entry: {:?}", e);
                 }
-                let kstack_top = axtask::current()
+                let kstack_top = task::current()
                     .kernel_stack_top()
                     .expect("child task has no kernel stack")
                     .as_usize();
@@ -113,7 +113,7 @@ impl Process {
                     child_uctx.enter_uspace(va!(kstack_top));
                 }
             },
-            axtask::current().name(),
+            task::current().name(),
             TASK_STACK_SIZE,
         )?;
 

@@ -1,13 +1,13 @@
 use alloc::{string::ToString, vec::Vec};
 
 use axerrno::LinuxError;
-use axhal::context::TrapFrame;
+use hal::context::TrapFrame;
 use pulse_core::task::current_thread;
 
 use super::common::{read_user_cstring, read_user_string_array};
 
 pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_execve: pathname={:#x}, argv={:#x}, envp={:#x}",
         pathname,
         argv,
@@ -25,7 +25,7 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
 
     let path_str = match read_user_cstring(&process, pathname) {
         Ok(path) => {
-            axlog::info!("sys_execve: path={:?}", path);
+            kernel_log::info!("sys_execve: path={:?}", path);
             path
         }
         Err(e) => return e,
@@ -52,13 +52,13 @@ pub fn sys_execve(_tf: &TrapFrame, pathname: usize, argv: usize, envp: usize) ->
     let mut envs_strs: Vec<&str> = Vec::new();
     for s in &envs {
         if s.starts_with("PATH=") {
-            axlog::debug!("sys_execve: env {}", s);
+            kernel_log::debug!("sys_execve: env {}", s);
         }
         envs_strs.push(s.as_str());
     }
 
     if let Err(e) = process.exec(&thread, &path_str, &args_strs, &envs_strs) {
-        axlog::debug!("sys_execve failed: {:?} (path={:?})", e, path_str);
+        kernel_log::debug!("sys_execve failed: {:?} (path={:?})", e, path_str);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
@@ -81,7 +81,7 @@ pub fn sys_execveat(
     envp: usize,
     flags: i32,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_execveat: dirfd={}, pathname={:#x}, argv={:#x}, envp={:#x}, flags={:#x}",
         dirfd,
         pathname,
@@ -108,7 +108,7 @@ pub fn sys_execveat(
             Err(e) => return -e.code() as isize,
         };
 
-    let metadata = match axtask::future::block_on(loc.metadata()) {
+    let metadata = match task::future::block_on(loc.metadata()) {
         Ok(m) => m,
         Err(e) => {
             let errno: LinuxError = e.into();
@@ -125,7 +125,7 @@ pub fn sys_execveat(
     let path_str = match loc.absolute_path() {
         Ok(p) => {
             let path = p.to_string();
-            axlog::info!("sys_execveat: path={:?}", path);
+            kernel_log::info!("sys_execveat: path={:?}", path);
             path
         }
         Err(e) => {
@@ -156,13 +156,13 @@ pub fn sys_execveat(
     let mut envs_strs: Vec<&str> = Vec::new();
     for s in &envs {
         if s.starts_with("PATH=") {
-            axlog::debug!("sys_execve: env {}", s);
+            kernel_log::debug!("sys_execve: env {}", s);
         }
         envs_strs.push(s.as_str());
     }
 
     if let Err(e) = process.exec(&thread, &path_str, &args_strs, &envs_strs) {
-        axlog::debug!("sys_execveat failed: {:?}", e);
+        kernel_log::debug!("sys_execveat failed: {:?}", e);
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }

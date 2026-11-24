@@ -29,7 +29,7 @@ fn read_timeout(timeout: usize) -> LinuxResult<Option<Duration>> {
 
 /// Creates a semaphore set or obtains its ID by key.
 pub fn sys_semget(key: i32, nsems: i32, semflg: i32) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_semget: key={}, nsems={}, semflg={:#o}",
         key,
         nsems,
@@ -79,7 +79,7 @@ fn semctl(semid: i32, semnum: i32, cmd: i32, arg: usize) -> LinuxResult<isize> {
 
 /// Decodes the semaphore control command and its scalar or pointer argument.
 pub fn sys_semctl(semid: i32, semnum: i32, cmd: i32, arg: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_semctl: semid={}, semnum={}, cmd={}, arg={:#x}",
         semid,
         semnum,
@@ -111,7 +111,7 @@ fn semtimedop(semid: i32, sops: usize, nsops: usize, timeout: usize) -> LinuxRes
 
 /// Applies the supplied semaphore operations with an optional relative timeout.
 pub fn sys_semtimedop(semid: i32, sops: usize, nsops: usize, timeout: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_semtimedop: semid={}, sops={:#x}, nsops={}, timeout={:#x}",
         semid,
         sops,

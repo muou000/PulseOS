@@ -206,10 +206,10 @@ unsafe fn write_boot_pte(table: *const Aligned4K<[LA64PTE; 512]>, index: usize, 
 }
 
 fn enable_fp_simd() {
-    axcpu::asm::enable_fp();
+    cpu::asm::enable_fp();
     #[cfg(feature = "fp-simd")]
     {
-        axcpu::asm::enable_lsx();
+        cpu::asm::enable_lsx();
     }
 }
 
@@ -220,7 +220,7 @@ fn init_mmu() {
     // mapping. Install it in both PGDH and PGDL, matching the LS2K1000
     // reference boot path and avoiding a hardware-specific root-selection
     // ambiguity during the very first TLB refill.
-    axcpu::init::init_mmu_with_user_root(root_paddr, root_paddr, PHYS_VIRT_OFFSET);
+    cpu::init::init_mmu_with_user_root(root_paddr, root_paddr, PHYS_VIRT_OFFSET);
 }
 
 /// Primary entry for a raw image started by `U-Boot go`.
@@ -292,7 +292,7 @@ unsafe extern "C" fn _start() -> ! {
         boot_stack = sym BOOT_STACK,
         enable_fp_simd = sym enable_fp_simd,
         init_boot_page_table = sym init_boot_page_table,
-        init_trap_early = sym axcpu::init::init_trap_early,
+        init_trap_early = sym cpu::init::init_trap_early,
         init_mmu = sym init_mmu,
         boot_fdt_paddr = sym crate::topology::boot_fdt_paddr,
         init_topology = sym crate::topology::init_from_dtb,

@@ -5,7 +5,7 @@
 
 use core::sync::atomic::Ordering;
 use axerrno::LinuxError;
-use axlog::*;
+use kernel_log::*;
 use super::get_socket;
 use pulse_core::net::SocketInner;
 
@@ -353,7 +353,7 @@ pub fn sys_getsockopt(
                     }
                     _ => 0,
                 };
-                let nanos = axhal::time::ticks_to_nanos(ticks);
+                let nanos = hal::time::ticks_to_nanos(ticks);
                 let tv = TimeVal {
                     tv_sec: (nanos / 1_000_000_000) as i64,
                     tv_usec: ((nanos % 1_000_000_000) / 1_000) as i64,
@@ -528,7 +528,7 @@ pub fn sys_setsockopt(
                     Err(e) => return -(e.code() as isize),
                 };
                 let nanos = tv.tv_sec as u64 * 1_000_000_000 + tv.tv_usec as u64 * 1_000;
-                let ticks = axhal::time::nanos_to_ticks(nanos);
+                let ticks = hal::time::nanos_to_ticks(nanos);
                 match &socket.inner {
                     SocketInner::Tcp(s) => {
                         if optname == 20 {

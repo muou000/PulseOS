@@ -62,7 +62,7 @@
 
 #[macro_use]
 extern crate log;
-extern crate axlog;
+extern crate kernel_log;
 
 #[cfg(any(feature = "dyn", feature = "starfive-jh7110-dwmac"))]
 extern crate alloc;

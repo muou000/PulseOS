@@ -68,15 +68,15 @@ fn boot_paddr<T>(ptr: *const T) -> PhysAddr {
 fn enable_fp_simd() {
     // Enable FP unconditionally to avoid FloatingPointUnavailable traps before
     // the regular exception path is ready.
-    axcpu::asm::enable_fp();
+    cpu::asm::enable_fp();
     #[cfg(feature = "fp-simd")]
     {
-        axcpu::asm::enable_lsx();
+        cpu::asm::enable_lsx();
     }
 }
 
 fn init_mmu() {
-    axcpu::init::init_mmu(boot_paddr(&raw const BOOT_PT_L0), PHYS_VIRT_OFFSET);
+    cpu::init::init_mmu(boot_paddr(&raw const BOOT_PT_L0), PHYS_VIRT_OFFSET);
 }
 
 /// The earliest entry point for the primary CPU.

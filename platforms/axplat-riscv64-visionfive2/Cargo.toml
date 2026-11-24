@@ -12,7 +12,7 @@ license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
 build = "build.rs"
 
 [features]
-fp-simd = ["axcpu/fp-simd"]
+fp-simd = ["cpu/fp-simd"]
 irq = ["axplat/irq"]
 smp = ["axplat/smp"]
 
@@ -22,7 +22,7 @@ path = "src/lib.rs"
 
 [dependencies]
 axconfig-macros = "0.2"
-axcpu = "0.2"
+cpu = { path = "../../modules/cpu" }
 axplat = "0.3.0"
 fdt-raw = "0.3"
 kspin = "0.1"

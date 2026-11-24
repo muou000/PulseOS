@@ -17,7 +17,7 @@ use core::{
 };
 
 use async_trait::async_trait;
-use axalloc::global_allocator;
+use kernel_alloc::global_allocator;
 use axfs_ng_vfs::{
     DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FileName, FileNode, FileNodeOps,
     Filesystem, FilesystemOps, InMemDir, InMemInode, Metadata, MetadataUpdate, NodeFlags, NodeOps,
@@ -881,7 +881,7 @@ impl FilesystemOps for ProcFilesystem {
 }
 
 fn now() -> Duration {
-    axhal::time::wall_time()
+    hal::time::wall_time()
 }
 
 fn to_kib(bytes: u64) -> u64 {
@@ -889,10 +889,10 @@ fn to_kib(bytes: u64) -> u64 {
 }
 
 fn render_meminfo() -> String {
-    let total_bytes = axhal::mem::total_ram_size() as u64;
+    let total_bytes = hal::mem::total_ram_size() as u64;
     let allocator = global_allocator();
     let free_bytes = allocator.available_bytes() as u64
-        + allocator.available_pages() as u64 * axhal::mem::PAGE_SIZE_4K as u64;
+        + allocator.available_pages() as u64 * hal::mem::PAGE_SIZE_4K as u64;
     let mem_free = free_bytes.min(total_bytes);
     let mem_available = mem_free;
 
@@ -1016,7 +1016,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
         ProcLiveFileKind::BpfMappings => PROCESS_PROVIDER.get()
             .and_then(|provider| provider.bpf_mappings()).unwrap_or_default(),
         ProcLiveFileKind::Uptime => {
-            let mono = axhal::time::monotonic_time();
+            let mono = hal::time::monotonic_time();
             let secs = mono.as_secs();
             let centis = mono.subsec_millis() / 10;
             format!("{}.{:02} 0.00\n", secs, centis)

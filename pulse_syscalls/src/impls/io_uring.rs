@@ -163,7 +163,7 @@ pub(crate) fn sys_io_uring_enter(
     {
         return submitted as isize;
     }
-    axtask::future::drive_ready(64);
+    task::future::drive_ready(64);
 
     if (flags & IORING_ENTER_GETEVENTS) == 0 || stopped_on_inline_error {
         return submitted as isize;
@@ -193,10 +193,10 @@ pub(crate) fn sys_io_uring_enter(
         if timeout_dur == Some(Duration::ZERO) {
             wait_err = Some(LinuxError::ETIME);
         } else {
-            let deadline = timeout_dur.map(|d| axhal::time::monotonic_time().saturating_add(d));
+            let deadline = timeout_dur.map(|d| hal::time::monotonic_time().saturating_add(d));
             let wait_queues = [&state.cq_wait_queue, thread.signal_wait_queue()];
             loop {
-                axtask::future::drive_ready(32);
+                task::future::drive_ready(32);
                 let (ready_now, _) = state.check_cq_ready_and_ebadr(false);
                 cq_ready = ready_now;
 
@@ -227,7 +227,7 @@ pub(crate) fn sys_io_uring_enter(
                 }
                 let remain = match deadline {
                     Some(dl) => {
-                        let now = axhal::time::monotonic_time();
+                        let now = hal::time::monotonic_time();
                         if now >= dl {
                             wait_err = Some(LinuxError::ETIME);
                             break;
@@ -237,11 +237,11 @@ pub(crate) fn sys_io_uring_enter(
                     None => None,
                 };
 
-                let res = axtask::WaitQueue::wait_multiple_timeout_until(
+                let res = task::WaitQueue::wait_multiple_timeout_until(
                     &wait_queues,
                     remain,
                     || {
-                        let _ = axtask::future::drive_ready(16);
+                        let _ = task::future::drive_ready(16);
                         state.is_dying()
                             || state.sqpoll_stopped()
                             || current_have_signals()
@@ -249,7 +249,7 @@ pub(crate) fn sys_io_uring_enter(
                             || state.check_cq_ready_and_ebadr(false).0 >= effective_min
                     },
                 );
-                axtask::future::drive_ready(32);
+                task::future::drive_ready(32);
                 let (ready_after, _) = state.check_cq_ready_and_ebadr(false);
                 cq_ready = ready_after;
                 if cq_ready >= effective_min
@@ -279,7 +279,7 @@ pub(crate) fn sys_io_uring_enter(
 
     // Re-check ready futures and overflow FIFO once more before final decision so any
     // last-moment CQE wins cleanly over `-EINTR` / `-ETIME` (ADR-0002 / #231).
-    axtask::future::drive_ready(32);
+    task::future::drive_ready(32);
     let (final_ready, final_ebadr) = state.check_cq_ready_and_ebadr(submitted == 0 && wait_err.is_none());
     cq_ready = final_ready;
     if final_ebadr {

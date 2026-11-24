@@ -1,0 +1,69 @@
+[package]
+name = "task"
+version.workspace = true
+edition.workspace = true
+authors = ["Yuekai Jia <equation618@gmail.com>"]
+description = "ArceOS task management module"
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/axtask"
+documentation = "https://arceos-org.github.io/arceos/axtask/index.html"
+
+[features]
+default = []
+
+multitask = [
+    "dep:config",
+    "dep:kernel_alloc",
+    "dep:percpu",
+    "dep:kspin",
+    "dep:spin",
+    "dep:memory_addr",
+    "dep:sched",
+    "dep:timer_list",
+    "kernel_guard",
+    "dep:crate_interface",
+    "dep:cpumask",
+]
+irq = []
+ipi = ["irq", "dep:ipi"]
+tls = ["hal/tls"]
+preempt = ["irq", "percpu?/preempt", "kernel_guard/preempt"]
+smp = ["kspin/smp"]
+bpf-trace = ["multitask", "dep:pulse_bpf_schema"]
+
+sched-fifo = ["multitask"]
+sched-rr = ["multitask", "preempt"]
+sched-cfs = ["multitask", "preempt"]
+sched-eevdf = ["multitask", "preempt"]
+sched-load-balance = ["multitask"]
+
+test = ["percpu?/sp-naive", "kernel_alloc?/tlsf", "kernel_alloc?/page-alloc-64g"]
+
+[dependencies]
+cfg-if.workspace = true
+log.workspace = true
+hal.workspace = true
+axerrno.workspace = true
+config = { workspace = true, optional = true }
+kernel_alloc = { workspace = true, optional = true }
+percpu = { workspace = true, optional = true }
+kspin = { workspace = true, optional = true }
+spin = { workspace = true, optional = true }
+lazyinit.workspace = true
+memory_addr = { workspace = true, optional = true }
+timer_list = { workspace = true, optional = true }
+kernel_guard = { workspace = true, optional = true }
+crate_interface = { workspace = true, optional = true }
+cpumask = { workspace = true, optional = true }
+sched = { workspace = true, optional = true }
+axpoll.workspace = true
+axio.workspace = true
+futures-util.workspace = true
+ipi = { workspace = true, optional = true }
+pulse_bpf_schema = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand.workspace = true
+hal = { workspace = true, features = ["fp-simd"] }
+task = { workspace = true, features = ["test", "multitask"] }

@@ -1,8 +1,8 @@
 use crate::Backend;
 use alloc::sync::Arc;
-use axalloc::global_allocator;
-use axhal::mem::virt_to_phys;
-use axhal::paging::{MappingFlags, PageSize, PageTable};
+use kernel_alloc::global_allocator;
+use hal::mem::virt_to_phys;
+use hal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memory_set::MappingMutation;
 

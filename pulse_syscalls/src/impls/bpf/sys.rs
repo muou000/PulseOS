@@ -266,7 +266,7 @@ fn link_detach(process: &Process, attr: &BpfLinkDetachAttr) -> Result<isize, Lin
 
 #[cfg(feature = "guest-checks")]
 pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
-    axlog::ax_println!("[BPF_GUEST] Starting BPF Map element control plane checks...");
+    kernel_log::ax_println!("[BPF_GUEST] Starting BPF Map element control plane checks...");
 
     // 1. Hash map: key_size=8, val_size=1024, max_entries=1
     let hash_req = BpfMapCreateRequest {
@@ -342,9 +342,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         return Err(LinuxError::EINVAL);
     }
 
-    axlog::ax_println!("[BPF_GUEST] BPF_MAP01 assertions: PASS");
+    kernel_log::ax_println!("[BPF_GUEST] BPF_MAP01 assertions: PASS");
 
-    axlog::ax_println!("[BPF_GUEST] Starting BPF Program load and verifier checks...");
+    kernel_log::ax_println!("[BPF_GUEST] Starting BPF Program load and verifier checks...");
 
     // 1. Valid TRACEPOINT program: r0 = 0; exit
     let valid_insns = [
@@ -391,9 +391,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         return Err(LinuxError::EINVAL);
     }
 
-    axlog::ax_println!("[BPF_GUEST] BPF_PROG_LOAD verifier assertions: PASS");
+    kernel_log::ax_println!("[BPF_GUEST] BPF_PROG_LOAD verifier assertions: PASS");
 
-    axlog::ax_println!("[BPF_GUEST] Starting BPF Program execution and Map helper checks...");
+    kernel_log::ax_println!("[BPF_GUEST] Starting BPF Program execution and Map helper checks...");
 
     struct GuestMapResolver {
         map: Arc<BpfMap>,
@@ -508,9 +508,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         return Err(LinuxError::EINVAL);
     }
 
-    axlog::ax_println!("[BPF_GUEST] BPF Program execution assertions: PASS");
+    kernel_log::ax_println!("[BPF_GUEST] BPF Program execution assertions: PASS");
 
-    axlog::ax_println!("[BPF_GUEST] Starting software perf event control checks...");
+    kernel_log::ax_println!("[BPF_GUEST] Starting software perf event control checks...");
 
     // 1. CPU clock event: disabled by default
     let cpu_spec = bpf::PerfEventSpec {
@@ -598,9 +598,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         return Err(LinuxError::EINVAL);
     }
 
-    axlog::ax_println!("[BPF_GUEST] Perf Event assertions: PASS (cpu_ns={}, task_ns={})", elapsed, task_elapsed);
+    kernel_log::ax_println!("[BPF_GUEST] Perf Event assertions: PASS (cpu_ns={}, task_ns={})", elapsed, task_elapsed);
 
-    axlog::ax_println!("[BPF_GUEST] Starting BPF Link and attach assertions...");
+    kernel_log::ax_println!("[BPF_GUEST] Starting BPF Link and attach assertions...");
 
     let link_insns = [
         bpf::BpfInsn::new(
@@ -664,7 +664,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
     // Subscribed to SchedSwitch
     #[cfg(feature = "bpf-trace")]
-    if !axtask::bpf_trace::has_subscribers(pulse_bpf_schema::TracepointId::SchedSwitch) {
+    if !task::bpf_trace::has_subscribers(pulse_bpf_schema::TracepointId::SchedSwitch) {
         return Err(LinuxError::EINVAL);
     }
 
@@ -711,7 +711,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
     // Probe unregistered: no events after detach!
     #[cfg(feature = "bpf-trace")]
-    if axtask::bpf_trace::has_subscribers(pulse_bpf_schema::TracepointId::SchedSwitch) {
+    if task::bpf_trace::has_subscribers(pulse_bpf_schema::TracepointId::SchedSwitch) {
         return Err(LinuxError::EINVAL);
     }
 
@@ -728,9 +728,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         return Err(LinuxError::EINVAL);
     }
 
-    axlog::ax_println!("[BPF_GUEST] BPF Link and attach assertions: PASS");
+    kernel_log::ax_println!("[BPF_GUEST] BPF Link and attach assertions: PASS");
 
-    axlog::ax_println!("[BPF_GUEST] Starting PERF_EVENT sampling checks...");
+    kernel_log::ax_println!("[BPF_GUEST] Starting PERF_EVENT sampling checks...");
 
     let sample_map_req = BpfMapCreateRequest {
         map_type: bpf::BPF_MAP_TYPE_ARRAY,
@@ -826,7 +826,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
 
     sampling_link.detach()?;
 
-    axlog::ax_println!("[BPF_GUEST] PERF_EVENT sampling assertions: PASS");
+    kernel_log::ax_println!("[BPF_GUEST] PERF_EVENT sampling assertions: PASS");
 
     Ok(())
 }

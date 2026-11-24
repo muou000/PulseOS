@@ -123,7 +123,7 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
 }
 
 pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, pos_l: usize, pos_h: usize) -> isize {
-    axlog::trace!(
+    kernel_log::trace!(
         "sys_preadv: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}",
         fd,
         iov,
@@ -246,7 +246,7 @@ pub fn sys_preadv2(
     pos_h: usize,
     flags: usize,
 ) -> isize {
-    axlog::trace!(
+    kernel_log::trace!(
         "sys_preadv2: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}, flags={:#x}",
         fd,
         iov,
@@ -269,7 +269,7 @@ pub fn sys_preadv2(
 }
 
 pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, pos_l: usize, pos_h: usize) -> isize {
-    axlog::trace!(
+    kernel_log::trace!(
         "sys_pwritev: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}",
         fd,
         iov,
@@ -325,7 +325,7 @@ pub fn sys_pwritev2(
     pos_h: usize,
     flags: usize,
 ) -> isize {
-    axlog::trace!(
+    kernel_log::trace!(
         "sys_pwritev2: fd={}, iov={:#x}, iovcnt={}, pos_l={}, pos_h={}, flags={:#x}",
         fd,
         iov,

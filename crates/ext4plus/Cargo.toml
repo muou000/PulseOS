@@ -59,7 +59,7 @@ multi-threaded = []
 std = []
 sync = [
     "maybe-async/is_sync",
-    "dep:axsync",
+    "dep:sync",
 ]
 
 [lib]
@@ -86,8 +86,8 @@ version = "3.0"
 [dependencies.maybe-async]
 version = "0.2"
 
-[dependencies.axsync]
-path = "../../modules/axsync"
+[dependencies.sync]
+path = "../../modules/sync"
 optional = true
 
 [dev-dependencies.anyhow]

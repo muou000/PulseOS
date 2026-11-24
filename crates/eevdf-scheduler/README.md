@@ -78,8 +78,8 @@ optimization landed in
 (`feat(sched): optimize EEVDF queues and RT policies`). See [NOTICE](NOTICE) for
 interface attribution.
 
-The crate intentionally contains no `axsched::BaseScheduler` dependency.
-PulseOS keeps that common scheduler contract and its EEVDF adapter in `axsched`,
+The crate intentionally contains no `sched::BaseScheduler` dependency.
+PulseOS keeps that common scheduler contract and its EEVDF adapter in `sched`,
 so other kernels can integrate the algorithm through their own interfaces.
 
 ## License

@@ -8,7 +8,7 @@
 //! Platform premises: `AddrSpace::pin_user_frame` checks USER and requested
 //! permissions while acquiring a frame reference under the leaf-page-table
 //! lock; references keep managed RAM and its kernel direct mapping alive.
-//! The existing RV64/LA64 `axcpu::user_copy` assembly copies through raw
+//! The existing RV64/LA64 `cpu::user_copy` assembly copies through raw
 //! pointers without creating Rust references to user storage and returns the
 //! number of uncopied bytes. Destination writes stay inside the requested
 //! range. RV64 may round source loads to 8-byte boundaries; each call below
@@ -18,9 +18,9 @@
 
 use alloc::vec::Vec;
 
-use axalloc::{frame_table, global_allocator};
+use kernel_alloc::{frame_table, global_allocator};
 use axerrno::{AxError, AxResult, LinuxError};
-use axhal::{mem::phys_to_virt, paging::MappingFlags};
+use hal::{mem::phys_to_virt, paging::MappingFlags};
 use axio::{IoBuf, IoBufMut, Read, Segmented, Write};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 pub use pulse_io_uring_core::resources::{
@@ -241,7 +241,7 @@ impl PinnedUserBuffers {
                         Ok(frame) => {
                             // Only managed RAM has the reference-counted lifetime
                             // required by the direct-map copy contract.
-                            if !axalloc::frame_table().contains(frame) {
+                            if !kernel_alloc::frame_table().contains(frame) {
                                 terminal_error = Some(LinuxError::EFAULT);
                                 break 'window;
                             }
@@ -542,7 +542,7 @@ fn pin_fixed_page_list(
 
                 match aspace.pin_user_frame(page_vaddr, flags) {
                     Ok(frame) => {
-                        if !axalloc::frame_table().contains(frame) {
+                        if !kernel_alloc::frame_table().contains(frame) {
                             return Err(LinuxError::EFAULT);
                         }
                         if !frame.is_aligned_4k() {
@@ -702,8 +702,8 @@ fn copy_pinned_page_to_kernel(
     let source = phys_to_virt(frame) + page_offset;
     // SAFETY: Caller retains the managed source frame and `page_offset + count <= PAGE_SIZE_4K`.
     // Word-rounded RV64 source loads remain inside this same 4-KiB-aligned page, `dst` owns
-    // `count` writable kernel bytes, and `axcpu::user_copy` creates no references to user storage.
-    let uncopied = unsafe { axcpu::user_copy(dst.as_mut_ptr(), source.as_ptr(), count) };
+    // `count` writable kernel bytes, and `cpu::user_copy` creates no references to user storage.
+    let uncopied = unsafe { cpu::user_copy(dst.as_mut_ptr(), source.as_ptr(), count) };
     let copied = count - uncopied.min(count);
     if copied == 0 {
         Err(AxError::BadAddress)
@@ -743,7 +743,7 @@ fn copy_kernel_to_pinned_page(
         // SAFETY: Caller retains the owned writable frame and `page_offset + count <= PAGE_SIZE_4K`.
         // `source` lies within `src[..count]`; RV64 middle loads have eight readable bytes on each
         // side, while short head/tail calls and LA64 do not overread.
-        let uncopied = unsafe { axcpu::user_copy((target + copied).as_mut_ptr(), source, part) };
+        let uncopied = unsafe { cpu::user_copy((target + copied).as_mut_ptr(), source, part) };
         let done = part - uncopied.min(part);
         copied += done;
         if done != part {

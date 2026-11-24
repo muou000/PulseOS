@@ -165,7 +165,7 @@ impl<V> Default for ShardedProcessRegistry<V> {
 
 /// Runs in-kernel verification and diagnostics of `ShardedProcessRegistry`.
 pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
-    axlog::ax_println!("[PROC_REG_GUEST] Starting sharded process registry checks...");
+    kernel_log::ax_println!("[PROC_REG_GUEST] Starting sharded process registry checks...");
 
     // 1. Shard distribution & deterministic hashing
     for pid in 0..64u64 {
@@ -225,7 +225,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
     reg.remove(&p17);
     reg.remove(&p2);
     assert_eq!(reg.total_len(), 0);
-    axlog::ax_println!("[PROC_REG_GUEST] Shard isolation and collision: PASS");
+    kernel_log::ax_println!("[PROC_REG_GUEST] Shard isolation and collision: PASS");
 
     // 3. Multi-shard independent access
     {
@@ -241,7 +241,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
         reg.remove(&16);
         reg.remove(&1);
     }
-    axlog::ax_println!("[PROC_REG_GUEST] Cross-shard independence: PASS");
+    kernel_log::ax_println!("[PROC_REG_GUEST] Cross-shard independence: PASS");
 
     // 4. Scatter/Gather snapshot aggregation, ordering & deduplication
     let test_pids = [
@@ -273,7 +273,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
         reg.remove(&pid);
     }
     assert_eq!(reg.total_len(), 0);
-    axlog::ax_println!("[PROC_REG_GUEST] Scatter/Gather snapshot sorting & dedup: PASS");
+    kernel_log::ax_println!("[PROC_REG_GUEST] Scatter/Gather snapshot sorting & dedup: PASS");
 
     // 5. Weak consistency boundary verification:
     // Sequential snapshot drops each shard lock immediately.
@@ -290,7 +290,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
         reg.remove(&1);
         reg.remove(&15);
     }
-    axlog::ax_println!("[PROC_REG_GUEST] Weak consistency boundary: PASS");
+    kernel_log::ax_println!("[PROC_REG_GUEST] Weak consistency boundary: PASS");
 
     // 6. Comparative Benchmark: Monolithic Single-Lock vs 16-Shard Registry under Mixed Workload (80% Read / 20% Write)
     {
@@ -302,7 +302,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
             mono_reg.insert(pid, pid * 100);
         }
 
-        let mono_start_ns = axhal::time::monotonic_time_nanos();
+        let mono_start_ns = hal::time::monotonic_time_nanos();
         let mut mono_chk = 0u64;
         for i in 0..ITERS {
             let pid = (i as u64 % 64) + 1;
@@ -317,7 +317,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
                 }
             }
         }
-        let mono_elapsed_ns = axhal::time::monotonic_time_nanos().saturating_sub(mono_start_ns);
+        let mono_elapsed_ns = hal::time::monotonic_time_nanos().saturating_sub(mono_start_ns);
         let mono_lat_ns = if ITERS > 0 { mono_elapsed_ns / (ITERS as u64) } else { 0 };
         let mono_kops_sec = if mono_elapsed_ns > 0 { (ITERS as u64 * 1_000_000) / mono_elapsed_ns } else { 0 };
 
@@ -327,7 +327,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
             sharded_reg.insert(pid, pid * 100);
         }
 
-        let sharded_start_ns = axhal::time::monotonic_time_nanos();
+        let sharded_start_ns = hal::time::monotonic_time_nanos();
         let mut sharded_chk = 0u64;
         for i in 0..ITERS {
             let pid = (i as u64 % 64) + 1;
@@ -342,7 +342,7 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
                 }
             }
         }
-        let sharded_elapsed_ns = axhal::time::monotonic_time_nanos().saturating_sub(sharded_start_ns);
+        let sharded_elapsed_ns = hal::time::monotonic_time_nanos().saturating_sub(sharded_start_ns);
         let sharded_lat_ns = if ITERS > 0 { sharded_elapsed_ns / (ITERS as u64) } else { 0 };
         let sharded_kops_sec = if sharded_elapsed_ns > 0 { (ITERS as u64 * 1_000_000) / sharded_elapsed_ns } else { 0 };
 
@@ -352,32 +352,32 @@ pub fn run_process_registry_guest_checks() -> Result<(), &'static str> {
             0
         };
 
-        axlog::ax_println!(
+        kernel_log::ax_println!(
             "[PROC_REG_GUEST] Comparative Benchmark ({} mixed ops, 80% read / 20% write):",
             ITERS
         );
-        axlog::ax_println!(
+        kernel_log::ax_println!(
             "  - Monolithic Baseline: elapsed={} us, avg_lat={} ns, throughput={} kops/s (chk={})",
             mono_elapsed_ns / 1000,
             mono_lat_ns,
             mono_kops_sec,
             mono_chk
         );
-        axlog::ax_println!(
+        kernel_log::ax_println!(
             "  - 16-Shard Registry:   elapsed={} us, avg_lat={} ns, throughput={} kops/s (chk={})",
             sharded_elapsed_ns / 1000,
             sharded_lat_ns,
             sharded_kops_sec,
             sharded_chk
         );
-        axlog::ax_println!(
+        kernel_log::ax_println!(
             "  - Performance Delta:   latency reduction = {}%, throughput delta = +{}%",
             speedup_pct,
             if mono_kops_sec > 0 { ((sharded_kops_sec as i64 - mono_kops_sec as i64) * 100) / (mono_kops_sec as i64) } else { 0 }
         );
     }
 
-    axlog::ax_println!("[PROC_REG_GUEST] All sharded process registry checks PASSED!");
+    kernel_log::ax_println!("[PROC_REG_GUEST] All sharded process registry checks PASSED!");
     Ok(())
 }
 

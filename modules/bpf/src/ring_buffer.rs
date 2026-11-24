@@ -50,7 +50,7 @@ pub struct BpfRingBuf {
     #[cfg(not(target_os = "none"))]
     _host_storage: Option<Vec<u8>>,
     #[cfg(target_os = "none")]
-    read_wait_queue: axtask::WaitQueue,
+    read_wait_queue: task::WaitQueue,
 }
 
 impl core::fmt::Debug for BpfRingBuf {
@@ -78,7 +78,7 @@ impl BpfRingBuf {
         let total_pages = BPF_RINGBUF_CONTROL_PAGES + nr_data_pages;
         let total_size = total_pages * BPF_RINGBUF_PAGE_SIZE;
 
-        let vaddr = axalloc::global_allocator()
+        let vaddr = kernel_alloc::global_allocator()
             .alloc_pages(total_pages, memory_addr::PAGE_SIZE_4K)
             .map_err(|_| LinuxError::ENOMEM)?;
 
@@ -101,7 +101,7 @@ impl BpfRingBuf {
             consumer_corrupt_records: AtomicU64::new(0),
             consumer_discarded_records: AtomicU64::new(0),
             shared_frame: Some(shared_frame),
-            read_wait_queue: axtask::WaitQueue::new(),
+            read_wait_queue: task::WaitQueue::new(),
         });
         Ok(rb)
     }
@@ -157,7 +157,7 @@ impl BpfRingBuf {
     }
 
     #[cfg(target_os = "none")]
-    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn read_wait_queue(&self) -> &task::WaitQueue {
         &self.read_wait_queue
     }
 

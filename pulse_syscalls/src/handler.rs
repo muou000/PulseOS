@@ -1,4 +1,4 @@
-use axhal::{
+use hal::{
     context::TrapFrame,
     trap::{SYSCALL, register_trap_handler},
 };
@@ -7,8 +7,8 @@ use crate::*;
 
 #[register_trap_handler(SYSCALL)]
 pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
-    let syscall_enter_ns = axhal::time::monotonic_time_nanos() as u64;
-    let task = axtask::current();
+    let syscall_enter_ns = hal::time::monotonic_time_nanos() as u64;
+    let task = task::current();
     let thread = match pulse_core::task::thread_ref_from_task(&task) {
         Ok(thread) => thread,
         Err(_) => {
@@ -38,7 +38,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         tf.arg5(),
     ];
 
-    axlog::debug!(
+    kernel_log::debug!(
         "Syscall: pid={} exe={} tid={} id={} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
         process.pid(),
         process.exec_path().unwrap_or_default(),
@@ -56,7 +56,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         syscall_dispatcher(tf, syscall_num, args)
     };
     thread.exit_if_exec_requested();
-    axlog::debug!(
+    kernel_log::debug!(
         "Syscall ret: pid={} exe={} tid={} id={} ret={}",
         process.pid(),
         process.exec_path().unwrap_or_default(),
@@ -117,7 +117,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         }
     }
 
-    let syscall_leave_ns = axhal::time::monotonic_time_nanos() as u64;
+    let syscall_leave_ns = hal::time::monotonic_time_nanos() as u64;
     let delta_ns = syscall_leave_ns.saturating_sub(syscall_enter_ns);
     thread.add_sys_time_ns(delta_ns);
     thread.exit_if_exec_requested();
@@ -163,7 +163,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
     let sysno = match Sysno::new(syscall_id) {
         Some(sysno) => sysno,
         None => {
-            axlog::warn!("Unknown syscall: {}", syscall_id);
+            kernel_log::warn!("Unknown syscall: {}", syscall_id);
             return -LinuxError::ENOSYS.code() as isize;
         }
     };
@@ -496,7 +496,7 @@ fn syscall_dispatcher(tf: &mut TrapFrame, syscall_id: usize, args: [usize; 6]) -
             impls::sys_io_uring_register(args[0] as i32, args[1] as u32, args[2], args[3] as u32)
         }
         _ => {
-            axlog::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
+            kernel_log::warn!("Unimplemented syscall: {:?} ({})", sysno, syscall_id);
             -LinuxError::ENOSYS.code() as isize
         }
     }

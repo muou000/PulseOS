@@ -33,7 +33,7 @@ fn hex(bytes: &[u8]) -> String {
 fn append(kind: &str, fields: String) -> u64 {
     let mut journal = JOURNAL.lock();
     journal.sequence = journal.sequence.checked_add(1).expect("mapping journal sequence exhausted");
-    let timestamp = axhal::time::monotonic_time_nanos();
+    let timestamp = hal::time::monotonic_time_nanos();
     let row = format!("{kind} seq={} ts={timestamp} {fields}\n", journal.sequence);
     if row.len() > JOURNAL_LIMIT.saturating_sub(journal.bytes) {
         journal.dropped += 1;
@@ -85,7 +85,7 @@ impl Drop for MutationGuard {
 /// when a sampler continues producing records after this read.
 pub fn render() -> String {
     let journal = JOURNAL.lock();
-    let cut = axhal::time::monotonic_time_nanos();
+    let cut = hal::time::monotonic_time_nanos();
     let mut text = format!("PULSE_BPF_MAPPINGS version=2 available=1 started_ns=0 snapshot_ns={cut} dropped={} records={}\n",
         journal.dropped, journal.entries.len());
     for row in &journal.entries { text.push_str(row); }
@@ -190,7 +190,7 @@ fn file_mapping(backend: &Backend, start: VirtAddr) -> (u64, usize, bool) {
 }
 
 pub fn space_snapshot(aspace: &axmm::AddrSpace, begin_ns: u64) {
-    use axhal::paging::MappingFlags as F;
+    use hal::paging::MappingFlags as F;
     let (space, revision) = aspace.observation_identity();
     let mut rows = String::new();
     let mut count = 0;
@@ -214,12 +214,12 @@ pub fn task(task_id: u64, pid: u64, tid: u64, space: usize, exec: u64,
 pub fn register_space(aspace: &axmm::AddrSpace) {
     static KERNEL: spin::Once<()> = spin::Once::new();
     KERNEL.call_once(|| {
-        let (start, end) = axhal::mem::kernel_text_range();
-        let build_id = axhal::mem::kernel_build_id().map(hex).unwrap_or_else(|| "unknown".into());
+        let (start, end) = hal::mem::kernel_text_range();
+        let build_id = hal::mem::kernel_build_id().map(hex).unwrap_or_else(|| "unknown".into());
         append("KERNEL", format!("start={start} len={} reference={start} symbol_hex={} build_id={build_id}", end - start, hex(b"_stext")));
     });
     axmm::register_tlb_observer(tlb);
-    space_snapshot(aspace, axhal::time::monotonic_time_nanos());
+    space_snapshot(aspace, hal::time::monotonic_time_nanos());
 }
 
 fn tlb(space: usize, token: u64, complete: bool) {

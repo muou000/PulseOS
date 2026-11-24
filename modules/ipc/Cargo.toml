@@ -8,10 +8,10 @@ repository.workspace = true
 description = "System V shared memory and semaphores for PulseOS"
 
 [dependencies]
-axalloc.workspace = true
+kernel_alloc.workspace = true
 axerrno.workspace = true
-axhal = { workspace = true, features = ["paging"] }
-axtask = { workspace = true, features = ["multitask", "irq"] }
+hal = { workspace = true, features = ["paging"] }
+task = { workspace = true, features = ["multitask", "irq"] }
 memory_addr.workspace = true
 pulse_user_abi.workspace = true
 spin.workspace = true
