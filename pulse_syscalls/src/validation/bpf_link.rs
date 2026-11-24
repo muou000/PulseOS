@@ -1007,7 +1007,7 @@ mod tests {
     }
 
 
-    fn switch_observation(cpu: u32, tid: u32, time: u64) -> [u8; 72] {
+    fn switch_observation(cpu: u32, tid: u32, task_id: u64, time: u64) -> [u8; 72] {
         let mut bytes = [0; 72];
         bytes[0..4].copy_from_slice(&2u32.to_le_bytes());
         bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -1015,7 +1015,7 @@ mod tests {
         bytes[16..20].copy_from_slice(&cpu.to_le_bytes());
         bytes[20..24].copy_from_slice(&123u32.to_le_bytes());
         bytes[24..28].copy_from_slice(&tid.to_le_bytes());
-        bytes[32..40].copy_from_slice(&5u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&task_id.to_le_bytes());
         bytes[40..48].copy_from_slice(&5u64.to_le_bytes());
         bytes[48..56].copy_from_slice(&6u64.to_le_bytes());
         bytes
@@ -1064,7 +1064,7 @@ mod tests {
             scope: PerfEventScope::PerCpu { cpu: 9 }, sample_period: 0, disabled: false, cloexec: false,
         }, 0);
         event.attach_program(prog.clone()).unwrap();
-        let bytes = switch_observation(9, 456, 987_654);
+        let bytes = switch_observation(9, 456, 5, 987_654);
         assert_eq!(event.dispatch_sample(&runtime_observation(1_000_000, 9, 456)), Ok(false), "timer must not run a tracepoint program");
         assert_eq!(event.dispatch_tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch,
             &bytes, observation_generation()), Ok(true));
@@ -1089,7 +1089,7 @@ mod tests {
         let pa = dummy_prog(BpfProgType::Tracepoint); let pb = dummy_prog(BpfProgType::Tracepoint);
         let la = BpfLink::new(pa.clone(), a.clone()).unwrap();
         let lb = BpfLink::new(pb.clone(), b.clone()).unwrap();
-        let bytes = switch_observation(11, 42, 50);
+        let bytes = switch_observation(11, 42, 5, 50);
         let generation = observation_generation();
         assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, generation), 2);
         a.disable_at(60);
@@ -1120,14 +1120,13 @@ mod tests {
         let generation = observation_generation();
         assert_eq!(event.dispatch_tracepoint(TracepointId::TaskWake, &[], generation), Ok(false));
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &[], generation), Ok(false));
-        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 0, 50), generation), Ok(false));
-        let mut other_task = switch_observation(9, 43, 50);
-        other_task[32..40].copy_from_slice(&6u64.to_le_bytes());
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 0, 5, 50), generation), Ok(false));
+        let other_task = switch_observation(9, 43, 6, 50);
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &other_task, generation), Ok(false));
-        let mut malformed = switch_observation(9, 42, 50);
+        let mut malformed = switch_observation(9, 42, 5, 50);
         malformed[4..8].copy_from_slice(&2u32.to_le_bytes());
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &malformed, generation), Ok(false));
-        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 42, 50), generation), Ok(true));
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 42, 5, 50), generation), Ok(true));
         assert_eq!(event.runtime_counters().invalid, 3);
         assert_eq!(prog.run_cnt(), 1);
     }
@@ -1190,11 +1189,9 @@ mod tests {
         let prog = dummy_prog(BpfProgType::Tracepoint);
         event.attach_program(prog.clone()).unwrap();
         event.bind_task_identity(901).unwrap();
-        let mut reused_tid = switch_observation(9, 42, 50);
-        reused_tid[32..40].copy_from_slice(&902u64.to_le_bytes());
+        let reused_tid = switch_observation(9, 42, 902, 50);
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &reused_tid, observation_generation()), Ok(false));
-        let mut rebound_tid = switch_observation(9, 100, 60);
-        rebound_tid[32..40].copy_from_slice(&901u64.to_le_bytes());
+        let rebound_tid = switch_observation(9, 100, 901, 60);
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &rebound_tid, observation_generation()), Ok(true));
         assert_eq!(prog.run_cnt(), 1);
     }
@@ -1217,7 +1214,7 @@ mod tests {
     fn dispatch_failure_observation(event: &PerfEvent, time: u64, cpu: usize) -> Result<bool, LinuxError> {
         match event.spec().clock {
             PerfEventClock::Tracepoint(id) => event.dispatch_tracepoint(id,
-                &switch_observation(cpu as u32, 42, time), observation_generation()),
+                &switch_observation(cpu as u32, 42, 5, time), observation_generation()),
             _ => event.dispatch_sample(&runtime_observation(time, cpu, 42)),
         }
     }
