@@ -10,7 +10,7 @@ homepage.workspace = true
 [features]
 default = ["ext4"]
 use-ramdisk = []       # TODO: init ramdisk
-fat = ["dep:fatfs"]
+fat = ["dep:hadris-fat", "dep:hadris-fs", "dep:hadris-io", "dep:hadris-storage"]
 ext4 = ["dep:ext4plus"]
 times = []
 std = []
@@ -40,18 +40,16 @@ lru.workspace = true
 rand_core.workspace = true
 rand_pcg.workspace = true
 scope-local.workspace = true
-slab.workspace = true
 spin.workspace = true
 async-trait.workspace = true
 async-lock.workspace = true
 ext4plus = { workspace = true, features = ["multi-threaded"], optional = true }
+hadris-fat = { workspace = true, features = ["async", "alloc"], optional = true }
+hadris-fs = { workspace = true, features = ["async", "alloc"], optional = true }
+hadris-io = { workspace = true, optional = true }
+hadris-storage = { workspace = true, features = ["async"], optional = true }
 futures-util.workspace = true
 heapless.workspace = true
-
-[dependencies.fatfs]
-workspace = true
-features = ["alloc", "lfn", "log_level_trace", "unicode"]
-optional = true
 
 [dev-dependencies]
 axdriver = { workspace = true, features = ["block", "ramdisk", "async"] }

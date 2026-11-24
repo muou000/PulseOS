@@ -281,6 +281,9 @@ impl DirNode {
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
         let entry = self.ops.create(name, node_type, permission).await?;
+        if !self.ops.is_cacheable() {
+            return Ok(entry);
+        }
         let mut children = self.cache.lock().await;
         self.cache_generation.fetch_add(1, Ordering::AcqRel);
         children.insert(name.to_owned(), entry.clone());
@@ -326,7 +329,9 @@ impl DirNode {
         let (first_mutation, second_mutation) = self.lock_both_mutations(dst_dir).await;
 
         let src = self.lookup(src_name).await?;
-        if let Ok(dst) = dst_dir.lookup(dst_name).await {
+        if let Ok(dst) = dst_dir.lookup(dst_name).await
+            && !src.ptr_eq(&dst)
+        {
             if src.node_type() == NodeType::Directory {
                 if let Ok(dir) = dst.as_dir()
                     && dir.has_children().await?

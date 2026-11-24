@@ -464,24 +464,30 @@ impl FileBackend {
     }
 
     pub async fn sync(&self, data_only: bool) -> VfsResult<()> {
-        match self {
-            Self::Cached(cached) => cached.sync_async(data_only).await,
-            Self::Direct(loc) => {
-                let file = loc.entry().as_file()?;
-                if !node_allows_page_cache(loc.flags()) || loc.flags().contains(NodeFlags::STREAM) {
-                    return file.sync(data_only).await;
-                }
+        self.sync_for_description(data_only, None).await.map(|_| ())
+    }
 
-                let shared = shared_file_state_async(loc).await?;
-                let _guard = shared.io_lock.write().await;
-                let cached_size = shared.size();
-                if file.len().await? != cached_size {
-                    file.set_len(cached_size).await?;
+    /// A successful checkpoint can still acknowledge an earlier writeback error.
+    async fn sync_for_description(
+        &self,
+        data_only: bool,
+        cursor: Option<&WritebackErrorCursor>,
+    ) -> VfsResult<Option<VfsError>> {
+        let file = self.location().entry().as_file()?;
+        let shared = match self {
+            Self::Cached(cached) if cached.in_memory() => return Ok(None),
+            Self::Cached(cached) => cached.shared.clone(),
+            Self::Direct(loc) => {
+                if !node_allows_page_cache(loc.flags()) || loc.flags().contains(NodeFlags::STREAM) {
+                    return file.sync(data_only).await.map(|()| None);
                 }
-                shared.flush_dirty_pages_async(file).await?;
-                file.sync(data_only).await
+                shared_file_state_async(loc).await?
             }
-        }
+        };
+        let _guard = shared.io_lock.write().await;
+        let result = shared.sync_dirty_pages_async(file, data_only).await;
+        let reported = cursor.and_then(|cursor| cursor.check_and_advance(result));
+        result.map(|()| reported)
     }
 
     pub async fn sync_range(
@@ -560,6 +566,7 @@ impl FileBackend {
 /// Provides `std::fs::File`-like interface.
 pub struct File {
     inner: FileBackend,
+    writeback_errors: Option<WritebackErrorCursor>,
     flags: FileFlags,
     position: Option<Arc<FilePosition>>,
     _write_access: Option<WriteAccessGuard>,
@@ -975,8 +982,10 @@ impl File {
                 0
             }))
         };
+        let writeback_errors = WritebackErrorCursor::for_open(inner.location(), flags);
         Self {
             inner,
+            writeback_errors,
             flags,
             position,
             _write_access: write_access,
@@ -1168,13 +1177,16 @@ impl File {
         #[cfg(feature = "times")]
         let timestamp_flags = self.take_timestamp_updates().await?;
 
-        let result = self.inner.sync(data_only).await;
+        let result = self
+            .inner
+            .sync_for_description(data_only, self.writeback_errors.as_ref())
+            .await;
         #[cfg(feature = "times")]
         if result.is_err() {
             self.access_flags
                 .fetch_or(timestamp_flags, Ordering::AcqRel);
         }
-        result
+        result?.map_or(Ok(()), Err)
     }
 
     /// Flushes any deferred atime/mtime updates without suspending via `block_on`.

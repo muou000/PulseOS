@@ -123,6 +123,10 @@ fn splitmix64(mut value: u64) -> u64 {
 
 struct BlockDeviceKind {
     disk: Mutex<SeekableDisk<SharedBlockDevice>>,
+    // Share a live FAT root across mounts. Page-cache references to the
+    // retired driver must not turn a later mount into a stale cache hit.
+    #[cfg(feature = "fat")]
+    fat: async_lock::Mutex<Option<axfs_ng_vfs::WeakFilesystem>>,
 }
 
 type DirContent = InMemDir<InodeRef>;
@@ -250,6 +254,8 @@ fn new_block_device(
         },
         NodeContent::BlockDevice(BlockDeviceKind {
             disk: Mutex::new(SeekableDisk::new(device)),
+            #[cfg(feature = "fat")]
+            fat: async_lock::Mutex::default(),
         }),
     ))
 }
@@ -567,6 +573,28 @@ impl DevNode {
         } else {
             Err(VfsError::InvalidInput)
         }
+    }
+
+    #[cfg(feature = "fat")]
+    pub async fn mount_fat(&self) -> VfsResult<Filesystem> {
+        let inode = self.inode_ref()?;
+        let NodeContent::BlockDevice(block) = &inode.content else {
+            return Err(VfsError::InvalidInput);
+        };
+        let mut cached = block.fat.lock().await;
+        if let Some(fs) = cached.as_ref().and_then(|fs| fs.upgrade()) {
+            return Ok(fs);
+        }
+        let rdev = inode.metadata.lock().rdev;
+        let device = if rdev.major() == 7 {
+            let pinned = super::loop_dev::LoopBlockDevice::for_mount(rdev.minor() as usize)?;
+            SharedBlockDevice::new(Box::new(pinned))
+        } else {
+            block.disk.lock().device().lock().clone()
+        };
+        let fs = super::fat::FatFilesystem::new(device).await?;
+        *cached = Some(fs.downgrade());
+        Ok(fs)
     }
 
     pub fn is_tty(&self) -> bool {

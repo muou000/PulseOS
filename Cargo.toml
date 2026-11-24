@@ -154,7 +154,10 @@ crate_interface = "0.1.4"
 ctor_bare = "0.2"
 env_logger = "0.11.8"
 ext4plus = { path = "crates/ext4plus", default-features = false }
-fatfs = { git = "https://github.com/Starry-OS/rust-fatfs.git", rev = "2685439", default-features = false }
+hadris-fat = { version = "=3.0.0-rc.4", default-features = false }
+hadris-fs = { version = "=3.0.0-rc.4", default-features = false }
+hadris-io = { version = "=3.0.0-rc.4", default-features = false }
+hadris-storage = { version = "=3.0.0-rc.4", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = [
     "alloc",
     "async-await-macro",
@@ -210,6 +213,7 @@ repository.workspace = true
 [features]
 default = []
 net = ["axfeat/net"]
+fat = ["pulse_syscalls/fat"]
 qemu = [
     "dep:axplat-riscv64-qemu-virt",
     "dep:axplat-loongarch64-qemu-virt",

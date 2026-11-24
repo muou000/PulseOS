@@ -1,98 +1,175 @@
-use alloc::sync::Arc;
-use core::marker::PhantomPinned;
-
-use axdriver::prelude::BlockDriverOps;
-use axfs_ng_vfs::{
-    DirEntry, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
 };
-use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
-use slab::Slab;
+use core::mem;
 
-use super::{dir::FatDirNode, ff, util::into_vfs_err};
-use crate::disk::SeekableDisk;
+use async_lock::{Mutex, MutexGuard};
+use async_trait::async_trait;
+use axdriver::prelude::AsyncBlockDriverOps;
+use axfs_ng_vfs::{
+    DirEntry, Filesystem, FilesystemOps, NodeType, Reference, StatFs, VfsError, VfsResult,
+    WeakDirEntry, path::MAX_NAME_LEN,
+};
+use hadris_fat::async_::FatFs;
+use hadris_fs::{MountOptions, NodeId};
+use kspin::SpinNoPreempt;
 
-pub struct FatFilesystemInner {
-    pub inner: ff::FileSystem,
-    inode_allocator: Slab<()>,
-    _pinned: PhantomPinned,
+use super::{
+    disk::FatDisk,
+    node::{FatNode, NodePin},
+};
+
+pub(super) struct Volume<D> {
+    pub driver: FatFs<FatDisk<D>>,
+    // FAT long names and 8.3 aliases identify the same node. Share the live
+    // dentry (including its page-cache data) by volume-local node identity.
+    pub entries: BTreeMap<NodeId, WeakDirEntry>,
 }
 
-impl FatFilesystemInner {
-    pub(crate) fn alloc_inode(&mut self) -> u64 {
-        self.inode_allocator.insert(()) as u64 + 1
-    }
-
-    pub(crate) fn release_inode(&mut self, ino: u64) {
-        self.inode_allocator.remove(ino as usize - 1);
-    }
+pub(crate) struct FatFilesystem<D> {
+    // Keep names bound to the same nodes while unlink/replace drops the
+    // volume lock to acquire the victim's page-cache I/O lock.
+    pub(super) namespace: Mutex<()>,
+    volume: Mutex<Volume<D>>,
+    open_files: SpinNoPreempt<BTreeMap<NodeId, Weak<()>>>,
+    root_id: NodeId,
+    block_size: u32,
+    this: Weak<Self>,
+    root: SpinNoPreempt<Option<WeakDirEntry>>,
+    // Drop cannot await the volume mutex. Drain these pins at the start of
+    // the next operation; dropping the volume also drops its node table.
+    forgotten: SpinNoPreempt<Vec<NodeId>>,
 }
 
-pub struct FatFilesystem {
-    inner: Mutex<FatFilesystemInner>,
-    root_dir: Mutex<Option<DirEntry>>,
+pub(super) fn vfs_error<E>(e: hadris_fs::Error<E>) -> VfsError {
+    axerrno::LinuxError::try_from(e.kind().errno().linux())
+        .map(VfsError::from)
+        .unwrap_or(VfsError::Io)
+        .canonicalize()
 }
 
-impl FatFilesystem {
-    pub fn new<D: BlockDriverOps + 'static>(dev: D) -> Filesystem {
-        let mut inner = FatFilesystemInner {
-            inner: ff::FileSystem::new(SeekableDisk::new(dev), fatfs::FsOptions::new())
-                .expect("failed to initialize FAT filesystem"),
-            inode_allocator: Slab::new(),
-            _pinned: PhantomPinned,
-        };
-        let root_inode = inner.alloc_inode();
-        let result = Arc::new(Self {
-            inner: Mutex::new(inner),
-            root_dir: Mutex::default(),
+impl<D: AsyncBlockDriverOps + Clone + 'static> FatFilesystem<D> {
+    pub(crate) async fn new(dev: D) -> VfsResult<Filesystem> {
+        let options = MountOptions::new().with_clock(&super::node::WallClock);
+        let driver = FatFs::mount(FatDisk::new(dev)?, options)
+            .await
+            .map_err(|e| vfs_error(e.into_error()))?;
+        let root_id = driver.root();
+        let block_size = driver.info().cluster_size();
+        let fs = Arc::new_cyclic(|this| Self {
+            namespace: Mutex::new(()),
+            open_files: SpinNoPreempt::default(),
+            volume: Mutex::new(Volume {
+                driver,
+                entries: BTreeMap::new(),
+            }),
+            root_id,
+            block_size,
+            this: this.clone(),
+            root: SpinNoPreempt::new(None),
+            forgotten: SpinNoPreempt::new(Vec::new()),
         });
+        Ok(Filesystem::new(fs))
+    }
 
-        let root_dir = DirEntry::new_dir(
-            |this| {
-                FatDirNode::new(
-                    result.clone(),
-                    result.lock().inner.root_dir(),
-                    root_inode,
-                    this,
-                )
-            },
-            Reference::root(),
-        );
-        *result.root_dir.lock() = Some(root_dir);
-        Filesystem::new(result)
+    pub(super) async fn lock(&self) -> MutexGuard<'_, Volume<D>> {
+        let mut volume = self.volume.lock().await;
+        let forgotten = mem::take(&mut *self.forgotten.lock());
+        for id in forgotten {
+            volume.driver.forget(id, 1);
+            if volume
+                .entries
+                .get(&id)
+                .is_some_and(|entry| entry.upgrade().is_none())
+            {
+                volume.entries.remove(&id);
+            }
+        }
+        volume
+    }
+
+    pub(super) async fn open_file(&self, id: NodeId) -> VfsResult<Arc<()>> {
+        let _namespace = self.namespace.lock().await;
+        // A lookup may have completed before an unlink acquired the namespace.
+        // Only publish a lease for a node that is still live.
+        self.lock().await.driver.stat(id).await.map_err(vfs_error)?;
+        let mut open = self.open_files.lock();
+        if let Some(lease) = open.get(&id).and_then(Weak::upgrade) {
+            return Ok(lease);
+        }
+        let lease = Arc::new(());
+        open.insert(id, Arc::downgrade(&lease));
+        Ok(lease)
+    }
+
+    /// Call with the namespace locked, before detaching a victim's dirty pages.
+    pub(super) fn has_open_handles(&self, id: NodeId) -> bool {
+        self.open_files
+            .lock()
+            .get(&id)
+            .is_some_and(|lease| lease.strong_count() != 0)
+    }
+
+    pub(super) fn block_size(&self) -> u64 {
+        self.block_size.into()
     }
 }
 
-impl FatFilesystem {
-    pub(crate) fn lock(&self) -> MutexGuard<FatFilesystemInner> {
-        self.inner.lock()
+impl<D> FatFilesystem<D> {
+    pub(super) fn forget(&self, id: NodeId) {
+        if id != self.root_id {
+            let mut open = self.open_files.lock();
+            if open.get(&id).is_some_and(|lease| lease.strong_count() == 0) {
+                open.remove(&id);
+            }
+            drop(open);
+            self.forgotten.lock().push(id);
+        }
     }
 }
 
-impl FilesystemOps for FatFilesystem {
+#[async_trait]
+impl<D: AsyncBlockDriverOps + Clone + 'static> FilesystemOps for FatFilesystem<D> {
     fn name(&self) -> &str {
         "vfat"
     }
 
     fn root_dir(&self) -> DirEntry {
-        self.root_dir.lock().clone().unwrap()
+        let mut root = self.root.lock();
+        if let Some(entry) = root.as_ref().and_then(WeakDirEntry::upgrade) {
+            return entry;
+        }
+        let fs = self.this.upgrade().expect("live FAT filesystem");
+        let pin = NodePin::new(fs, self.root_id);
+        let entry = FatNode::entry(pin, NodeType::Directory, Reference::root());
+        *root = Some(entry.downgrade());
+        entry
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
-        let fs = self.inner.lock();
-        let stats = fs.inner.stats().map_err(into_vfs_err)?;
+        // The VFS statfs entry point is synchronous. The underlying block
+        // requests can sleep while counting FAT clusters.
+        let stats = axtask::future::block_on(async {
+            self.lock().await.driver.statfs().await.map_err(vfs_error)
+        })?;
         Ok(StatFs {
-            fs_type: 0x65735546, // fuse
-            block_size: stats.cluster_size() as _,
-            blocks: stats.total_clusters() as _,
-            blocks_free: stats.free_clusters() as _,
-            blocks_available: stats.free_clusters() as _,
-
+            fs_type: 0x4d44, // MSDOS_SUPER_MAGIC
+            block_size: stats.block_size(),
+            blocks: stats.total_blocks(),
+            blocks_free: stats.free_blocks(),
+            blocks_available: stats.free_blocks(),
             file_count: 0,
             free_file_count: 0,
-
-            name_length: MAX_NAME_LEN as _,
-            fragment_size: 0,
+            name_length: MAX_NAME_LEN as u32,
+            fragment_size: stats.block_size(),
             mount_flags: 0,
         })
+    }
+
+    async fn flush(&self) -> VfsResult<()> {
+        self.lock().await.driver.sync().await.map_err(vfs_error)
     }
 }

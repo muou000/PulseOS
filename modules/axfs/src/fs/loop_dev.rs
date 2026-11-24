@@ -35,11 +35,26 @@ pub static LOOP_DEVICES: [LoopDeviceState; 8] = [
 
 pub struct LoopBlockDevice {
     id: usize,
+    // A mounted FAT session must retain the same backing across every poll.
+    // Ordinary /dev/loopN file operations resolve the current binding.
+    mounted_backing: Option<Arc<crate::highlevel::File>>,
 }
 
 impl LoopBlockDevice {
     pub fn new(id: usize) -> Self {
-        Self { id }
+        Self { id, mounted_backing: None }
+    }
+
+    #[cfg(feature = "fat")]
+    pub(super) fn for_mount(id: usize) -> axfs_ng_vfs::VfsResult<Self> {
+        let backing = LOOP_DEVICES.get(id)
+            .and_then(|state| state.backing.lock().clone())
+            .ok_or(axfs_ng_vfs::VfsError::NoSuchDevice)?;
+        Ok(Self { id, mounted_backing: Some(backing) })
+    }
+
+    fn backing(&self) -> Option<Arc<crate::highlevel::File>> {
+        self.mounted_backing.clone().or_else(|| LOOP_DEVICES[self.id].backing.lock().clone())
     }
 }
 
@@ -62,10 +77,7 @@ impl BlockDriverOps for LoopBlockDevice {
     }
 
     fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
-        let file = {
-            let backing = LOOP_DEVICES[self.id].backing.lock();
-            backing.as_ref().cloned()
-        };
+        let file = self.backing();
         if let Some(file) = file {
             let offset = block_id * self.block_size() as u64;
             axtask::future::block_on(file.read_at(buf, offset)).map_err(|_| DevError::Io)?;
@@ -76,10 +88,7 @@ impl BlockDriverOps for LoopBlockDevice {
     }
 
     fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
-        let file = {
-            let backing = LOOP_DEVICES[self.id].backing.lock();
-            backing.as_ref().cloned()
-        };
+        let file = self.backing();
         if let Some(file) = file {
             let offset = block_id * self.block_size() as u64;
             axtask::future::block_on(file.write_at(buf, offset)).map_err(|_| DevError::Io)?;
@@ -90,8 +99,7 @@ impl BlockDriverOps for LoopBlockDevice {
     }
 
     fn flush(&mut self) -> DevResult {
-        let backing = LOOP_DEVICES[self.id].backing.lock();
-        if let Some(file) = backing.as_ref() {
+        if let Some(file) = self.backing() {
             axtask::future::block_on(file.sync(false)).map_err(|_| DevError::Io)?;
         }
         Ok(())
@@ -116,7 +124,7 @@ impl AsyncBlockDriverOps for LoopBlockDevice {
 
     fn read_block_async<'a>(&'a self, block_id: u64, buf: &'a mut [u8]) -> Self::ReadFuture<'a> {
         Box::pin(async move {
-            let file = LOOP_DEVICES[self.id].backing.lock().as_ref().cloned();
+            let file = self.backing();
             let Some(file) = file else {
                 return Err(DevError::BadState);
             };
@@ -128,7 +136,7 @@ impl AsyncBlockDriverOps for LoopBlockDevice {
 
     fn write_block_async<'a>(&'a self, block_id: u64, buf: &'a [u8]) -> Self::WriteFuture<'a> {
         Box::pin(async move {
-            let file = LOOP_DEVICES[self.id].backing.lock().as_ref().cloned();
+            let file = self.backing();
             let Some(file) = file else {
                 return Err(DevError::BadState);
             };
@@ -140,7 +148,7 @@ impl AsyncBlockDriverOps for LoopBlockDevice {
 
     fn flush_async(&self) -> Self::FlushFuture<'_> {
         Box::pin(async move {
-            let file = LOOP_DEVICES[self.id].backing.lock().as_ref().cloned();
+            let file = self.backing();
             if let Some(file) = file {
                 file.sync(false).await.map_err(|_| DevError::Io)?;
             }
