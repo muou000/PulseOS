@@ -476,7 +476,7 @@ impl OpenOptions {
         self
     }
 
-    async fn _open(&self, loc: Location) -> VfsResult<(OpenResult, Metadata)> {
+    async fn _open(&self, mut loc: Location) -> VfsResult<(OpenResult, Metadata)> {
         let flags = self.to_flags()?;
 
         if loc.is_dir() && (self.create_new || flags.contains(FileFlags::WRITE)) {
@@ -528,6 +528,7 @@ impl OpenOptions {
             {
                 FileBackend::new_cached(loc).await?
             } else {
+                loc.retain_open_file().await?;
                 FileBackend::new_direct(loc)
             };
             if self.truncate && metadata.node_type == NodeType::RegularFile {

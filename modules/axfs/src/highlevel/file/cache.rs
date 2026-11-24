@@ -104,6 +104,23 @@ impl Drop for UnlinkedFileCacheLease {
     }
 }
 
+/// Evict a closed FAT file before a namespace change that may complete during
+/// on-disk recovery. The caller excludes new opens until the change returns.
+/// Write the victim first so either outcome of a failed or cancelled change
+/// can be reopened from disk without restoring a stale cache.
+#[cfg(feature = "fat")]
+pub(crate) async fn evict_closed_file_cache(fs_id: usize, inode: u64) -> VfsResult<()> {
+    let key = FileCacheKey { fs_id, inode };
+    let state = FILE_SHARED_STATES[file_state_registry_shard(key)].lock().get(&key);
+    if let Some(state) = state {
+        if let Some((_, result)) = flush_file_cache_state(state).await {
+            result?;
+        }
+        discard_unlinked_file_cache_after(fs_id, inode, core::future::ready(Ok::<(), VfsError>(()))).await?;
+    }
+    Ok(())
+}
+
 /// Executes an ext4 inode deletion while its page cache is detached from all
 /// writeback registries. A pre-existing writeback is allowed to finish before
 /// the deletion; a later one observes the unlinked state and is skipped.
@@ -2331,9 +2348,9 @@ pub(crate) async fn flush_pending_file_caches_async() -> VfsResult<bool> {
 static FILESYSTEM_SYNC_SHARD_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 /// Checkpoints cached file data owned by a filesystem that is about to be
-/// unmounted.  Retention remains unchanged: tmpfs and disk file cache state
-/// may still be referenced by stable VFS entries, but no dirty page may reach
-/// a loop device after its backing has been detached.
+/// unmounted. Release clean, otherwise-unused FAT cache entries after writing
+/// them back so the page cache cannot keep a retired volume or loop binding
+/// alive. Open files and mappings retain their own references.
 pub(crate) async fn flush_file_caches_for_filesystem_async(
     filesystem: &dyn axfs_ng_vfs::FilesystemOps,
 ) -> VfsResult<()> {
@@ -2352,7 +2369,20 @@ pub(crate) async fn flush_file_caches_for_filesystem_async(
                 .cloned(),
         );
     }
-    flush_file_cache_states(states).await
+    flush_file_cache_states(states.iter().cloned()).await?;
+    if filesystem.name() == "vfat" {
+        for candidate in states {
+            if let Some(key) = candidate.key()
+                && candidate.is_releasable_without_writeback()
+            {
+                let removed = FILE_SHARED_STATES[file_state_registry_shard(key)]
+                    .lock()
+                    .try_release_unreferenced(&candidate);
+                drop(removed);
+            }
+        }
+    }
+    Ok(())
 }
 
 struct ReclaimGuard {
@@ -2563,9 +2593,10 @@ enum FileUserData {
 }
 
 impl FileUserData {
-    fn get(&self) -> Arc<CachedFileShared> {
+    fn live(&self) -> Option<Arc<CachedFileShared>> {
         match self {
-            FileUserData::Strong(strong) => strong.clone(),
+            FileUserData::Strong(state) if !state.is_unlinked() => Some(state.clone()),
+            _ => None,
         }
     }
 }
@@ -2628,23 +2659,24 @@ impl CachedFile {
         self.shared.size()
     }
 
-    pub async fn get_or_create_async(location: Location) -> VfsResult<Self> {
+    pub async fn get_or_create_async(mut location: Location) -> VfsResult<Self> {
         if !node_allows_page_cache(location.flags()) {
             return Err(VfsError::OperationNotSupported);
         }
 
+        location.retain_open_file().await?;
         let in_memory = location.filesystem().name() == "tmpfs";
         let existing = location
             .user_data()
             .get::<FileUserData>()
-            .map(|data| data.get());
+            .and_then(|data| data.live());
         let shared = match existing {
             Some(shared) => shared,
             None => {
                 let candidate = shared_file_state_async(&location).await?;
                 let mut user_data = location.user_data();
-                if let Some(existing) = user_data.get::<FileUserData>() {
-                    existing.get()
+                if let Some(existing) = user_data.get::<FileUserData>().and_then(|data| data.live()) {
+                    existing
                 } else {
                     user_data.insert(FileUserData::Strong(candidate.clone()));
                     candidate

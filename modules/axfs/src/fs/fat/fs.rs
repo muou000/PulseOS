@@ -34,6 +34,7 @@ pub(crate) struct FatFilesystem<D> {
     // volume lock to acquire the victim's page-cache I/O lock.
     pub(super) namespace: Mutex<()>,
     volume: Mutex<Volume<D>>,
+    open_files: SpinNoPreempt<BTreeMap<NodeId, Weak<()>>>,
     root_id: NodeId,
     block_size: u32,
     this: Weak<Self>,
@@ -60,6 +61,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> FatFilesystem<D> {
         let block_size = driver.info().cluster_size();
         Ok(Arc::new_cyclic(|this| Self {
             namespace: Mutex::new(()),
+            open_files: SpinNoPreempt::default(),
             volume: Mutex::new(Volume {
                 driver,
                 entries: BTreeMap::new(),
@@ -92,6 +94,28 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> FatFilesystem<D> {
         volume
     }
 
+    pub(super) async fn open_file(&self, id: NodeId) -> VfsResult<Arc<()>> {
+        let _namespace = self.namespace.lock().await;
+        // A lookup may have completed before an unlink acquired the namespace.
+        // Only publish a lease for a node that is still live.
+        self.lock().await.driver.stat(id).await.map_err(vfs_error)?;
+        let mut open = self.open_files.lock();
+        if let Some(lease) = open.get(&id).and_then(Weak::upgrade) {
+            return Ok(lease);
+        }
+        let lease = Arc::new(());
+        open.insert(id, Arc::downgrade(&lease));
+        Ok(lease)
+    }
+
+    /// Call with the namespace locked, before detaching a victim's dirty pages.
+    pub(super) fn has_open_handles(&self, id: NodeId) -> bool {
+        self.open_files
+            .lock()
+            .get(&id)
+            .is_some_and(|lease| lease.strong_count() != 0)
+    }
+
     pub(super) fn block_size(&self) -> u64 {
         self.block_size.into()
     }
@@ -100,6 +124,11 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> FatFilesystem<D> {
 impl<D> FatFilesystem<D> {
     pub(super) fn forget(&self, id: NodeId) {
         if id != self.root_id {
+            let mut open = self.open_files.lock();
+            if open.get(&id).is_some_and(|lease| lease.strong_count() == 0) {
+                open.remove(&id);
+            }
+            drop(open);
             self.forgotten.lock().push(id);
         }
     }
@@ -118,7 +147,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> FilesystemOps for FatFilesystem<D
         }
         let fs = self.this.upgrade().expect("live FAT filesystem");
         let pin = NodePin::new(fs, self.root_id);
-        let entry = FatNode::entry(pin, NodeType::Directory, Reference::root(), None);
+        let entry = FatNode::entry(pin, NodeType::Directory, Reference::root());
         *root = Some(entry.downgrade());
         entry
     }

@@ -10,6 +10,10 @@ use super::{fs::vfs_error, node::FatNode};
 
 #[async_trait]
 impl<D: AsyncBlockDriverOps + Clone + 'static> FileNodeOps for FatNode<D> {
+    fn open_lease(&self) -> Option<axfs_ng_vfs::OpenLeaseFuture<'_>> {
+        Some(Box::pin(self.pin.fs.open_file(self.pin.id)))
+    }
+
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         self.pin
             .fs

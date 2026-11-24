@@ -29,9 +29,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> FatNode<D> {
             .as_ref()
             .and_then(WeakDirEntry::upgrade)
             .ok_or(VfsError::NotFound)?;
-        let reference = Reference::new(Some(parent.downgrade()), name.into());
+        let reference = Reference::movable(parent, name.into());
         let id = pin.id;
-        let entry = Self::entry(pin, kind, reference, Some(parent));
+        let entry = Self::entry(pin, kind, reference);
         volume.entries.insert(id, entry.downgrade());
         Ok(entry)
     }
@@ -58,7 +58,12 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> DirNodeOps for FatNode<D> {
             count += 1;
         }
         if offset < 2 {
-            let parent_id = self.parent.as_ref().map_or(self.inode(), DirEntry::inode);
+            let parent = self
+                .this
+                .as_ref()
+                .and_then(WeakDirEntry::upgrade)
+                .and_then(|entry| entry.parent());
+            let parent_id = parent.as_ref().map_or(self.inode(), DirEntry::inode);
             if !sink.accept("..", parent_id, NodeType::Directory, 2) {
                 return Ok(count);
             }
@@ -88,6 +93,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> DirNodeOps for FatNode<D> {
     }
 
     async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+        let _namespace = self.pin.fs.namespace.lock().await;
         let mut volume = self.pin.fs.lock().await;
         let id = volume
             .driver
@@ -145,20 +151,19 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> DirNodeOps for FatNode<D> {
                 .map_err(vfs_error)?;
             NodePin::new(fs.clone(), id)
         };
-        // Writeback takes the cache I/O lock before entering the FAT driver.
-        // Acquire those locks in the same order when retiring the backing id.
-        crate::discard_unlinked_file_cache_after(Arc::as_ptr(fs) as usize, victim.id.get(), async {
-            let mut volume = fs.lock().await;
-            match volume.driver.unlink(self.pin.id, name).await {
-                Err(e) if e.kind() == ErrorKind::IsADirectory => volume
-                    .driver
-                    .rmdir(self.pin.id, name)
-                    .await
-                    .map_err(vfs_error),
-                result => result.map_err(vfs_error),
-            }
-        })
-        .await
+        if fs.has_open_handles(victim.id) {
+            return Err(VfsError::ResourceBusy);
+        }
+        crate::evict_closed_file_cache(Arc::as_ptr(fs) as usize, victim.id.get()).await?;
+        let mut volume = fs.lock().await;
+        match volume.driver.unlink(self.pin.id, name).await {
+            Err(e) if e.kind() == ErrorKind::IsADirectory => volume
+                .driver
+                .rmdir(self.pin.id, name)
+                .await
+                .map_err(vfs_error),
+            result => result.map_err(vfs_error),
+        }
     }
 
     async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
@@ -187,33 +192,40 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> DirNodeOps for FatNode<D> {
             };
             (source, target)
         };
-        let rename = async {
-            let mut volume = fs.lock().await;
-            // On success (or a cancelled rename completed by hadris recovery)
-            // a new lookup supplies the source node's current parent and name.
-            volume.entries.remove(&source.id);
-            volume
-                .driver
-                .rename(
-                    self.pin.id,
-                    src_name,
-                    dst.pin.id,
-                    dst_name,
-                    RenameMode::Replace,
-                )
-                .await
-                .map_err(vfs_error)
-        };
-        match target {
-            Some(victim) if victim.id != source.id => {
-                crate::discard_unlinked_file_cache_after(
-                    Arc::as_ptr(fs) as usize,
-                    victim.id.get(),
-                    rename,
-                )
-                .await
+        let new_parent = dst
+            .this
+            .as_ref()
+            .and_then(WeakDirEntry::upgrade)
+            .ok_or(VfsError::NotFound)?;
+        let new_name = dst_name
+            .to_str()
+            .map_err(|_| VfsError::InvalidInput)?
+            .into();
+        if let Some(victim) = target.as_ref().filter(|victim| victim.id != source.id) {
+            if fs.has_open_handles(victim.id) {
+                return Err(VfsError::ResourceBusy);
             }
-            _ => rename.await,
+            crate::evict_closed_file_cache(Arc::as_ptr(fs) as usize, victim.id.get()).await?;
         }
+        let mut volume = fs.lock().await;
+        volume
+            .driver
+            .rename(
+                self.pin.id,
+                src_name,
+                dst.pin.id,
+                dst_name,
+                RenameMode::Replace,
+            )
+            .await
+            .map_err(vfs_error)?;
+        if let Some(entry) = volume
+            .entries
+            .get(&source.id)
+            .and_then(WeakDirEntry::upgrade)
+        {
+            entry.relocate(new_parent, new_name);
+        }
+        Ok(())
     }
 }

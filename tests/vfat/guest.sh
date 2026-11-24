@@ -61,6 +61,28 @@ rm "$dir/Discard.txt"
 [ ! -e "$dir/Discard.txt" ]
 echo VFAT_DIRECTORY_LIFETIME_OK
 
+# util-linux rename submits case-only changes; mv may discard them as aliases.
+rename_bin=$(command -v rename.ul || command -v rename)
+move_entry() {
+    "$rename_bin" -- "$1" "$2" "$1"
+}
+mkdir -p "$dir/Before/Leaf" "$dir/Target"
+dir_inode=$(stat -c %i "$dir/Before")
+(
+    cd "$dir/Before/Leaf"
+    move_entry "$dir/Before" "$dir/Target/Moved"
+    [ "$(/bin/pwd -P)" = "$dir/Target/Moved/Leaf" ]
+    [ "$(stat -c %i ..)" = "$dir_inode" ]
+    move_entry "$dir/Target/Moved" "$dir/Target/MOVED"
+    [ "$(/bin/pwd -P)" = "$dir/Target/MOVED/Leaf" ]
+    ls -1 "$dir/Target" | grep -Fx MOVED
+    if move_entry "$dir/Target/MOVED" "$dir/Target/MOVED/Leaf/Invalid"; then exit 1; fi
+    [ "$(/bin/pwd -P)" = "$dir/Target/MOVED/Leaf" ]
+    [ "$(stat -c %i ..)" = "$dir_inode" ]
+)
+rmdir "$dir/Target/MOVED/Leaf" "$dir/Target/MOVED" "$dir/Target"
+echo VFAT_DIRECTORY_RENAME_OK
+
 # Two writers use separate descriptions of one file and interleaved ranges.
 parallel_file="$dir/Parallel.bin"
 dd if=/dev/zero of="$parallel_file" bs=4096 count=2 status=none
@@ -99,4 +121,5 @@ verify_persisted_file
 rm "$parallel_file" "$dir/Renamed File.txt" "$dir/Fio.bin"
 umount "$mount_dir"
 echo VFAT_REMOUNT_OK
+sh /vfat-volume-lifecycle.sh
 echo VFAT_PASS

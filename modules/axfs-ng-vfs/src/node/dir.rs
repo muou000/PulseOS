@@ -329,7 +329,9 @@ impl DirNode {
         let (first_mutation, second_mutation) = self.lock_both_mutations(dst_dir).await;
 
         let src = self.lookup(src_name).await?;
-        if let Ok(dst) = dst_dir.lookup(dst_name).await {
+        if let Ok(dst) = dst_dir.lookup(dst_name).await
+            && !src.ptr_eq(&dst)
+        {
             if src.node_type() == NodeType::Directory {
                 if let Ok(dir) = dst.as_dir()
                     && dir.has_children().await?

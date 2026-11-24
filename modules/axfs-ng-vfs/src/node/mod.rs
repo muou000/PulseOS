@@ -2,7 +2,7 @@ mod dir;
 mod file;
 
 use alloc::{
-    borrow::ToOwned,
+    borrow::Cow,
     string::String,
     sync::{Arc, Weak},
     vec,
@@ -129,14 +129,26 @@ impl fmt::Debug for Node {
 pub type ReferenceKey = (usize, String);
 
 #[derive(Debug)]
-pub struct Reference {
-    parent: Option<WeakDirEntry>,
-    name: String,
+pub struct Reference(ReferenceLocation);
+
+#[derive(Debug)]
+enum ReferenceLocation {
+    Fixed { parent: Option<WeakDirEntry>, name: String },
+    // Filesystems that revalidate names themselves have no parent-to-child
+    // dentry cache. Retain the ancestor while a child is alive and publish
+    // both parts of its new path under the same lock after a move.
+    Movable(SpinNoPreempt<(DirEntry, String)>),
 }
 
 impl Reference {
     pub fn new(parent: Option<WeakDirEntry>, name: String) -> Self {
-        Self { parent, name }
+        Self(ReferenceLocation::Fixed { parent, name })
+    }
+
+    /// A live dentry whose parent and name follow filesystem renames.
+    /// Only use with a backend that does not cache children in their parents.
+    pub fn movable(parent: DirEntry, name: String) -> Self {
+        Self(ReferenceLocation::Movable(SpinNoPreempt::new((parent, name))))
     }
 
     pub fn root() -> Self {
@@ -144,11 +156,16 @@ impl Reference {
     }
 
     pub fn key(&self) -> ReferenceKey {
-        let address = self
-            .parent
-            .as_ref()
-            .map_or(0, |it| Weak::as_ptr(&it.0) as usize);
-        (address, self.name.clone())
+        match &self.0 {
+            ReferenceLocation::Fixed { parent, name } => {
+                let address = parent.as_ref().map_or(0, |it| Weak::as_ptr(&it.0) as usize);
+                (address, name.clone())
+            }
+            ReferenceLocation::Movable(location) => {
+                let location = location.lock();
+                (location.0.as_ptr(), location.1.clone())
+            }
+        }
     }
 }
 
@@ -316,16 +333,45 @@ impl DirEntry {
     }
 
     pub fn parent(&self) -> Option<Self> {
-        self.0.reference.parent.as_ref().and_then(WeakDirEntry::upgrade)
+        match &self.0.reference.0 {
+            ReferenceLocation::Fixed { parent, .. } => parent.as_ref().and_then(WeakDirEntry::upgrade),
+            ReferenceLocation::Movable(location) => Some(location.lock().0.clone()),
+        }
     }
 
-    pub fn name(&self) -> &str {
-        &self.0.reference.name
+    pub fn name(&self) -> Cow<'_, str> {
+        match &self.0.reference.0 {
+            ReferenceLocation::Fixed { name, .. } => Cow::Borrowed(name),
+            ReferenceLocation::Movable(location) => Cow::Owned(location.lock().1.clone()),
+        }
+    }
+
+    /// Snapshot one path component (parent and name) across concurrent moves.
+    pub(crate) fn path_component(&self) -> (Option<Self>, Cow<'_, str>) {
+        match &self.0.reference.0 {
+            ReferenceLocation::Fixed { parent, name } => {
+                (parent.as_ref().and_then(WeakDirEntry::upgrade), Cow::Borrowed(name))
+            }
+            ReferenceLocation::Movable(location) => {
+                let location = location.lock();
+                (Some(location.0.clone()), Cow::Owned(location.1.clone()))
+            }
+        }
+    }
+
+    /// Publish a committed backend rename on a movable dentry. Fixed references
+    /// are rebuilt by their directory cache after a rename.
+    pub fn relocate(&self, parent: Self, name: String) {
+        if let ReferenceLocation::Movable(location) = &self.0.reference.0 {
+            // Dropping the previous parent can release filesystem nodes.
+            let old = core::mem::replace(&mut *location.lock(), (parent, name));
+            drop(old);
+        }
     }
 
     /// Checks if the entry is a root of a mount point.
     pub fn is_root_of_mount(&self) -> bool {
-        self.0.reference.parent.is_none()
+        matches!(&self.0.reference.0, ReferenceLocation::Fixed { parent: None, .. })
     }
 
     pub fn is_ancestor_of(&self, other: &Self) -> VfsResult<bool> {
@@ -346,8 +392,9 @@ impl DirEntry {
     pub(crate) fn collect_absolute_path(&self, components: &mut Vec<String>) {
         let mut current = self.clone();
         loop {
-            components.push(current.name().to_owned());
-            if let Some(parent) = current.parent() {
+            let (parent, name) = current.path_component();
+            components.push(name.into_owned());
+            if let Some(parent) = parent {
                 current = parent;
             } else {
                 break;

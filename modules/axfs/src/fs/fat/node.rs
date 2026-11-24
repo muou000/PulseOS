@@ -54,36 +54,23 @@ impl<D> Drop for NodePin<D> {
 pub(super) struct FatNode<D> {
     pub pin: NodePin<D>,
     pub this: Option<WeakDirEntry>,
-    // FAT lookup bypasses the VFS's case-sensitive child cache. Keep the
-    // parent alive for '..' and absolute paths while the child is reachable.
-    pub parent: Option<DirEntry>,
 }
 
 impl<D: AsyncBlockDriverOps + Clone + 'static> FatNode<D> {
-    pub fn entry(
-        pin: NodePin<D>,
-        kind: NodeType,
-        reference: Reference,
-        parent: Option<DirEntry>,
-    ) -> DirEntry {
+    pub fn entry(pin: NodePin<D>, kind: NodeType, reference: Reference) -> DirEntry {
         if kind == NodeType::Directory {
             DirEntry::new_dir(
                 |this| {
                     DirNode::new(Arc::new(Self {
                         pin,
                         this: Some(this),
-                        parent,
                     }))
                 },
                 reference,
             )
         } else {
             DirEntry::new_file(
-                FileNode::new(Arc::new(Self {
-                    pin,
-                    this: None,
-                    parent,
-                })),
+                FileNode::new(Arc::new(Self { pin, this: None })),
                 kind,
                 reference,
             )

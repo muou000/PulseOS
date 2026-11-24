@@ -28,23 +28,23 @@ fn lookup_or_probe_fs(
     // Preserve the boot aliases (device0, /dev/vda) and reuse the same
     // mounted filesystem, but only for an explicitly compatible format.
     let cached = |path: &str| {
-        axfs::lookup_mountable_filesystem(path).map(|fs| {
-            let matches = match fstype {
-                "" | "none" => true,
-                "ext2" | "ext3" => fs.name() == "ext4",
-                name => fs.name() == name,
-            };
-            if matches {
-                Ok(fs)
-            } else {
-                Err(LinuxError::EINVAL)
-            }
-        })
+        let fs = axfs::lookup_mountable_filesystem(path)?;
+        match fstype {
+            "" | "none" => Some(Ok(fs)),
+            "ext2" | "ext3" if fs.name() == "ext4" => Some(Ok(fs)),
+            name if fs.name() == name => Some(Ok(fs)),
+            // A secondary disk can have been reformatted since its boot
+            // probe. Verify its current FAT volume before dropping any alias.
+            #[cfg(feature = "fat")]
+            "vfat" if !axfs::filesystem_is_mounted(&fs) => None,
+            _ => Some(Err(LinuxError::EINVAL)),
+        }
     };
     if let Some(result) = cached(source) {
         return result;
     }
-
+    let alias = axfs::mount_device_alias(source);
+    let source = alias.as_deref().unwrap_or(source);
     let loc = match axtask::future::block_on(ctx.resolve(Path::new(source))) {
         Ok(loc) => loc,
         Err(e) => {
@@ -82,7 +82,15 @@ fn lookup_or_probe_fs(
             axtask::future::block_on(axfs::ext4::Ext4Filesystem::new(disk))
         }
         #[cfg(feature = "fat")]
-        "vfat" => axtask::future::block_on(node.mount_fat()),
+        "vfat" => {
+            let volume = axtask::future::block_on(node.mount_fat());
+            if volume.is_ok()
+                && let Some(stale) = axfs::lookup_mountable_filesystem(path.as_str())
+            {
+                axfs::forget_mountable_filesystem(&stale);
+            }
+            volume
+        }
         "none" | "" => axfs::probe_block_device(path.as_str(), &loc),
         _ => return Err(LinuxError::ENODEV),
     }

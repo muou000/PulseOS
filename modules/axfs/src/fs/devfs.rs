@@ -585,7 +585,13 @@ impl DevNode {
         if let Some(fs) = cached.upgrade() {
             return Ok(Filesystem::new(fs));
         }
-        let device = block.disk.lock().device().lock().clone();
+        let rdev = inode.metadata.lock().rdev;
+        let device = if rdev.major() == 7 {
+            let pinned = super::loop_dev::LoopBlockDevice::for_mount(rdev.minor() as usize)?;
+            SharedBlockDevice::new(Box::new(pinned))
+        } else {
+            block.disk.lock().device().lock().clone()
+        };
         let fs = super::fat::FatFilesystem::mount(device).await?;
         *cached = Arc::downgrade(&fs);
         Ok(Filesystem::new(fs))

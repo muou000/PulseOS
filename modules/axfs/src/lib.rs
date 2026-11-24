@@ -231,6 +231,27 @@ pub fn lookup_mountable_filesystem(source: &str) -> Option<axfs_ng_vfs::Filesyst
     MOUNTABLE_FILESYSTEMS.lock().get(source).cloned()
 }
 
+/// Resolve the kernel's legacy deviceN mount-source spelling.
+pub fn mount_device_alias(source: &str) -> Option<String> {
+    let index: u32 = source.strip_prefix("device")?.parse().ok()?;
+    Some(format!("/dev/{}", disk_node_name(index as usize)))
+}
+
+#[cfg(feature = "fat")]
+pub fn filesystem_is_mounted(fs: &axfs_ng_vfs::Filesystem) -> bool {
+    let id = filesystem_id(fs.root_dir().filesystem());
+    ROOT_FS_CONTEXT.get().is_some_and(|ctx| filesystem_id(ctx.root_dir().filesystem()) == id)
+        || mounts::mounted_mountpoints().iter().any(|mp| filesystem_id(mp.root_location().filesystem()) == id)
+}
+
+#[cfg(feature = "fat")]
+pub fn forget_mountable_filesystem(fs: &axfs_ng_vfs::Filesystem) {
+    // Both deviceN and /dev/vdX can refer to this boot probe. The caller
+    // retains the filesystem across removal from the registry.
+    let root = fs.root_dir();
+    MOUNTABLE_FILESYSTEMS.lock().retain(|_, cached| cached.root_dir() != root);
+}
+
 pub fn find_free_loop_device() -> Option<usize> {
     for i in 0..8 {
         if fs::loop_dev::LOOP_DEVICES[i].backing.lock().is_none() {
@@ -263,13 +284,17 @@ pub fn clear_loop_backing(id: usize) -> axfs_ng_vfs::VfsResult<()> {
     if id >= 8 {
         return Err(axfs_ng_vfs::VfsError::InvalidInput);
     }
-    *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = None;
-    fs::loop_dev::LOOP_DEVICES[id]
-        .size
-        .store(0, core::sync::atomic::Ordering::Release);
-    fs::loop_dev::LOOP_DEVICES[id]
-        .flags
-        .store(0, core::sync::atomic::Ordering::Release);
+    let dev = &fs::loop_dev::LOOP_DEVICES[id];
+    let mut backing = dev.backing.lock();
+    let file = backing.as_ref().ok_or(axfs_ng_vfs::VfsError::NoSuchDevice)?;
+    if Arc::strong_count(file) != 1 {
+        return Err(axfs_ng_vfs::VfsError::ResourceBusy);
+    }
+    let removed = backing.take();
+    dev.size.store(0, core::sync::atomic::Ordering::Release);
+    dev.flags.store(0, core::sync::atomic::Ordering::Release);
+    drop(backing);
+    drop(removed);
     Ok(())
 }
 
@@ -279,10 +304,14 @@ pub fn set_loop_backing(id: usize, file: File) -> axfs_ng_vfs::VfsResult<()> {
     }
     let metadata = axtask::future::block_on(file.location().metadata())?;
     let size = cached_file_size(file.location()).unwrap_or(metadata.size);
-    *fs::loop_dev::LOOP_DEVICES[id].backing.lock() = Some(Arc::new(file));
-    fs::loop_dev::LOOP_DEVICES[id]
-        .size
-        .store(size, core::sync::atomic::Ordering::Release);
+    let dev = &fs::loop_dev::LOOP_DEVICES[id];
+    let file = Arc::new(file);
+    let mut backing = dev.backing.lock();
+    if backing.is_some() {
+        return Err(axfs_ng_vfs::VfsError::ResourceBusy);
+    }
+    *backing = Some(file);
+    dev.size.store(size, core::sync::atomic::Ordering::Release);
     Ok(())
 }
 
@@ -320,11 +349,23 @@ pub fn probe_block_device(
     let node = entry
         .downcast::<fs::devfs::DevNode>()
         .map_err(|_| axfs_ng_vfs::VfsError::InvalidInput)?;
-    let disk = node.get_block_device()?;
-
-    let fs = axtask::future::block_on(fs::new_default(disk.clone()))?;
-    register_mountable_device(path, path, &fs);
-    Ok(fs)
+    #[cfg(all(feature = "fat", not(feature = "ext4")))]
+    {
+        let _ = path;
+        axtask::future::block_on(node.mount_fat())
+    }
+    #[cfg(not(all(feature = "fat", not(feature = "ext4"))))]
+    {
+        let disk = node.get_block_device()?;
+        let fs = axtask::future::block_on(fs::new_default(disk))?;
+        // /dev/loopN is a name for a changeable binding. The boot aliases
+        // represent fixed devices and may retain their filesystem.
+        let rdev = axtask::future::block_on(entry.metadata())?.rdev;
+        if rdev.major() != 7 {
+            register_mountable_filesystem(path, &fs);
+        }
+        Ok(fs)
+    }
 }
 
 fn disk_node_name(index: usize) -> String {
@@ -423,7 +464,10 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
         let name = disk_node_name(index);
         let device = disk::SharedBlockDevice::new(dev);
         match axtask::future::block_on(fs::new_default(device.clone())) {
-            Ok(fs) => register_mountable_device(&format!("device{index}"), &name, &fs),
+            Ok(fs) if fs.name() != "vfat" => {
+                register_mountable_device(&format!("device{index}"), &name, &fs);
+            }
+            Ok(_) => {}  // FAT is probed per device when the volume is mounted.
             Err(error) => info!("  /dev/{name} available for explicit mount ({error:?})"),
         }
         dev_nodes.push(fs::BlockDeviceSpec {

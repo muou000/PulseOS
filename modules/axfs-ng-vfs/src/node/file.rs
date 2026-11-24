@@ -8,8 +8,18 @@ use async_trait::async_trait;
 use super::NodeOps;
 use crate::{VfsError, VfsResult};
 
+/// An optional handle lease retained by open descriptions and file mappings.
+pub type OpenLeaseFuture<'a> =
+    core::pin::Pin<Box<dyn core::future::Future<Output = VfsResult<Arc<()>>> + Send + 'a>>;
+
 #[async_trait]
 pub trait FileNodeOps: NodeOps + Pollable {
+    /// Filesystems that cannot unlink an open node may track this lease until
+    /// the last file description or mapping using it has been dropped.
+    fn open_lease(&self) -> Option<OpenLeaseFuture<'_>> {
+        None
+    }
+
     /// Reads a number of bytes starting from a given offset.
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize>;
 

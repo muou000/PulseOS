@@ -954,6 +954,7 @@ fn underlying_mount_location<'a>(
 pub struct Location {
     mountpoint: Arc<Mountpoint>,
     entry: DirEntry,
+    open_lease: Option<Arc<()>>,
 }
 
 impl PartialEq for Location {
@@ -1017,7 +1018,18 @@ impl Location {
 
 impl Location {
     pub fn new(mountpoint: Arc<Mountpoint>, entry: DirEntry) -> Self {
-        Self { mountpoint, entry }
+        Self { mountpoint, entry, open_lease: None }
+    }
+
+    /// Retain any backend open lease on this exact location. A clone used as
+    /// a mapping source keeps it alive independently of the file descriptor.
+    pub async fn retain_open_file(&mut self) -> VfsResult<()> {
+        if self.open_lease.is_none()
+            && let Some(lease) = self.entry.as_file()?.open_lease()
+        {
+            self.open_lease = Some(lease.await?);
+        }
+        Ok(())
     }
 
     fn wrap(&self, entry: DirEntry) -> Self {
@@ -1034,7 +1046,7 @@ impl Location {
 
     pub fn name(&self) -> Cow<'_, str> {
         if !self.is_root_of_mount() {
-            return Cow::Borrowed(self.entry.name());
+            return self.entry.name();
         }
         let guard = topology_sync::lock_topology_read();
         let name = underlying_mount_location(&self.mountpoint, &guard)
@@ -1061,14 +1073,13 @@ impl Location {
     /// in that parent directory under one topology read critical section.
     pub fn parent_and_name(&self) -> Option<(Self, Cow<'_, str>)> {
         if !self.is_root_of_mount() {
-            let parent = self.entry.parent().map(|parent| self.wrap(parent))?;
-            return Some((parent, Cow::Borrowed(self.entry.name())));
+            let (parent, name) = self.entry.path_component();
+            return Some((self.wrap(parent?), name));
         }
         let guard = topology_sync::lock_topology_read();
         let snapshot = underlying_mount_location(&self.mountpoint, &guard).and_then(|loc| {
-            let parent = loc.entry.parent().map(|parent| loc.wrap(parent))?;
-            let name = Cow::Owned(String::from(loc.entry.name()));
-            Some((parent, name))
+            let (parent, name) = loc.entry.path_component();
+            Some((loc.wrap(parent?), Cow::Owned(name.into_owned())))
         });
         drop(guard);
         snapshot
@@ -1129,8 +1140,9 @@ impl Location {
         loop {
             let mut entry: &DirEntry = cur_entry;
             while !entry.ptr_eq(&cur_mp.root) {
-                components.push(String::from(entry.name()));
-                if let Some(parent) = entry.parent() {
+                let (parent, name) = entry.path_component();
+                components.push(name.into_owned());
+                if let Some(parent) = parent {
                     kept_entries.push(parent);
                     entry = kept_entries.last().unwrap();
                 } else {
@@ -1256,8 +1268,11 @@ impl Location {
         if !Arc::ptr_eq(&self.mountpoint, &dst_dir.mountpoint) {
             return Err(VfsError::CrossesDevices);
         }
-        if !self.ptr_eq(dst_dir) && self.entry.is_ancestor_of(&dst_dir.entry)? {
-            return Err(VfsError::InvalidInput);
+        if !self.ptr_eq(dst_dir) {
+            let source = self.entry.as_dir()?.lookup(src_name).await?;
+            if source.is_dir() && source.is_ancestor_of(&dst_dir.entry)? {
+                return Err(VfsError::InvalidInput);
+            }
         }
         self.entry
             .as_dir()?
