@@ -10,6 +10,9 @@
 
 pub mod user;
 
+/// The size of the kernel stack.
+pub const KERNEL_STACK_SIZE: usize = 0x4_0000;
+
 axconfig_macros::include_configs!(
     path_env = "AX_CONFIG_PATH",
     fallback = "../../configs/defconfig.toml"

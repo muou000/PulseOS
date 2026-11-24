@@ -10,7 +10,8 @@
   - `api/`：统一功能特性与接口层（`api/axfeat`）。
   - `configs/`：内核及平台构建配置文件（如 `defconfig.toml`）。
   - `platforms/`：平台适配实现与 `axplat` 统一抽象层（RISC-V virt, VisionFive 2, LoongArch virt, LS2K1000）。
-  - `pulse_core/`：PulseOS 核心实现（进程/线程管理、内存映射、陷阱与上下文支持）。
+  - `modules/process/`：用户进程与线程生命周期、用户内存访问、FD、socket、io_uring 执行和 trap。
+  - `pulse_core/`：为启动代码和系统调用保留旧接口的临时重导出入口。
   - `pulse_syscalls/`：Linux 兼容系统调用实现与分发。
   - `crates/`：独立的外部支持库或待解耦 crates（如 `eevdf-scheduler`, `ext4plus`, `smoltcp`, `virtio-drivers` 等）。
   - `scripts/`：根 Makefile 构建支撑（`scripts/make/`）与镜像辅助脚本。

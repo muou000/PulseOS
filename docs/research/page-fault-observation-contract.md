@@ -16,15 +16,15 @@
 | 热路径开销 | 无订阅时只走订阅检查，不读取观察时钟、不分配、不入队。有订阅时保存标量，resolver 返回后向既有有界队列复制 80 字节；worker 执行 BPF。实际开销仍须 baseline/loaded-detached/attached 实测。 |
 | kmalloc/vmalloc | 不在此事件/第一阶段范围内。缺页 resolver 墙钟不是分配器延迟，不为统一工具而混用指标。 |
 
-现有 trap 有真实 `is_user`、VA 和 access flags；`Process::handle_page_fault` 委托 `AddressSpaceLock::resolve_page_fault`，最终只返回 `AxResult<bool>`。driver 可经历 file/anon/COW 准备、completion 等待、重新提交与 TLB completion；这些来源没有通过最终 bool 返回为 Linux major/minor 分类。[trap](../../pulse_core/src/trap.rs)、[process resolver](../../pulse_core/src/task/process/runtime.rs)、[address-space coordinator](../../pulse_core/src/task/aspace_lock.rs)、[fault driver](../../modules/axmm/src/aspace.rs)。
+现有 trap 有真实 `is_user`、VA 和 access flags；`Process::handle_page_fault` 委托 `AddressSpaceLock::resolve_page_fault`，最终只返回 `AxResult<bool>`。driver 可经历 file/anon/COW 准备、completion 等待、重新提交与 TLB completion；这些来源没有通过最终 bool 返回为 Linux major/minor 分类。[trap](../../modules/process/src/trap.rs)、[process resolver](../../modules/process/src/lifecycle/runtime.rs)、[address-space coordinator](../../modules/process/src/aspace_lock.rs)、[fault driver](../../modules/axmm/src/aspace.rs)。
 
 Linux v6.12 的 `VM_FAULT_MAJOR` 指示存储读取，fault accounting 接收 resolver 返回码并对 retry/error 作专门处理。PulseOS 的 `FileMappingSource::get_shared_page_paddrs` 返回 page batch，没有相应的 I/O provenance。因此本版**全部 classification=Unknown**；不能根据地址是否 file-backed、延迟长短、事前缓存检查或“匿名页大概是 minor”来填分类。若后续添加精确分类，必须沿实际填页/等待路径传播事实并另测并发共享读取。[Linux mm_types.h](https://github.com/torvalds/linux/blob/v6.12/include/linux/mm_types.h#L1241)、[Linux fault accounting](https://github.com/torvalds/linux/blob/v6.12/mm/memory.c#L5912)、[PulseOS FileMappingSource](../../modules/axmm/src/backend/file.rs)。
 
 ## 时间与结果
 
-`start_ns` 在调用 `proc.handle_page_fault` 紧前取得；completion timestamp 在该调用返回后、信号和 fixup 后处理前取得。`elapsed_ns = completion_ns - start_ns` 包含等待、I/O、被调度出去的时间与观察点之间的小量仪器化开销，单位为 guest monotonic nanoseconds，不是 CPU time，也不是整个 trap 到 user-return 的时长。completion CPU 是返回时 CPU；origin task/PID/TID 在进入时冻结，因此跨 CPU 恢复不会被 worker 身份替代。[实现观察点](../../pulse_core/src/trap.rs)、[有界发布器](../../modules/axtask/src/bpf_trace.rs)。
+`start_ns` 在调用 `proc.handle_page_fault` 紧前取得；completion timestamp 在该调用返回后、信号和 fixup 后处理前取得。`elapsed_ns = completion_ns - start_ns` 包含等待、I/O、被调度出去的时间与观察点之间的小量仪器化开销，单位为 guest monotonic nanoseconds，不是 CPU time，也不是整个 trap 到 user-return 的时长。completion CPU 是返回时 CPU；origin task/PID/TID 在进入时冻结，因此跨 CPU 恢复不会被 worker 身份替代。[实现观察点](../../modules/process/src/trap.rs)、[有界发布器](../../modules/axtask/src/bpf_trace.rs)。
 
-结果只描述 resolver 返回值：`Resolved=1` 对应 `Ok(true)`，`NotHandled=2` 对应 `Ok(false)`，`NoMemory=3` 对应 `Err(AxError::NoMemory)`，其余错误为 `ResolverError=4`。观察路径不改变这个原始结果；既有信号、内核 fixup、进程终止和返回分支继续消费它。完成事件不能表示“进程已成功恢复用户态”。先于 resolver 的 kernel fixup、没有 Thread 的 fault、提前进程退出或未返回的 panic 不产生虚假的 completion。[trap 分支](../../pulse_core/src/trap.rs)。
+结果只描述 resolver 返回值：`Resolved=1` 对应 `Ok(true)`，`NotHandled=2` 对应 `Ok(false)`，`NoMemory=3` 对应 `Err(AxError::NoMemory)`，其余错误为 `ResolverError=4`。观察路径不改变这个原始结果；既有信号、内核 fixup、进程终止和返回分支继续消费它。完成事件不能表示“进程已成功恢复用户态”。先于 resolver 的 kernel fixup、没有 Thread 的 fault、提前进程退出或未返回的 panic 不产生虚假的 completion。[trap 分支](../../modules/process/src/trap.rs)。
 
 时钟回退以 checked subtraction 检出；增加 `clock_errors`，不输出一个伪造的零时长。相同 clock tick 的起止可合法得到零。`started`、`completed` 是系统范围的、曾在订阅存在时进入观察的 resolver 数；即使订阅停止，已开始 token 返回时仍增加 completed。它们不是每 source/event 的 VM 次数，不能与 source `delivered` 硬相等；观察区间之间可能有在途 resolver，差值也不能直接命名为 aborted。捕获层继续报告缺失、unknown 和 partial。[计数与 token 生命周期](../../modules/axtask/src/bpf_trace.rs)。
 

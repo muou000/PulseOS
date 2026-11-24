@@ -99,13 +99,20 @@ pub fn new_kernel_aspace() -> AxResult<AddrSpace> {
 /// Creates a new address space for user processes.
 pub fn new_user_aspace(base: VirtAddr, size: usize) -> AxResult<AddrSpace> {
     let mut aspace = AddrSpace::new_empty(base, size)?;
+    copy_from_kernel(&mut aspace)?;
+    Ok(aspace)
+}
+
+/// Copies kernel mappings into a user address space on architectures with a
+/// shared user/kernel page table.
+pub fn copy_from_kernel(aspace: &mut AddrSpace) -> AxResult {
     if !cfg!(target_arch = "aarch64") && !cfg!(target_arch = "loongarch64") {
         // ARMv8 (aarch64) and LoongArch64 use separate page tables for user space
         // (aarch64: TTBR0_EL1, LoongArch64: PGDL), so there is no need to copy the
         // kernel portion to the user page table.
         aspace.copy_mappings_from(&kernel_aspace().lock())?;
     }
-    Ok(aspace)
+    Ok(())
 }
 
 /// Returns the globally unique kernel address space.

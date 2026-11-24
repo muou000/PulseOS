@@ -8,42 +8,14 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-bpf.workspace = true
-elf_loader.workspace = true
-ipc.workspace = true
-axhal = { workspace = true, features = ["paging", "uspace"] }
-axcpu.workspace = true
-axlog = { workspace = true }
-axconfig = { workspace = true }
-axalloc.workspace = true
-axtask = { workspace = true, features = ["multitask"] }
-axsync = { workspace = true, features = ["multitask"] }
-axfs.workspace = true
-axfs-ng-vfs.workspace = true
-axpoll.workspace = true
+axconfig.workspace = true
 axmm.workspace = true
-axerrno.workspace = true
-axio.workspace = true
-axnet.workspace = true
-pulse_bpf_schema = { workspace = true }
-pulse_io_uring_core.workspace = true
-pulse_user_abi.workspace = true
-
-linux-raw-sys = { workspace = true, features = ["io_uring"] }
-linkme.workspace = true
-memory_addr.workspace = true
-kernel_guard.workspace = true
-spin.workspace = true
-bitflags.workspace = true
-percpu.workspace = true
-kspin.workspace = true
-hashbrown.workspace = true
-heapless.workspace = true
-sha2 = { version = "0.10", default-features = false, optional = true }
+elf_loader.workspace = true
+process.workspace = true
 
 [features]
-ls2k1000 = ["axcpu/ls2k1000"]
-bpf-trace = ["bpf/bpf-trace", "axtask/bpf-trace", "axmm/mapping-observer", "dep:sha2"]
-mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
-file-io-test = ["axfs/file-io-test"]
-guest-checks = []
+ls2k1000 = ["process/ls2k1000"]
+bpf-trace = ["process/bpf-trace"]
+mapping-lifecycle-test = ["process/mapping-lifecycle-test"]
+file-io-test = ["process/file-io-test"]
+guest-checks = ["process/guest-checks"]
