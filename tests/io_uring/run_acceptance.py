@@ -6,6 +6,7 @@ Modes:
   functional   : Verify LTP io_uring01..04, 54/54 liburing-2.9, smp_stress, meminfo.
   sqpoll       : Verify the shared-ring SQPOLL protocol and pinned sqpoll-sleep.t.
   sqpoll-reserved : Observe SQ consumption on a reserved CPU (guest-checks kernel).
+  dedicated-ring : Exercise SQPOLL, inline reads, native poll and worker I/O on one reserved CPU.
   future-cpu   : Check native poll placement and ordinary-ring progress (guest-checks kernel).
   worker-cpu   : Check Path 3 placement (guest-checks kernel with worker-scheduler.patch).
   worker-limits: Saturate the shared pool and verify quotas and cross-ring ordering (guest-checks).
@@ -265,8 +266,9 @@ echo 'SQPOLL liburing-2.9 sqpoll-sleep.t PASS'
 
 
 def run_reserved_probe(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path,
-                       option: str, on_output=None, service_cpus: str = "7") -> tuple[str, int]:
-    for name, cpus in (("pulse-kernel-cpus", "6-7"), ("pulse-sqpoll-cpus", service_cpus)):
+                       option: str, on_output=None, service_cpus: str = "7",
+                       reserved_cpus: str = "6-7") -> tuple[str, int]:
+    for name, cpus in (("pulse-kernel-cpus", reserved_cpus), ("pulse-sqpoll-cpus", service_cpus)):
         config = run / name
         config.write_text(cpus + "\n")
         install_verified_file(image_copy, config, f"/etc/{name}", run)
@@ -277,6 +279,32 @@ def run_reserved_probe(args: argparse.Namespace, run: Path, kernel: Path, image_
         script_text=f"#!/bin/sh\nexec /opt/io_uring/sqpoll {option}\n",
         boot_timeout=args.boot_timeout, timeout=args.timeout, on_output=on_output,
     )
+
+
+def run_dedicated_ring(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
+    from dedicated_ring import PendingPoll, check_dedicated_ring
+
+    provenance = _load_module("build_provenance", REPO / "scripts/build_provenance.py")
+    manifest = kernel.with_suffix(".elf.provenance.json")
+    build = provenance.verify_manifest(manifest, kernel.with_suffix(".elf"), kernel)
+    shutil.copyfile(manifest, run / "kernel.provenance.json")
+    gate = PendingPoll()
+    clean, qemu_exit = run_reserved_probe(
+        args, run, kernel, image_copy, "--dedicated-ring",
+        lambda text, stdin: gate(strip_ansi(text), stdin), reserved_cpus="7",
+    )
+    summary = {
+        "mode": "dedicated-ring", "arch": args.arch, "qemu_exit": qemu_exit,
+        "kernel_commit": build["source"]["commit"],
+        "kernel_tree_sha256": build["source"]["tree_sha256"],
+        "boot_sha256": helpers.digest(kernel),
+        "build": build["configuration"]["values"],
+        "qemu": bpf_rec.qemu_command(args.arch, kernel, image_copy),
+        "guest": "/opt/io_uring/sqpoll --dedicated-ring",
+        **check_dedicated_ring(clean),
+    }
+    (run / f"dedicated-ring-{args.arch}.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
 
 
 def run_worker_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
@@ -940,7 +968,7 @@ def run_bpf(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "sqpoll", "sqpoll-reserved", "future-cpu", "worker-cpu", "worker-limits", "fio", "bpf"))
+    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "sqpoll", "sqpoll-reserved", "dedicated-ring", "future-cpu", "worker-cpu", "worker-limits", "fio", "bpf"))
     parser.add_argument("--arch", required=True, choices=tuple(ARCHES))
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--boot-timeout", type=float, default=60.0)
@@ -964,6 +992,7 @@ def main() -> int:
         "functional": run_functional,
         "sqpoll": run_sqpoll,
         "sqpoll-reserved": run_sqpoll_reserved,
+        "dedicated-ring": run_dedicated_ring,
         "future-cpu": run_future_cpu,
         "worker-cpu": run_worker_cpu,
         "worker-limits": run_worker_limits,

@@ -217,6 +217,8 @@ impl IoUringState {
         });
         if let Some(owner) = owner {
             state.start_sqpoll(params, owner)?;
+            #[cfg(feature = "guest-checks")]
+            state.report_user_dispatches("setup");
         }
         {
             let mut active = ACTIVE_RINGS.lock();
@@ -294,16 +296,17 @@ impl IoUringState {
             );
             async move {
                 let mut future = core::pin::pin!(future);
-                let mut phase = "first";
+                let mut seq = 0u64;
                 core::future::poll_fn(move |cx| {
+                    seq += 1;
+                    let phase = if seq == 1 { "first" } else { "resume" };
                     let cpu = axhal::percpu::this_cpu_id();
                     let poll = future.as_mut().poll(cx);
                     let result = if poll.is_pending() { "pending" } else { "ready" };
                     axlog::info!(
-                        "io_uring poll ring={ring} req={req_id} phase={phase} cpu={cpu} result={result} task={}",
+                        "io_uring poll ring={ring} req={req_id} phase={phase} cpu={cpu} result={result} task={} seq={seq}",
                         axtask::current().name()
                     );
-                    phase = "resume";
                     poll
                 })
                 .await
@@ -1023,6 +1026,15 @@ impl IoUringState {
                     &mut cached_fixed_fd,
                 )
             {
+                #[cfg(feature = "guest-checks")]
+                if self.sqpoll_service_cpu().is_some() {
+                    axlog::info!(
+                        "SQPOLL inline ring={} user_data={} cpu={} res={res}",
+                        self.ring_id,
+                        sqe.user_data,
+                        axhal::percpu::this_cpu_id()
+                    );
+                }
                 batch_cqes[batch_len] = IoUringCqe {
                     user_data: sqe.user_data,
                     res,
@@ -1131,8 +1143,19 @@ impl IoUringState {
             let mut inner = self.inner.lock();
             match inner.orch.commit_chain_with_ids(&mut preps) {
                 Ok((ids, eff)) => {
-                    for (id, spec) in ids.into_iter().zip(specs) {
+                    for (&id, spec) in ids.iter().zip(specs) {
                         inner.specs.insert(id, (spec, exec_ctx.clone()));
+                    }
+                    drop(inner);
+                    #[cfg(feature = "guest-checks")]
+                    if self.sqpoll_service_cpu().is_some() {
+                        for (id, prep) in ids.iter().zip(&preps) {
+                            axlog::info!(
+                                "SQPOLL committed ring={} req={id} user_data={}",
+                                self.ring_id,
+                                prep.user_data
+                            );
+                        }
                     }
                     Ok(eff)
                 }
@@ -1504,6 +1527,8 @@ impl IoUringState {
             slot.staging_cache = Vec::new();
         }
         // Step 5: Shared frames are released when `self` (`Arc<IoUringState>`) drops.
+        #[cfg(feature = "guest-checks")]
+        self.report_user_dispatches("teardown");
     }
 }
 

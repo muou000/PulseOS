@@ -425,6 +425,130 @@ static struct io_uring_sqe worker_read(int fd, void *dst, unsigned len, uint64_t
         .fd = fd, .addr = (uintptr_t)dst, .len = len, .user_data = id };
 }
 
+struct dedicated_work {
+    struct ring *ring;
+    int file, pipe_writer;
+    int reader_cpu, wake_cpu;
+    unsigned ready, read_turn, reads_done;
+};
+
+static void *dedicated_waker(void *arg)
+{
+    struct dedicated_work *w = arg;
+    pin_to_cpu(2);
+    __atomic_add_fetch(&w->ready, 1, __ATOMIC_RELEASE);
+    /* The host sends this only after seeing this ring's POLL_ADD return Pending. */
+    worker_ack("pending\n");
+    w->wake_cpu = sched_getcpu();
+    CHECK(w->wake_cpu == 2 && write(w->pipe_writer, "p", 1) == 1);
+    return NULL;
+}
+
+static void *dedicated_reads(void *arg)
+{
+    struct dedicated_work *w = arg;
+    pin_to_cpu(1);
+    w->reader_cpu = sched_getcpu();
+    char cached[2] = {}, forced[2] = {};
+    struct io_uring_sqe reads[] = {
+        worker_read(w->file, cached, sizeof(cached), 2001),
+        worker_read(w->file, forced, sizeof(forced), 2002),
+    };
+    reads[0].flags = 0;
+    __atomic_add_fetch(&w->ready, 1, __ATOMIC_RELEASE);
+    /* CPU 0 hands over the SQ and CQ after warmup, then waits for both reads. */
+    while (!load(&w->read_turn)) {}
+    submit(w->ring, reads, 2);
+    unsigned seen = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        struct io_uring_cqe cqe = reap(w->ring);
+        CHECK(cqe.res == 2 && (cqe.user_data == 2001 || cqe.user_data == 2002));
+        unsigned bit = 1U << (cqe.user_data - 2001);
+        CHECK(!(seen & bit));
+        seen |= bit;
+    }
+    CHECK(seen == 3 && !memcmp(cached, "7\n", 2) && !memcmp(forced, "7\n", 2));
+    publish(&w->reads_done, 1);
+    return NULL;
+}
+
+static void dedicated_ring(void)
+{
+    cpu_set_t allowed;
+    CHECK(sched_getaffinity(0, sizeof(allowed), &allowed) == 0 && CPU_COUNT(&allowed) == 7);
+    for (int cpu = 0; cpu < 7; cpu++)
+        CHECK(CPU_ISSET(cpu, &allowed));
+    pin_to_cpu(0);
+    int submit_cpu = sched_getcpu();
+    puts("DEDICATED_RING_BEGIN");
+    struct ring r = setup(IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF, 2000, 7);
+
+    /* Read the regular rootfs fixture into cache before exercising the inline path. */
+    int fd = open("/etc/pulse-kernel-cpus", O_RDONLY);
+    char bytes[2];
+    CHECK(fd >= 0 && pread(fd, bytes, sizeof(bytes), 0) == 2 && !memcmp(bytes, "7\n", 2));
+    int signal_pipe[2], sentinel[2];
+    CHECK(pipe(signal_pipe) == 0 && pipe2(sentinel, O_NONBLOCK) == 0);
+    CHECK(syscall(SYS_io_uring_register, r.fd, IORING_REGISTER_FILES, sentinel + 1, 1) == 0);
+    CHECK(close(sentinel[1]) == 0 && read(sentinel[0], bytes, 1) == -1 && errno == EAGAIN);
+    struct dedicated_work w = { .ring = &r, .file = fd, .pipe_writer = signal_pipe[1] };
+    pthread_t reader, waker;
+    CHECK(pthread_create(&reader, NULL, dedicated_reads, &w) == 0);
+    CHECK(pthread_create(&waker, NULL, dedicated_waker, &w) == 0);
+    while (load(&w.ready) != 2)
+        sched_yield();
+
+    struct io_uring_sqe nop = { .opcode = IORING_OP_NOP, .user_data = 0 };
+    submit(&r, &nop, 1);
+    enter(&r, 0, 1, IORING_ENTER_SQ_WAKEUP | IORING_ENTER_GETEVENTS);
+    expect(&r, 0, 0);
+    unsigned before = r.enters;
+    struct io_uring_sqe poll = poll_readable(signal_pipe[0], 1001);
+    uint64_t start = monotonic_ns();
+    publish(&w.read_turn, 1);
+    while (!load(&w.reads_done)) {}
+    submit(&r, &poll, 1);
+    expect(&r, 1001, POLLIN);
+    uint64_t end = monotonic_ns();
+    unsigned active_enters = r.enters - before;
+    CHECK(!active_enters && load(CQ(&r, head)) == load(CQ(&r, tail)));
+    CHECK(pthread_join(reader, NULL) == 0 && pthread_join(waker, NULL) == 0);
+
+    before = r.enters;
+    unsigned idle_cqes = 0;
+    do {
+        wait_asleep(&r);
+        nop.user_data = 3001 + idle_cqes;
+        submit(&r, &nop, 1);
+        /* submit fences the tail publication before we inspect NEED_WAKEUP.
+         * If the poller's final recheck found our SQE, try the next idle edge. */
+        kick_if_asleep(&r);
+        expect(&r, nop.user_data, 0);
+        idle_cqes++;
+    } while (r.enters == before && idle_cqes < 4);
+    unsigned idle_enters = r.enters - before;
+    CHECK(idle_enters == 1 && load(CQ(&r, head)) == load(CQ(&r, tail)));
+    /* Even if the poller raced the wake, this SQE is published after it returned. */
+    before = r.enters;
+    nop.user_data = 4001;
+    submit(&r, &nop, 1);
+    kick_if_asleep(&r);
+    expect(&r, nop.user_data, 0);
+    unsigned witness_enters = r.enters - before;
+    CHECK(load(CQ(&r, head)) == load(CQ(&r, tail)));
+    destroy(&r);
+    CHECK(read(sentinel[0], bytes, 1) == 0 && close(sentinel[0]) == 0);
+    CHECK(close(fd) == 0 && close(signal_pipe[0]) == 0 && close(signal_pipe[1]) == 0);
+
+    printf("DEDICATED_RING active_start_ns=%llu active_end_ns=%llu\n",
+           (unsigned long long)start, (unsigned long long)end);
+    printf("DEDICATED_RING active unique=3 enters=%u producer0_cpu=%d producer1_cpu=%d wake_cpu=%d\n",
+           active_enters, submit_cpu, w.reader_cpu, w.wake_cpu);
+    printf("DEDICATED_RING idle post_publish_need_wakeup=1 enters=%u unique=%u witness=4001 witness_enters=%u\n",
+           idle_enters, idle_cqes, witness_enters);
+    puts("DEDICATED_RING close writer_eof=1 PASS");
+}
+
 static int worker_result(struct ring *r, uint64_t id)
 {
     uint64_t deadline = monotonic_ns() + 8000000000ULL;
@@ -880,6 +1004,10 @@ int main(int argc, char **argv)
 {
     alarm(40);
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && strcmp(argv[1], "--dedicated-ring") == 0) {
+        dedicated_ring();
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "--reserved-workers") == 0) {
         reserved_workers();
         return 0;

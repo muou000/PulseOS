@@ -48,6 +48,16 @@ const NOT_IN_USER_MODE: u64 = u64::MAX;
 pub struct ThreadHandle(Arc<Thread>);
 def_task_ext!(ThreadHandle);
 
+#[cfg(feature = "guest-checks")]
+static USER_DISPATCHES: [AtomicU64; axconfig::plat::MAX_CPU_NUM] =
+    [const { AtomicU64::new(0) }; axconfig::plat::MAX_CPU_NUM];
+
+/// Cumulative scheduler switches into user threads on this logical CPU.
+#[cfg(feature = "guest-checks")]
+pub(crate) fn user_dispatches(cpu: usize) -> u64 {
+    USER_DISPATCHES[cpu].load(Ordering::Relaxed)
+}
+
 /// Restores a thread's signal mask when a blocking syscall completes.
 ///
 /// `pselect6`, `ppoll`, and `epoll_pwait*` replace the mask only for the
@@ -468,6 +478,8 @@ impl Thread {
 
 impl TaskExtSwitch for ThreadHandle {
     fn on_enter(&self) {
+        #[cfg(feature = "guest-checks")]
+        USER_DISPATCHES[axhal::percpu::this_cpu_id()].fetch_add(1, Ordering::Relaxed);
         self.0.on_enter_cpu();
     }
 
