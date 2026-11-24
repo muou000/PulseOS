@@ -425,6 +425,7 @@ pub fn run_lock_stress_checks() -> Result<(), &'static str> {
     test_rwlock_concurrent_readers_and_writers()?;
     test_rwlock_writer_admission_and_wakeups()?;
 
-    log::info!("[AXSYNC_GUEST] All sync lock stress & concurrency checks PASSED!");
+    // Keep the serial success marker readable by existing guest runners.
+    log::info!("[AXSYNC_GUEST] All axsync lock stress & concurrency checks PASSED!");
     Ok(())
 }

@@ -12,7 +12,7 @@ import time
 
 
 REPO = Path(__file__).resolve().parents[2]
-PASS = b"[AXSYNC_GUEST] All sync lock stress & concurrency checks PASSED!"
+PASS = b"[AXSYNC_GUEST] All axsync lock stress & concurrency checks PASSED!"
 
 
 def main():
