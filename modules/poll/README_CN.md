@@ -35,7 +35,7 @@ poll.workspace = true
 cd modules/poll
 
 # 代码格式化
-cargo fmt --all
+cargo fmt -p poll
 
 # 运行 clippy
 cargo clippy --all-targets --all-features

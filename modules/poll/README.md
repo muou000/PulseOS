@@ -35,7 +35,7 @@ poll.workspace = true
 cd modules/poll
 
 # Format code
-cargo fmt --all
+cargo fmt -p poll
 
 # Run clippy
 cargo clippy --all-targets --all-features
