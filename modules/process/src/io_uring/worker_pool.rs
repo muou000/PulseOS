@@ -10,7 +10,7 @@ use core::{
     time::Duration,
 };
 
-use axfs::FilePositionTicket;
+use fs::FilePositionTicket;
 use task::{AxCpuMask, WaitQueue, spawn_raw};
 use kspin::SpinNoIrq;
 

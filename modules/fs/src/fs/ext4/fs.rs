@@ -1,0 +1,297 @@
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::{
+    cell::OnceCell,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+
+use async_trait::async_trait;
+use axdriver::prelude::AsyncBlockDriverOps;
+use vfs::{
+    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
+    path::MAX_NAME_LEN,
+};
+use sync::Mutex;
+use ext4plus::{Ext4, prelude::Ext4Error};
+use lru::LruCache;
+
+use super::{Ext4Disk, Ext4DiskWrapper, Inode, MetadataCacheState, cleanup_dir_cache_registry};
+
+const ROOT_INODE: u32 = 2;
+pub(super) const INODE_STATE_SHARDS: usize = 32;
+
+pub(super) fn inode_state_shard(ino: u32) -> usize {
+    ino as usize % INODE_STATE_SHARDS
+}
+
+pub struct Ext4Filesystem {
+    pub(crate) inner: Ext4,
+    disk_flusher: Arc<dyn crate::disk::DiskFlushable>,
+    root_dir: OnceCell<WeakDirEntry>,
+    pub(super) active_inodes: [Mutex<BTreeMap<u32, Vec<Weak<Inode>>>>; INODE_STATE_SHARDS],
+    pub(super) metadata_caches: [Mutex<LruCache<u32, Arc<MetadataCacheState>>>; INODE_STATE_SHARDS],
+    pub(crate) block_size: usize,
+    pending_deletions: Mutex<Vec<u32>>,
+    deletion_generation: AtomicU64,
+    deletion_worker_running: AtomicBool,
+    deletion_processing: async_lock::Mutex<()>,
+}
+
+impl Ext4Filesystem {
+    pub async fn new<D: AsyncBlockDriverOps + Clone + 'static>(dev: D) -> VfsResult<Filesystem> {
+        log::info!("Ext4Filesystem::new: opening block device");
+        let disk = Ext4Disk::new(dev);
+
+        const EXT4_SUPERBLOCK_OFFSET: usize = 1024;
+        const LOG_BLOCK_SIZE_OFFSET: usize = 24;
+
+        let mut log_block_size_buf = [0u8; 4];
+        disk.read_offset(
+            EXT4_SUPERBLOCK_OFFSET + LOG_BLOCK_SIZE_OFFSET,
+            &mut log_block_size_buf,
+        )
+        .await
+        .map_err(|e| {
+            log::error!("Failed to read block size: {:?}", e);
+            vfs::VfsError::Io
+        })?;
+        let log_block_size = u32::from_le_bytes(log_block_size_buf);
+        if log_block_size > 6 {
+            log::error!("Invalid ext4 log_block_size: {}", log_block_size);
+            return Err(vfs::VfsError::InvalidInput);
+        }
+        let block_size = 1024usize << log_block_size;
+        disk.set_block_size(block_size).await;
+
+        let ext4 = match Ext4::load_with_writer(
+            Box::new(Ext4DiskWrapper(disk.clone())),
+            Some(Box::new(Ext4DiskWrapper(disk.clone()))),
+        )
+        .await
+        {
+            Ok(val) => val,
+            Err(e) => {
+                if matches!(e, ext4plus::prelude::Ext4Error::Readonly) {
+                    log::info!(
+                        "Ext4 filesystem has write-incompatible features, falling back to \
+                         read-only mount."
+                    );
+                    Ext4::load_with_writer(Box::new(Ext4DiskWrapper(disk.clone())), None)
+                        .await
+                        .map_err(|e| {
+                            log::error!("Failed to load ext4 filesystem in RO mode: {:?}", e);
+                            vfs::VfsError::Io
+                        })?
+                } else {
+                    log::error!("Failed to load ext4 filesystem: {:?}", e);
+                    return Err(vfs::VfsError::Io);
+                }
+            }
+        };
+
+        log::info!("Ext4Filesystem::new: block device opened successfully");
+        let disk_flusher: Arc<dyn crate::disk::DiskFlushable> = disk;
+        let fs = Arc::new(Self {
+            inner: ext4,
+            disk_flusher,
+            root_dir: OnceCell::new(),
+            active_inodes: core::array::from_fn(|_| Mutex::new(BTreeMap::new())),
+            metadata_caches: core::array::from_fn(|_| Mutex::new(LruCache::unbounded())),
+            block_size,
+            pending_deletions: Mutex::new(Vec::new()),
+            deletion_generation: AtomicU64::new(0),
+            deletion_worker_running: AtomicBool::new(false),
+            deletion_processing: async_lock::Mutex::new(()),
+        });
+        let root_dir = DirEntry::new_dir(
+            |this| DirNode::new(Inode::new(fs.clone(), ROOT_INODE, Some(this))),
+            Reference::root(),
+        );
+        let _ = fs.root_dir.set(root_dir.downgrade());
+        Ok(Filesystem::new(fs))
+    }
+
+    pub(super) async fn flush_storage(&self) -> VfsResult<()> {
+        self.disk_flusher
+            .flush_disk()
+            .await
+            .map_err(|_| vfs::VfsError::Io)
+    }
+
+    pub(super) async fn flush_inode(&self, ino: u32) -> VfsResult<()> {
+        // Owner-scoped writeback also includes unowned blocks, covering direct
+        // write_offset callers which do not run inside an inode write scope.
+        self.disk_flusher
+            .flush_owner(ino as u64)
+            .await
+            .map_err(|_| vfs::VfsError::Io)
+    }
+
+    pub(super) fn write_scope(&self, owners: &[u64]) -> crate::disk::DiskWriteScope<'_> {
+        crate::disk::DiskWriteScope::new(self.disk_flusher.as_ref(), owners)
+    }
+
+    pub(super) fn queue_deletion(self: &Arc<Self>, ino: u32) {
+        self.pending_deletions.lock().push(ino);
+        self.deletion_generation.fetch_add(1, Ordering::Release);
+        self.start_deletion_worker();
+    }
+
+    fn start_deletion_worker(self: &Arc<Self>) {
+        if self
+            .deletion_worker_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let fs = self.clone();
+        task::spawn_async(async move {
+            fs.run_deletion_worker().await;
+        });
+    }
+
+    async fn run_deletion_worker(self: Arc<Self>) {
+        loop {
+            let generation = self.deletion_generation.load(Ordering::Acquire);
+            self.process_pending_deletions().await;
+
+            // Publish idle before rechecking the enqueue generation. A new
+            // close either claims the worker flag itself or makes us loop.
+            self.deletion_worker_running.store(false, Ordering::Release);
+
+            if self.deletion_generation.load(Ordering::Acquire) == generation
+                || self
+                    .deletion_worker_running
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                break;
+            }
+        }
+    }
+
+    async fn process_pending_deletions(&self) {
+        let _processing = self.deletion_processing.lock().await;
+        let mut pending = self.pending_deletions.lock();
+        if pending.is_empty() {
+            return;
+        }
+        let mut inodes_to_check = core::mem::take(&mut *pending);
+        inodes_to_check.sort_unstable();
+        inodes_to_check.dedup();
+        drop(pending);
+
+        let mut failed = Vec::new();
+
+        for ino in inodes_to_check {
+            if let Some(idx) = core::num::NonZeroU32::new(ino) {
+                match ext4plus::inode::Inode::read(&self.inner, idx).await {
+                    Ok(inode) => {
+                        if inode.links_count() == 0 {
+                            let has_other_active = {
+                                let mut active = self.active_inodes[inode_state_shard(ino)].lock();
+                                let mut still_active = false;
+                                if let Some(list) = active.get_mut(&ino) {
+                                    list.retain(|w| w.strong_count() > 0);
+                                    if !list.is_empty() {
+                                        still_active = true;
+                                    }
+                                }
+                                if !still_active {
+                                    active.remove(&ino);
+                                }
+                                still_active
+                            };
+                            if !has_other_active {
+                                let mut write_scope = self.write_scope(&[ino as u64]);
+                                log::debug!("ext4: deferred deleting unlinked file (ino {})", ino);
+                                let delete_result = crate::discard_unlinked_file_cache_after(
+                                    self as *const Self as usize,
+                                    ino as u64,
+                                    write_scope.run(self.inner.delete_file(inode)),
+                                )
+                                .await;
+                                if let Err(e) = delete_result {
+                                    log::error!(
+                                        "ext4: failed to delete unlinked file (ino {}): {:?}",
+                                        ino,
+                                        e
+                                    );
+                                    if !matches!(e, Ext4Error::Corrupt(_) | Ext4Error::NotFound) {
+                                        failed.push(ino);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("ext4: failed to read inode (ino {}): {:?}", ino, e);
+                        if !matches!(e, Ext4Error::Corrupt(_) | Ext4Error::NotFound) {
+                            failed.push(ino);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !failed.is_empty() {
+            self.pending_deletions.lock().extend(failed);
+        }
+    }
+}
+
+unsafe impl Send for Ext4Filesystem {}
+
+unsafe impl Sync for Ext4Filesystem {}
+
+impl Drop for Ext4Filesystem {
+    fn drop(&mut self) {
+        // Use the same pointer-based id as ext4_fs_id so the registry cleanup
+        // targets exactly this filesystem's cached directory states.
+        cleanup_dir_cache_registry(self as *const Self as usize);
+        let _ = &self.inner;
+    }
+}
+
+#[async_trait]
+impl FilesystemOps for Ext4Filesystem {
+    fn name(&self) -> &str {
+        "ext4"
+    }
+
+    fn root_dir(&self) -> DirEntry {
+        self.root_dir
+            .get()
+            .and_then(WeakDirEntry::upgrade)
+            .expect("ext4 root directory should be alive while filesystem is mounted")
+    }
+
+    fn stat(&self) -> VfsResult<StatFs> {
+        let fs = &self.inner;
+        let sb = fs.superblock();
+        let total_inodes = sb.num_block_groups() as u64 * sb.inodes_per_block_group().get() as u64;
+        Ok(StatFs {
+            fs_type: 0xef53,
+            block_size: self.block_size as u32,
+            blocks: sb.blocks_count(),
+            blocks_free: sb.free_blocks_count(),
+            blocks_available: sb.free_blocks_count(),
+            file_count: total_inodes,
+            free_file_count: sb.free_inodes_count() as u64,
+            name_length: MAX_NAME_LEN as u32,
+            fragment_size: 0,
+            mount_flags: 0,
+        })
+    }
+
+    async fn flush(&self) -> VfsResult<()> {
+        self.process_pending_deletions().await;
+        self.flush_storage().await
+    }
+}

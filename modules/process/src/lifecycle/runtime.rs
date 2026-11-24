@@ -82,7 +82,7 @@ impl Process {
         &self,
         vaddr: VirtAddr,
         flags: hal::trap::PageFaultFlags,
-    ) -> AxResult<axmm::PageFaultResolution> {
+    ) -> AxResult<mm::PageFaultResolution> {
         self.aspace_handle().resolve_page_fault_with_io(vaddr, flags)
     }
 
@@ -181,7 +181,7 @@ impl Process {
         self.memlock_unlock_all();
 
         // Release fs_context, credentials, uts_ns, args, and exec_path early during exit phase.
-        if let Some(root_context) = axfs::ROOT_FS_CONTEXT.get() {
+        if let Some(root_context) = fs::ROOT_FS_CONTEXT.get() {
             *self.fs_context.write() = Arc::new(Mutex::new(root_context.clone()));
         }
 

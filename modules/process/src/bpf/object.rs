@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::any::Any;
 
 use axerrno::{LinuxError, LinuxResult};
-use axio::PollState;
+use io::PollState;
 use linux_raw_sys::general::stat;
 
 use super::BpfMap;
@@ -87,13 +87,13 @@ impl FdObject for BpfMapObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut alloc::vec::Vec<PollRegistration>,
     ) -> LinuxResult {
         if let Some(rb) = &self.ringbuf {
             #[cfg(target_os = "none")]
             {
-                if events.contains(axpoll::IoEvents::IN) {
+                if events.contains(poll::IoEvents::IN) {
                     let owner = self.clone();
                     let registration = rb.read_wait_queue().register_owned_waker(cx.waker());
                     registrations.push(PollRegistration::new(move || {
@@ -138,9 +138,9 @@ impl FdObject for BpfMapObject {
         }
     }
 
-    fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
+    fn mmap_file_flags(&self) -> Option<fs::FileFlags> {
         if self.ringbuf.is_some() {
-            Some(axfs::FileFlags::READ | axfs::FileFlags::WRITE)
+            Some(fs::FileFlags::READ | fs::FileFlags::WRITE)
         } else {
             None
         }
@@ -152,7 +152,7 @@ impl FdObject for BpfMapObject {
         flags: hal::paging::MappingFlags,
         offset: usize,
         is_shared: bool,
-    ) -> Option<LinuxResult<axmm::PreparedMapping>> {
+    ) -> Option<LinuxResult<mm::PreparedMapping>> {
         let rb = self.ringbuf.as_ref()?;
 
         if !is_shared || offset != 0 {
@@ -167,7 +167,7 @@ impl FdObject for BpfMapObject {
             let Some(shared_frame) = rb.shared_frame() else {
                 return Some(Err(LinuxError::ENOMEM));
             };
-            Some(axmm::PreparedMapping::shared_frame(size, flags, shared_frame).map_err(LinuxError::from))
+            Some(mm::PreparedMapping::shared_frame(size, flags, shared_frame).map_err(LinuxError::from))
         }
 
         #[cfg(not(target_os = "none"))]
@@ -229,7 +229,7 @@ impl FdObject for BpfProgramObject {
         Err(LinuxError::EOPNOTSUPP)
     }
 
-    fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
+    fn mmap_file_flags(&self) -> Option<fs::FileFlags> {
         None
     }
 }
@@ -352,12 +352,12 @@ impl FdObject for PerfEventObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut alloc::vec::Vec<PollRegistration>,
     ) -> LinuxResult {
         #[cfg(target_os = "none")]
         {
-            if events.contains(axpoll::IoEvents::IN) {
+            if events.contains(poll::IoEvents::IN) {
                 let owner = self.clone();
                 let registration = owner.event.read_wait_queue().register_owned_waker(cx.waker());
                 registrations.push(PollRegistration::new(move || {
@@ -393,8 +393,8 @@ impl FdObject for PerfEventObject {
         }
     }
 
-    fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
-        Some(axfs::FileFlags::READ | axfs::FileFlags::WRITE)
+    fn mmap_file_flags(&self) -> Option<fs::FileFlags> {
+        Some(fs::FileFlags::READ | fs::FileFlags::WRITE)
     }
 
     fn mmap_prepared(
@@ -403,7 +403,7 @@ impl FdObject for PerfEventObject {
         flags: hal::paging::MappingFlags,
         offset: usize,
         is_shared: bool,
-    ) -> Option<LinuxResult<axmm::PreparedMapping>> {
+    ) -> Option<LinuxResult<mm::PreparedMapping>> {
         if !is_shared || offset != 0 {
             return Some(Err(LinuxError::EINVAL));
         }
@@ -435,7 +435,7 @@ impl FdObject for PerfEventObject {
             let Some(shared_frame) = buf.shared_frame() else {
                 return Some(Err(LinuxError::ENOMEM));
             };
-            Some(axmm::PreparedMapping::shared_frame(size, flags, shared_frame).map_err(LinuxError::from))
+            Some(mm::PreparedMapping::shared_frame(size, flags, shared_frame).map_err(LinuxError::from))
         }
 
         #[cfg(not(target_os = "none"))]
@@ -495,7 +495,7 @@ impl FdObject for BpfLinkObject {
         Err(LinuxError::EOPNOTSUPP)
     }
 
-    fn mmap_file_flags(&self) -> Option<axfs::FileFlags> {
+    fn mmap_file_flags(&self) -> Option<fs::FileFlags> {
         None
     }
 }

@@ -11,10 +11,10 @@ use core::{
 };
 
 use axerrno::{LinuxError, LinuxResult};
-use axfs::{File, FileFlags as AxFileFlags, OpenResult};
-use axfs_ng_vfs::{Location, Metadata, NodeType};
+use fs::{File, FileFlags as AxFileFlags, OpenResult};
+use vfs::{Location, Metadata, NodeType};
 use hal::paging::MappingFlags;
-use axio::{PollState, Seek, SeekFrom, Write};
+use io::{PollState, Seek, SeekFrom, Write};
 use kspin::{SpinNoIrq, SpinNoPreempt};
 use linux_raw_sys::{
     general::*,
@@ -141,7 +141,7 @@ pub trait FdObject: Send + Sync {
     fn register_poll(
         self: Arc<Self>,
         _cx: &mut core::task::Context<'_>,
-        _events: axpoll::IoEvents,
+        _events: poll::IoEvents,
         _registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         Err(LinuxError::EOPNOTSUPP)
@@ -153,7 +153,7 @@ pub trait FdObject: Send + Sync {
         self: Arc<Self>,
         _thread: &Arc<crate::Thread>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         self.register_poll(cx, events, registrations)
@@ -174,7 +174,7 @@ pub trait FdObject: Send + Sync {
         _process: &Arc<crate::Process>,
         thread: Option<&Arc<crate::Thread>>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         if let Some(thread) = thread {
@@ -194,14 +194,14 @@ pub trait FdObject: Send + Sync {
         false
     }
 
-    /// Evaluates full [`pulse_io_uring_core::poll::PollReadiness`] with explicit context.
+    /// Evaluates full [`io_uring_core::poll::PollReadiness`] with explicit context.
     fn poll_readiness_with_context(
         &self,
         process: &crate::Process,
         thread: Option<&crate::Thread>,
-    ) -> LinuxResult<pulse_io_uring_core::poll::PollReadiness> {
+    ) -> LinuxResult<io_uring_core::poll::PollReadiness> {
         let state = self.poll_with_context(process, thread)?;
-        Ok(pulse_io_uring_core::poll::PollReadiness {
+        Ok(io_uring_core::poll::PollReadiness {
             readable: state.readable,
             writable: state.writable,
             rdhup: self.is_rdhup(),
@@ -239,7 +239,7 @@ pub trait FdObject: Send + Sync {
         None
     }
 
-    fn mmap_write_access(&self) -> Option<axfs::WriteAccessGuard> {
+    fn mmap_write_access(&self) -> Option<fs::WriteAccessGuard> {
         None
     }
 
@@ -249,7 +249,7 @@ pub trait FdObject: Send + Sync {
         _flags: MappingFlags,
         _offset: usize,
         _is_shared: bool,
-    ) -> Option<LinuxResult<axmm::PreparedMapping>> {
+    ) -> Option<LinuxResult<mm::PreparedMapping>> {
         None
     }
 
@@ -289,7 +289,7 @@ pub trait FdObject: Send + Sync {
         false
     }
 
-    fn poll_set(&self) -> Option<&axpoll::PollSet> {
+    fn poll_set(&self) -> Option<&poll::PollSet> {
         None
     }
 
@@ -371,7 +371,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
 
 pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
     let mut st = metadata_to_stat(&task::future::block_on(location.metadata())?);
-    if let Some(size) = axfs::cached_file_size_if_present(location) {
+    if let Some(size) = fs::cached_file_size_if_present(location) {
         st.st_size = size as _;
     }
     Ok(st)

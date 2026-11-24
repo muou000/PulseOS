@@ -10,22 +10,22 @@ use core::{future::poll_fn, task::Poll, time::Duration};
 
 use axerrno::{LinuxError, LinuxResult};
 use hal::time::{monotonic_time, wall_time};
-use axio::{IoBuf, IoBufMut, Write};
-use axpoll::IoEvents;
+use io::{IoBuf, IoBufMut, Write};
+use poll::IoEvents;
 use task::future::sleep_until;
 use linux_raw_sys::{
     general::{POLLERR, POLLNVAL, RLIMIT_FSIZE, iovec},
     io_uring::{__kernel_timespec, io_uring_op},
 };
-use pulse_io_uring_core::orchestrator::{PreparedRequest, RequestId, RequestKind, TimeoutClock};
-use pulse_io_uring_core::poll::{
+use io_uring_core::orchestrator::{PreparedRequest, RequestId, RequestKind, TimeoutClock};
+use io_uring_core::poll::{
     OneShotPollStep, PollReadiness, compute_poll_revents, drive_one_shot_poll_step,
     poll_mask_to_io_events,
 };
-use pulse_io_uring_core::resources::{
+use io_uring_core::resources::{
     MAX_FIXED_FILES, validate_direct_io_buffers, validate_direct_io_offset,
 };
-use pulse_io_uring_core::whitelist::{
+use io_uring_core::whitelist::{
     RwOffset, resolve_rw_offset, validate_async_cancel_sqe, validate_files_update_sqe,
     validate_fsync_sqe, validate_link_timeout_sqe, validate_nop_sqe, validate_poll_add_sqe,
     validate_poll_remove_sqe, validate_rw_fixed_sqe, validate_rw_sqe, validate_sqe_v1,
@@ -763,8 +763,8 @@ impl<R: IoBuf> IoBuf for LimitedRead<'_, R> {
     }
 }
 
-impl<R: axio::Read> axio::Read for LimitedRead<'_, R> {
-    fn read(&mut self, dst: &mut [u8]) -> axio::Result<usize> {
+impl<R: io::Read> io::Read for LimitedRead<'_, R> {
+    fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
         let limit = dst.len().min(self.remaining);
         if limit == 0 {
             return Ok(0);
@@ -1234,7 +1234,7 @@ pub(crate) fn try_inline_fast_path_read(
 }
 
 async fn transfer_file_io_buf(
-    io: &mut axfs::FileIo<'_>,
+    io: &mut fs::FileIo<'_>,
     buffer: &mut PreparedRwBuffer,
     is_write: bool,
     fsize_limit: u64,
@@ -1287,7 +1287,7 @@ async fn transfer_regular_file_buffer(
     state: &Arc<IoUringState>,
     ctx: &AsyncExecContext,
     req_id: RequestId,
-    io: &mut axfs::FileIo<'_>,
+    io: &mut fs::FileIo<'_>,
     buffer: PreparedRwBuffer,
     is_write: bool,
     fsize_limit: u64,
@@ -1365,7 +1365,7 @@ async fn run_regular_file_io_transaction(
     req_id: RequestId,
     file_obj: &FileObject,
     buffer: PreparedRwBuffer,
-    pos_ticket: Option<axfs::FilePositionTicket>,
+    pos_ticket: Option<fs::FilePositionTicket>,
     params: RwExecParams,
 ) -> LinuxResult<usize> {
     let force_append = (params.rw_flags & RWF_APPEND) != 0;

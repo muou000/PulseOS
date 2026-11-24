@@ -2,7 +2,7 @@ use core::ops::{Deref, DerefMut};
 
 use axerrno::{AxError, AxResult};
 use hal::trap::PageFaultFlags;
-use axmm::{AddrSpace, MappingPlacement, MappingWait, PreparedMapping};
+use mm::{AddrSpace, MappingPlacement, MappingWait, PreparedMapping};
 use kernel_guard::NoPreempt;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -29,27 +29,27 @@ impl AddressSpaceLock {
         self.resolve_page_fault_with_io(address, flags).map(|resolution| resolution.handled)
     }
 
-    pub fn resolve_page_fault_with_io(&self, address: VirtAddr, flags: PageFaultFlags) -> AxResult<axmm::PageFaultResolution> {
+    pub fn resolve_page_fault_with_io(&self, address: VirtAddr, flags: PageFaultFlags) -> AxResult<mm::PageFaultResolution> {
         let initial = self.read().handle_page_fault(address, flags);
-        axmm::drive_page_fault_with_io(initial, |work| match work {
-            axmm::PageFaultWork::Retry => self.write().handle_page_fault_write(address, flags),
-            axmm::PageFaultWork::Completion(wait) => {
+        mm::drive_page_fault_with_io(initial, |work| match work {
+            mm::PageFaultWork::Retry => self.write().handle_page_fault_write(address, flags),
+            mm::PageFaultWork::Completion(wait) => {
                 Self::wait_for_mapping(wait.clone());
                 if wait.result().is_err() {
-                    return axmm::PageFaultResult::Handled(false);
+                    return mm::PageFaultResult::Handled(false);
                 }
                 self.read().handle_page_fault(address, flags)
             }
-            axmm::PageFaultWork::File(prepared) => self
+            mm::PageFaultWork::File(prepared) => self
                 .read()
                 .handle_prepared_file_page(address, flags, prepared),
-            axmm::PageFaultWork::Anon(prepared) => self
+            mm::PageFaultWork::Anon(prepared) => self
                 .read()
                 .handle_prepared_anon_page(address, flags, prepared),
-            axmm::PageFaultWork::Cow(prepared) => self
+            mm::PageFaultWork::Cow(prepared) => self
                 .read()
                 .handle_prepared_cow_page(address, flags, prepared),
-            axmm::PageFaultWork::WriteLock => self.write().handle_page_fault_write(address, flags),
+            mm::PageFaultWork::WriteLock => self.write().handle_page_fault_write(address, flags),
         })
     }
 
@@ -133,7 +133,7 @@ impl AddressSpaceLock {
         mut prepared: PreparedMapping,
         placement: MappingPlacement,
     ) -> AxResult<VirtAddr> {
-        let wait = axmm::MappingWait::new();
+        let wait = mm::MappingWait::new();
         let reservation = loop {
             let mut aspace = self.write();
             if let Some(pending) = aspace.any_pending_mapping() {
@@ -159,7 +159,7 @@ impl AddressSpaceLock {
     }
 
     pub fn unmap(&self, start: VirtAddr, size: usize) -> AxResult<()> {
-        let preparation = axmm::AddrSpaceUnmapPreparation::try_prepare(size)?;
+        let preparation = mm::AddrSpaceUnmapPreparation::try_prepare(size)?;
         let wait = MappingWait::new();
         let reservation = loop {
             let mut aspace = self.write();
@@ -179,7 +179,7 @@ impl AddressSpaceLock {
 
     pub fn sync_mappings(&self, start: VirtAddr, size: usize, sync: bool) -> AxResult<()> {
         loop {
-            let mut batch = axmm::FileWritebacks::try_prepare(size, sync)?;
+            let mut batch = mm::FileWritebacks::try_prepare(size, sync)?;
             let aspace = self.read();
             if let Some(pending) = aspace.any_pending_mapping() {
                 drop(aspace);

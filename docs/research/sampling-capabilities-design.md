@@ -247,7 +247,7 @@ cargo test -p pulse_syscalls --target x86_64-unknown-linux-gnu \
 - [P2] [LoongArch CPUCFG accessor](../../modules/cpu/src/loongarch64/asm.rs)。
 - [P3] [LoongArch QEMU IRQ](../../platforms/axplat-loongarch64-qemu-virt/src/irq.rs)、[LS2K1000 IRQ](../../platforms/axplat-loongarch64-ls2k1000/src/irq.rs)。
 - [P4] [runtime 初始化](../../modules/runtime/src/lib.rs)、[VisionFive 2 init](../../platforms/axplat-riscv64-visionfive2/src/init.rs)、[LS2K1000 init](../../platforms/axplat-loongarch64-ls2k1000/src/init.rs)。
-- [P5] [procfs 动态文件](../../modules/axfs/src/fs/procfs.rs)。
+- [P5] [procfs 动态文件](../../modules/fs/src/fs/procfs.rs)。
 - [P6] [perf-event ABI validation](../../pulse_syscalls/src/impls/bpf/perf_event.rs) 与 [#86 软件事件约定](https://github.com/muou000/PulseOS/issues/86#issuecomment-6138057642)。
 - [P7] [Program type](../../modules/bpf/src/program.rs)、[verifier](../../modules/bpf/src/verifier.rs)、[PROG_LOAD](../../pulse_syscalls/src/impls/bpf/prog.rs)。
 - [P8] [BPF command ABI](../../pulse_syscalls/src/impls/bpf/abi.rs)、[syscall dispatch](../../pulse_syscalls/src/impls/bpf/sys.rs)。

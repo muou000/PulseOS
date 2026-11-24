@@ -155,7 +155,7 @@ pub fn sys_fsync(fd: usize) -> isize {
 pub(crate) fn flush_filesystems_for_shutdown() -> Result<(), LinuxError> {
     match task::future::block_on(task::future::timeout(
         Some(SYNC_TIMEOUT),
-        axfs::flush_all_filesystems_async(),
+        fs::flush_all_filesystems_async(),
     )) {
         Ok(Ok(())) => Ok(()),
         Err(_) => {
@@ -186,7 +186,7 @@ pub fn sys_sync() -> isize {
     // second line of defense for signals or timer delivery that arrive late.
     match task::future::block_on(task::future::interruptible(task::future::timeout(
         Some(SYNC_TIMEOUT),
-        axfs::flush_all_filesystems_async(),
+        fs::flush_all_filesystems_async(),
     ))) {
         Ok(Ok(Ok(()))) => 0,
         Err(_) => {

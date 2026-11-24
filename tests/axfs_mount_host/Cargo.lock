@@ -76,39 +76,10 @@ name = "axfs-mount-host"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "axfs-ng-vfs",
  "kspin",
  "log",
  "spin",
-]
-
-[[package]]
-name = "axfs-ng-vfs"
-version = "0.1.1"
-dependencies = [
- "async-lock",
- "async-trait",
- "axerrno",
- "axpoll",
- "bitflags",
- "cfg-if",
- "hashbrown",
- "inherit-methods-macro",
- "kernel_guard",
- "kspin",
- "log",
- "smallvec",
- "spin",
-]
-
-[[package]]
-name = "axpoll"
-version = "0.3.9"
-dependencies = [
- "ax-kspin",
- "bitflags",
- "linux-raw-sys",
- "spin",
+ "vfs",
 ]
 
 [[package]]
@@ -305,6 +276,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "poll"
+version = "0.3.9"
+dependencies = [
+ "ax-kspin",
+ "bitflags",
+ "linux-raw-sys",
+ "spin",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -397,3 +378,22 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "vfs"
+version = "0.1.1"
+dependencies = [
+ "async-lock",
+ "async-trait",
+ "axerrno",
+ "bitflags",
+ "cfg-if",
+ "hashbrown",
+ "inherit-methods-macro",
+ "kernel_guard",
+ "kspin",
+ "log",
+ "poll",
+ "smallvec",
+ "spin",
+]

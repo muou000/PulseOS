@@ -309,7 +309,7 @@ pub struct PerfBuffer {
     consumer_out_of_bounds: AtomicU64,
     lock: spin::Mutex<()>,
     #[cfg(target_os = "none")]
-    shared_frame: Option<Arc<axmm::SharedFrame>>,
+    shared_frame: Option<Arc<mm::SharedFrame>>,
     #[cfg(not(target_os = "none"))]
     _host_storage: Option<alloc::vec::Vec<u8>>,
 }
@@ -340,7 +340,7 @@ impl PerfBuffer {
         unsafe {
             core::ptr::write_bytes(vaddr as *mut u8, 0, page_count * 4096);
         }
-        let shared_frame = Arc::new(axmm::SharedFrame { vaddr, page_count });
+        let shared_frame = Arc::new(mm::SharedFrame { vaddr, page_count });
         let buf = Arc::new(Self {
             data_size: nr_data_pages * 4096,
             raw_base: vaddr,
@@ -437,7 +437,7 @@ impl PerfBuffer {
     }
 
     #[cfg(target_os = "none")]
-    pub fn shared_frame(&self) -> Option<Arc<axmm::SharedFrame>> {
+    pub fn shared_frame(&self) -> Option<Arc<mm::SharedFrame>> {
         self.shared_frame.clone()
     }
 

@@ -1,7 +1,7 @@
 use core::time::Duration;
 
 use axerrno::{AxError, LinuxError};
-use axio::SeekFrom;
+use io::SeekFrom;
 use linux_raw_sys::general::{
     POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, S_IFDIR, S_IFMT, S_IFREG, SIGPIPE, pollfd,
 };

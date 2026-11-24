@@ -10,7 +10,7 @@
 use alloc::{format, string::{String, ToString}, sync::Arc, vec::Vec};
 use core::{fmt::Write, sync::atomic::{AtomicU64, Ordering}};
 use axerrno::AxResult;
-use axmm::{Backend, FileMappingSource};
+use mm::{Backend, FileMappingSource};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
 use sha2::{Digest, Sha256};
 
@@ -95,14 +95,14 @@ pub fn render() -> String {
 
 /// A mapping source whose provenance survives VMA splits, COW and fork.
 /// Delegation preserves page-cache identity and all existing memory ownership.
-struct ObservedSource { inner: axfs::CachedFile, object: u64 }
+struct ObservedSource { inner: fs::CachedFile, object: u64 }
 
 impl FileMappingSource for ObservedSource {
     fn mapping_generation(&self) -> u64 { self.inner.mapping_generation() }
-    fn get_shared_page_paddrs(&self, n: u32, count: usize, write: bool) -> AxResult<axmm::FileMappingPageBatch> {
+    fn get_shared_page_paddrs(&self, n: u32, count: usize, write: bool) -> AxResult<mm::FileMappingPageBatch> {
         self.inner.get_shared_page_paddrs(n, count, write)
     }
-    fn get_shared_page_paddrs_with_io(&self, n: u32, count: usize, write: bool) -> AxResult<(axmm::FileMappingPageBatch, axmm::FilePageIo)> {
+    fn get_shared_page_paddrs_with_io(&self, n: u32, count: usize, write: bool) -> AxResult<(mm::FileMappingPageBatch, mm::FilePageIo)> {
         self.inner.get_shared_page_paddrs_with_io(n, count, write)
     }
     fn prefetch_pages(&self, n: u32, count: usize) { self.inner.prefetch_pages(n, count); }
@@ -114,7 +114,7 @@ impl FileMappingSource for ObservedSource {
     fn as_any(&self) -> &dyn core::any::Any { self }
 }
 
-fn hash_file(file: &axfs::CachedFile) -> Option<String> {
+fn hash_file(file: &fs::CachedFile) -> Option<String> {
     let size = file.size();
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 4096];
@@ -132,7 +132,7 @@ fn hash_file(file: &axfs::CachedFile) -> Option<String> {
 /// Register an actual file before publishing its mapping. `exec_protected`
 /// means the ELF loader already owns its normal deny-write execution lease.
 /// Ordinary mmap files may change and deliberately carry an unknown SHA.
-pub fn file_source(file: axfs::CachedFile, exec_protected: bool) -> Arc<dyn FileMappingSource> {
+pub fn file_source(file: fs::CachedFile, exec_protected: bool) -> Arc<dyn FileMappingSource> {
     if !exec_protected {
         // An ELF in this address space remains protected by the process's
         // execution leases, including fork inheritance. Reuse its identity.
@@ -172,9 +172,9 @@ pub fn file_source(file: axfs::CachedFile, exec_protected: bool) -> Arc<dyn File
 }
 
 /// Keep existing /proc/maps path rendering functional for observed sources.
-pub fn cached_file(source: &dyn FileMappingSource) -> Option<&axfs::CachedFile> {
+pub fn cached_file(source: &dyn FileMappingSource) -> Option<&fs::CachedFile> {
     source.as_any().downcast_ref::<ObservedSource>().map(|s| &s.inner)
-        .or_else(|| source.as_any().downcast_ref::<axfs::CachedFile>())
+        .or_else(|| source.as_any().downcast_ref::<fs::CachedFile>())
 }
 
 fn file_mapping(backend: &Backend, start: VirtAddr) -> (u64, usize, bool) {
@@ -189,7 +189,7 @@ fn file_mapping(backend: &Backend, start: VirtAddr) -> (u64, usize, bool) {
     }
 }
 
-pub fn space_snapshot(aspace: &axmm::AddrSpace, begin_ns: u64) {
+pub fn space_snapshot(aspace: &mm::AddrSpace, begin_ns: u64) {
     use hal::paging::MappingFlags as F;
     let (space, revision) = aspace.observation_identity();
     let mut rows = String::new();
@@ -211,14 +211,14 @@ pub fn task(task_id: u64, pid: u64, tid: u64, space: usize, exec: u64,
     append("TASK", format!("task={task_id} pid={pid} tid={tid} space={space} exec={exec} kind={kind} parent={parent} class=user begin_ns={begin_ns} comm_hex={}", hex(name.as_bytes())));
 }
 
-pub fn register_space(aspace: &axmm::AddrSpace) {
+pub fn register_space(aspace: &mm::AddrSpace) {
     static KERNEL: spin::Once<()> = spin::Once::new();
     KERNEL.call_once(|| {
         let (start, end) = hal::mem::kernel_text_range();
         let build_id = hal::mem::kernel_build_id().map(hex).unwrap_or_else(|| "unknown".into());
         append("KERNEL", format!("start={start} len={} reference={start} symbol_hex={} build_id={build_id}", end - start, hex(b"_stext")));
     });
-    axmm::register_tlb_observer(tlb);
+    mm::register_tlb_observer(tlb);
     space_snapshot(aspace, hal::time::monotonic_time_nanos());
 }
 

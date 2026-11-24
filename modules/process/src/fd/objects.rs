@@ -9,12 +9,12 @@ pub struct FileObject {
 /// buffer. The allocation is returned on success, short I/O and every error;
 /// no cache mutex is held while preparing user memory or waiting for I/O.
 pub struct FileObjectIo<'a> {
-    inner: axfs::FileIo<'a>,
+    inner: fs::FileIo<'a>,
     thread: Option<Arc<crate::Thread>>,
 }
 
 impl<'a> FileObjectIo<'a> {
-    fn new(mut inner: axfs::FileIo<'a>) -> Self {
+    fn new(mut inner: fs::FileIo<'a>) -> Self {
         let thread = crate::current_thread().ok();
         if let Some(thread) = &thread {
             inner.replace_staging(thread.take_io_buffer());
@@ -24,7 +24,7 @@ impl<'a> FileObjectIo<'a> {
 }
 
 impl<'a> core::ops::Deref for FileObjectIo<'a> {
-    type Target = axfs::FileIo<'a>;
+    type Target = fs::FileIo<'a>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -76,7 +76,7 @@ impl FileObject {
             .inner
             .location()
             .flags()
-            .contains(axfs_ng_vfs::NodeFlags::STREAM)
+            .contains(vfs::NodeFlags::STREAM)
     }
 
     pub fn is_direct_regular_file(&self) -> bool {
@@ -91,24 +91,24 @@ impl FileObject {
         self.inner.flags().contains(AxFileFlags::APPEND)
     }
 
-    pub fn try_begin_read_io(&self, offset: Option<u64>) -> Option<LinuxResult<axfs::FileIo<'_>>> {
+    pub fn try_begin_read_io(&self, offset: Option<u64>) -> Option<LinuxResult<fs::FileIo<'_>>> {
         self.inner
             .try_begin_read_io(offset)
             .map(|r| r.map_err(LinuxError::from))
     }
 
-    pub fn reserve_position_ticket(&self) -> Option<axfs::FilePositionTicket> {
+    pub fn reserve_position_ticket(&self) -> Option<fs::FilePositionTicket> {
         self.inner.reserve_position_ticket()
     }
 
     pub(crate) fn publish_position_ticket<R>(
         &self,
-        publish: impl FnOnce(Option<axfs::FilePositionTicket>) -> R,
+        publish: impl FnOnce(Option<fs::FilePositionTicket>) -> R,
     ) -> R {
         self.inner.publish_position_ticket(publish)
     }
 
-    pub async fn begin_read_io_async(&self, offset: Option<u64>) -> LinuxResult<axfs::FileIo<'_>> {
+    pub async fn begin_read_io_async(&self, offset: Option<u64>) -> LinuxResult<fs::FileIo<'_>> {
         self.inner
             .begin_read_io(offset)
             .await
@@ -117,9 +117,9 @@ impl FileObject {
 
     pub async fn begin_read_io_with_ticket(
         &self,
-        ticket: Option<axfs::FilePositionTicket>,
+        ticket: Option<fs::FilePositionTicket>,
         offset: Option<u64>,
-    ) -> LinuxResult<axfs::FileIo<'_>> {
+    ) -> LinuxResult<fs::FileIo<'_>> {
         self.inner
             .begin_read_io_with_ticket(ticket, offset)
             .await
@@ -130,7 +130,7 @@ impl FileObject {
         &self,
         offset: Option<u64>,
         force_append: bool,
-    ) -> LinuxResult<axfs::FileIo<'_>> {
+    ) -> LinuxResult<fs::FileIo<'_>> {
         self.inner
             .begin_write_io_with_append(offset, force_append)
             .await
@@ -139,10 +139,10 @@ impl FileObject {
 
     pub async fn begin_write_io_with_ticket(
         &self,
-        ticket: Option<axfs::FilePositionTicket>,
+        ticket: Option<fs::FilePositionTicket>,
         offset: Option<u64>,
         force_append: bool,
-    ) -> LinuxResult<axfs::FileIo<'_>> {
+    ) -> LinuxResult<fs::FileIo<'_>> {
         self.inner
             .begin_write_io_with_ticket(ticket, offset, force_append)
             .await
@@ -175,11 +175,11 @@ impl FileObject {
         let _ = self.inner.flush_pending_timestamps().await;
     }
 
-    pub async fn read_async<W: axio::Write + axio::IoBufMut>(&self, dst: W) -> LinuxResult<usize> {
+    pub async fn read_async<W: io::Write + io::IoBufMut>(&self, dst: W) -> LinuxResult<usize> {
         self.inner.read(dst).await.map_err(LinuxError::from)
     }
 
-    pub async fn read_at_async<W: axio::Write + axio::IoBufMut>(
+    pub async fn read_at_async<W: io::Write + io::IoBufMut>(
         &self,
         dst: W,
         offset: u64,
@@ -190,11 +190,11 @@ impl FileObject {
             .map_err(LinuxError::from)
     }
 
-    pub async fn write_async<R: axio::Read + axio::IoBuf>(&self, src: R) -> LinuxResult<usize> {
+    pub async fn write_async<R: io::Read + io::IoBuf>(&self, src: R) -> LinuxResult<usize> {
         self.inner.write(src).await.map_err(LinuxError::from)
     }
 
-    pub async fn write_at_async<R: axio::Read + axio::IoBuf>(
+    pub async fn write_at_async<R: io::Read + io::IoBuf>(
         &self,
         src: R,
         offset: u64,
@@ -259,16 +259,16 @@ impl FdObject for NsFdObject {
     }
 
     fn stat(&self) -> LinuxResult<stat> {
-        let ns_ino = axfs::fs::procfs::PID_INODE_START
-            + (self.pid << axfs::fs::procfs::PID_INODE_SHIFT)
+        let ns_ino = fs::fs::procfs::PID_INODE_START
+            + (self.pid << fs::fs::procfs::PID_INODE_SHIFT)
             + match self.ns_type {
-                CLONE_NEWUTS => axfs::fs::procfs::SUB_INO_NS_UTS,
-                CLONE_NEWIPC => axfs::fs::procfs::SUB_INO_NS_IPC,
-                CLONE_NEWNET => axfs::fs::procfs::SUB_INO_NS_NET,
-                CLONE_NEWNS => axfs::fs::procfs::SUB_INO_NS_MNT,
-                CLONE_NEWPID => axfs::fs::procfs::SUB_INO_NS_PID,
-                CLONE_NEWUSER => axfs::fs::procfs::SUB_INO_NS_USER,
-                CLONE_NEWCGROUP => axfs::fs::procfs::SUB_INO_NS_CGROUP,
+                CLONE_NEWUTS => fs::fs::procfs::SUB_INO_NS_UTS,
+                CLONE_NEWIPC => fs::fs::procfs::SUB_INO_NS_IPC,
+                CLONE_NEWNET => fs::fs::procfs::SUB_INO_NS_NET,
+                CLONE_NEWNS => fs::fs::procfs::SUB_INO_NS_MNT,
+                CLONE_NEWPID => fs::fs::procfs::SUB_INO_NS_PID,
+                CLONE_NEWUSER => fs::fs::procfs::SUB_INO_NS_USER,
+                CLONE_NEWCGROUP => fs::fs::procfs::SUB_INO_NS_CGROUP,
                 _ => 0,
             };
 
@@ -397,7 +397,7 @@ impl FdObject for PidfdObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        _events: axpoll::IoEvents,
+        _events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         let mut pid = self.pid();
@@ -470,7 +470,7 @@ impl FdObject for FileObject {
         self.inner
             .location()
             .entry()
-            .downcast::<axfs::DevNode>()
+            .downcast::<fs::DevNode>()
             .map(|node| node.is_tty())
             .unwrap_or(false)
     }
@@ -501,7 +501,7 @@ impl FdObject for FileObject {
             .inner
             .location()
             .flags()
-            .contains(axfs_ng_vfs::NodeFlags::STREAM)
+            .contains(vfs::NodeFlags::STREAM)
         {
             return Err(LinuxError::ESPIPE);
         }
@@ -534,7 +534,7 @@ impl FdObject for FileObject {
         Some(self.inner.flags())
     }
 
-    fn mmap_write_access(&self) -> Option<axfs::WriteAccessGuard> {
+    fn mmap_write_access(&self) -> Option<fs::WriteAccessGuard> {
         self.inner.write_access_guard()
     }
 
@@ -583,7 +583,7 @@ impl FdObject for FileObject {
                 len
             );
         } else {
-            let cur_size = axfs::cached_file_size(self.inner.location()).unwrap_or(metadata.size);
+            let cur_size = fs::cached_file_size(self.inner.location()).unwrap_or(metadata.size);
             if end > cur_size {
                 kernel_log::warn!(
                     "sys_fallocate: physical space preallocation is not supported, falling back \

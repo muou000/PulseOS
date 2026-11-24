@@ -320,7 +320,7 @@ impl Future for EpollFuture {
         // epolls flatten their registrations into this same owned list.
         if let Err(e) = this.epoll.clone().register_poll(
             cx,
-            axpoll::IoEvents::IN,
+            poll::IoEvents::IN,
             &mut this.registrations,
         ) {
             kernel_log::warn!("epoll: register_poll failed: {:?}", e);

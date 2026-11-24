@@ -14,7 +14,7 @@ use pulse_core::io_uring::IoUringObject;
 use pulse_core::io_uring::context::AsyncExecContext;
 use pulse_core::mm::UserIoSegment;
 use pulse_core::task::{SignalMaskGuard, current_have_signals, current_process, current_thread};
-use pulse_io_uring_core::whitelist::{populate_probe, validate_register_op_v1};
+use io_uring_core::whitelist::{populate_probe, validate_register_op_v1};
 
 use super::fs::common::{get_fd_entry, insert_fd_entry};
 use super::utils::{

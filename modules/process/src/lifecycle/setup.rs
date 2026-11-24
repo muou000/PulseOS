@@ -3,7 +3,7 @@ use super::*;
 impl Process {
     pub fn new_uspace(pid: u64) -> AxResult<Arc<Self>> {
         let aspace = elf_loader::new_user_aspace()?;
-        let fs_context = axfs::ROOT_FS_CONTEXT
+        let fs_context = fs::ROOT_FS_CONTEXT
             .get()
             .expect("root fs context not initialized")
             .clone();

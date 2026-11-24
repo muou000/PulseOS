@@ -68,7 +68,7 @@ default = ["bus-pci"]
 [dependencies]
 log.workspace = true
 cfg-if.workspace = true
-axpoll.workspace = true
+poll.workspace = true
 kspin.workspace = true
 virtio-drivers.workspace = true
 axdriver_base.workspace = true

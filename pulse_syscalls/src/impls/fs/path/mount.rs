@@ -1,7 +1,7 @@
 use super::*;
 
 // `FsContext` owns root/cwd/credentials; `Location` shares mount topology through Arc.
-fn resolve_existing_mount_path(ctx: &axfs::FsContext, path: &str) -> Result<String, LinuxError> {
+fn resolve_existing_mount_path(ctx: &fs::FsContext, path: &str) -> Result<String, LinuxError> {
     let loc = task::future::block_on(ctx.resolve(Path::new(path)))
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
     loc.check_is_dir()
@@ -13,22 +13,22 @@ fn resolve_existing_mount_path(ctx: &axfs::FsContext, path: &str) -> Result<Stri
 }
 
 fn lookup_or_probe_fs(
-    ctx: &axfs::FsContext,
+    ctx: &fs::FsContext,
     source: &str,
     fstype: &str,
-) -> Result<axfs_ng_vfs::Filesystem, LinuxError> {
+) -> Result<vfs::Filesystem, LinuxError> {
     // Pseudo filesystems
     if fstype == "tmpfs" {
-        return Ok(axfs::new_tmpfs());
+        return Ok(fs::new_tmpfs());
     }
     if fstype == "proc" {
-        return Ok(axfs::new_procfs());
+        return Ok(fs::new_procfs());
     }
 
     // Preserve the boot aliases (device0, /dev/vda) and reuse the same
     // mounted filesystem, but only for an explicitly compatible format.
     let cached = |path: &str| {
-        let fs = axfs::lookup_mountable_filesystem(path)?;
+        let fs = fs::lookup_mountable_filesystem(path)?;
         match fstype {
             "" | "none" => Some(Ok(fs)),
             "ext2" | "ext3" if fs.name() == "ext4" => Some(Ok(fs)),
@@ -36,14 +36,14 @@ fn lookup_or_probe_fs(
             // A secondary disk can have been reformatted since its boot
             // probe. Verify its current FAT volume before dropping any alias.
             #[cfg(feature = "fat")]
-            "vfat" if !axfs::filesystem_is_mounted(&fs) => None,
+            "vfat" if !fs::filesystem_is_mounted(&fs) => None,
             _ => Some(Err(LinuxError::EINVAL)),
         }
     };
     if let Some(result) = cached(source) {
         return result;
     }
-    let alias = axfs::mount_device_alias(source);
+    let alias = fs::mount_device_alias(source);
     let source = alias.as_deref().unwrap_or(source);
     let loc = match task::future::block_on(ctx.resolve(Path::new(source))) {
         Ok(loc) => loc,
@@ -51,7 +51,7 @@ fn lookup_or_probe_fs(
             // Some rootfs images refer to /dev/vda1 for a whole-disk
             // filesystem. Use that alias only when the real node is absent.
             let whole_disk = source.trim_end_matches(|c: char| c.is_ascii_digit());
-            if e.canonicalize() == axfs_ng_vfs::VfsError::NotFound
+            if e.canonicalize() == vfs::VfsError::NotFound
                 && whole_disk != source
                 && let Some(result) = cached(whole_disk)
             {
@@ -66,12 +66,12 @@ fn lookup_or_probe_fs(
     if let Some(result) = cached(path.as_str()) {
         return result;
     }
-    if loc.entry().node_type() != axfs_ng_vfs::NodeType::BlockDevice {
+    if loc.entry().node_type() != vfs::NodeType::BlockDevice {
         return Err(LinuxError::ENOTBLK);
     }
     let entry = loc.entry();
     let node = entry
-        .downcast::<axfs::DevNode>()
+        .downcast::<fs::DevNode>()
         .map_err(|_| LinuxError::ENOTBLK)?;
     match fstype {
         #[cfg(feature = "ext4")]
@@ -79,26 +79,26 @@ fn lookup_or_probe_fs(
             let disk = node
                 .get_block_device()
                 .map_err(|e| LinuxError::from(e.canonicalize()))?;
-            task::future::block_on(axfs::ext4::Ext4Filesystem::new(disk))
+            task::future::block_on(fs::ext4::Ext4Filesystem::new(disk))
         }
         #[cfg(feature = "fat")]
         "vfat" => {
             let volume = task::future::block_on(node.mount_fat());
             if volume.is_ok()
-                && let Some(stale) = axfs::lookup_mountable_filesystem(path.as_str())
+                && let Some(stale) = fs::lookup_mountable_filesystem(path.as_str())
             {
-                axfs::forget_mountable_filesystem(&stale);
+                fs::forget_mountable_filesystem(&stale);
             }
             volume
         }
-        "none" | "" => axfs::probe_block_device(path.as_str(), &loc),
+        "none" | "" => fs::probe_block_device(path.as_str(), &loc),
         _ => return Err(LinuxError::ENODEV),
     }
     .map_err(|e| LinuxError::from(e.canonicalize()))
 }
 
 fn sys_mount_propagation(target_path: &str, flags: usize) -> isize {
-    let mp = match axfs::lookup_mounted_mountpoint(target_path) {
+    let mp = match fs::lookup_mounted_mountpoint(target_path) {
         Some(mp) => mp,
         None => {
             // Target path may not be a mountpoint itself; that's OK for
@@ -157,7 +157,7 @@ fn sys_mount_propagation(target_path: &str, flags: usize) -> isize {
 }
 
 /// Implement `mount --move source target` (MS_MOVE).
-fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) -> isize {
+fn sys_mount_move(ctx: &fs::FsContext, source_uptr: usize, target_path: &str) -> isize {
     let source_path = match read_user_optional_path(source_uptr) {
         Ok(Some(p)) => p,
         Ok(None) => return -LinuxError::EINVAL.code() as isize,
@@ -183,7 +183,7 @@ fn sys_mount_move(ctx: &axfs::FsContext, source_uptr: usize, target_path: &str) 
         Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
     };
 
-    match axfs::move_filesystem(&source_loc, &target_loc) {
+    match fs::move_filesystem(&source_loc, &target_loc) {
         Ok(_) => 0,
         Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
     }
@@ -260,7 +260,7 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
 
     if is_remount {
         // MS_REMOUNT: target must already be mounted.
-        let target_mp = if let Some(mp) = axfs::lookup_mounted_mountpoint(&target_path) {
+        let target_mp = if let Some(mp) = fs::lookup_mounted_mountpoint(&target_path) {
             mp
         } else {
             return -LinuxError::EINVAL.code() as isize;
@@ -278,7 +278,7 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
         };
         // A remount of a bind mount replaces its record. Preserve the bind
         // identity so unmount does not mistake it for a real filesystem mount.
-        let is_bind_mount = is_bind || axfs::mountpoint_is_bind(&target_mp);
+        let is_bind_mount = is_bind || fs::mountpoint_is_bind(&target_mp);
         let options = match (is_rdonly, is_bind_mount) {
             (true, true) => "ro,bind,relatime",
             (false, true) => "rw,bind,relatime",
@@ -286,7 +286,7 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
             (false, false) => "rw,relatime",
         };
         kernel_log::debug!("sys_mount: remount '{}' as {}", target_path, options);
-        axfs::register_mount_for_mountpoint(
+        fs::register_mount_for_mountpoint(
             &source_path,
             &target_path,
             &fstype_name,
@@ -297,7 +297,7 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
         // Update readonly status on the mountpoint and all its peer/slave propagation mounts!
         target_mp.set_readonly(is_rdonly);
         target_mp.set_flags(flags);
-        let peer_mps = axfs_ng_vfs::collect_propagate_unmount(&target_mp);
+        let peer_mps = vfs::collect_propagate_unmount(&target_mp);
         for peer in peer_mps {
             peer.set_readonly(is_rdonly);
             peer.set_flags(flags);
@@ -331,7 +331,7 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
             Ok(loc) => loc,
             Err(e) => return -LinuxError::from(e.canonicalize()).code() as isize,
         };
-        return match axfs::mount_bind(&target_loc, source_loc, &source_path, flags) {
+        return match fs::mount_bind(&target_loc, source_loc, &source_path, flags) {
             Ok(_) => 0,
             Err(e) => -LinuxError::from(e.canonicalize()).code() as isize,
         };
@@ -355,8 +355,8 @@ pub fn sys_mount(source: usize, target: usize, fstype: usize, flags: usize, _dat
         fstype_name
     );
 
-    let result = axfs::mount_filesystem(&target_loc, &source_path, &fstype_name, flags, || {
-        lookup_or_probe_fs(&ctx, &source_path, &fstype_name).map_err(axfs_ng_vfs::VfsError::from)
+    let result = fs::mount_filesystem(&target_loc, &source_path, &fstype_name, flags, || {
+        lookup_or_probe_fs(&ctx, &source_path, &fstype_name).map_err(vfs::VfsError::from)
     });
     match result {
         Ok(_) => 0,
@@ -418,7 +418,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
     // MNT_DETACH: lazy unmount – forcibly remove even if children exist.
     let is_detach = (flags & MNT_DETACH as usize) != 0;
 
-    let result = task::future::block_on(axfs::flush_and_unmount(&target_loc, is_detach));
+    let result = task::future::block_on(fs::flush_and_unmount(&target_loc, is_detach));
 
     match result {
         Ok(()) => 0,

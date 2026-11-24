@@ -10,13 +10,13 @@ use core::{
 };
 
 use axerrno::{LinuxError, LinuxResult};
-use axpoll::IoEvents;
+use poll::IoEvents;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, SIGPIPE, iovec},
     net::{AF_INET, AF_INET6, AF_UNIX, MSG_DONTWAIT, MSG_NOSIGNAL, MSG_PEEK, MSG_WAITALL, UNIX_PATH_MAX},
 };
-use pulse_io_uring_core::orchestrator::{PreparedRequest, RequestId};
-use pulse_io_uring_core::whitelist::{
+use io_uring_core::orchestrator::{PreparedRequest, RequestId};
+use io_uring_core::whitelist::{
     validate_accept_sqe, validate_connect_sqe, validate_send_recv_sqe,
     validate_sendmsg_recvmsg_sqe, validate_shutdown_sqe, validate_socket_sqe,
 };

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use axfs_ng_vfs::Mountpoint;
+use vfs::Mountpoint;
 
 use crate::{
     fixture::{MemFs, block_on, mkdir},
@@ -31,7 +31,7 @@ fn rejected_move_preserves_subtree_records_and_retry_moves_each_once() {
     FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         move_filesystem(&parent.root_location(), &destination).unwrap_err(),
-        axfs_ng_vfs::VfsError::NoMemory
+        vfs::VfsError::NoMemory
     );
     assert_eq!(list_mounts().len(), 2);
     for (path, mp) in [("/old", &parent), ("/old/child", &child)] {
@@ -72,15 +72,15 @@ fn rejected_move_preserves_subtree_records_and_retry_moves_each_once() {
     .unwrap();
     assert_eq!(
         unmount_subtree(&parent.root_location()),
-        Err(axfs_ng_vfs::VfsError::InvalidInput)
+        Err(vfs::VfsError::InvalidInput)
     );
     assert_eq!(
         unmount_subtree(&child.root_location()),
-        Err(axfs_ng_vfs::VfsError::InvalidInput)
+        Err(vfs::VfsError::InvalidInput)
     );
     assert_eq!(
         move_filesystem(&parent.root_location(), &old_target).unwrap_err(),
-        axfs_ng_vfs::VfsError::InvalidInput
+        vfs::VfsError::InvalidInput
     );
     assert_eq!(list_mounts().len(), 1);
     assert!(Arc::ptr_eq(
@@ -154,7 +154,7 @@ fn rejected_bind_update_leaves_no_mount_and_retry_inherits_readonly() {
     FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         mount_bind(&target, source.root_location(), "/source", 4096).unwrap_err(),
-        axfs_ng_vfs::VfsError::NoMemory
+        vfs::VfsError::NoMemory
     );
     assert!(!target.is_mountpoint());
     assert!(lookup_mounted_mountpoint("/bind").is_none());
@@ -218,7 +218,7 @@ fn lazy_bind_subtree_rejection_restores_shadows_and_retry_cleans_records() {
     FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         unmount_subtree(&bound.root_location()),
-        Err(axfs_ng_vfs::VfsError::NoMemory)
+        Err(vfs::VfsError::NoMemory)
     );
     assert_eq!(list_mounts().len(), 4);
     let resolved = block_on(root.lookup_no_follow("bind")).unwrap();
@@ -300,7 +300,7 @@ fn ordinary_mount_publishes_peer_and_slave_shadow_records() {
     FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         unmount_filesystem(&child.root_location()),
-        Err(axfs_ng_vfs::VfsError::NoMemory)
+        Err(vfs::VfsError::NoMemory)
     );
     assert_eq!(list_mounts().len(), 6);
     for (path, mp) in [
@@ -320,11 +320,11 @@ fn ordinary_mount_publishes_peer_and_slave_shadow_records() {
     for removed in [&child, peer_child.mountpoint(), slave_child.mountpoint()] {
         assert_eq!(
             unmount_filesystem(&removed.root_location()),
-            Err(axfs_ng_vfs::VfsError::InvalidInput)
+            Err(vfs::VfsError::InvalidInput)
         );
         assert_eq!(
             unmount_subtree(&removed.root_location()),
-            Err(axfs_ng_vfs::VfsError::InvalidInput)
+            Err(vfs::VfsError::InvalidInput)
         );
     }
     for mount in [slave, peer, primary] {
@@ -376,7 +376,7 @@ fn duplicate_target_preserves_the_existing_mount() {
                 panic!("an already registered duplicate must fail before probing")
             })
             .unwrap_err(),
-            axfs_ng_vfs::VfsError::ResourceBusy,
+            vfs::VfsError::ResourceBusy,
         );
     }
     let rows = list_mounts();
@@ -398,10 +398,10 @@ fn failed_probe_publishes_no_mount_or_record() {
         mount_filesystem(&target, "/dev/bad", "ext4", 0, || {
             // Probing may query registries: the coordinator must not hold them.
             assert!(list_mounts().is_empty());
-            Err(axfs_ng_vfs::VfsError::Io)
+            Err(vfs::VfsError::Io)
         })
         .unwrap_err(),
-        axfs_ng_vfs::VfsError::Io,
+        vfs::VfsError::Io,
     );
     assert!(list_mounts().is_empty());
     assert!(lookup_mounted_mountpoint("/probe_failure").is_none());
@@ -420,7 +420,7 @@ fn rejected_mount_record_update_restores_the_underlying_directory() {
             Ok(MemFs::create("rejected"))
         })
         .unwrap_err(),
-        axfs_ng_vfs::VfsError::NoMemory,
+        vfs::VfsError::NoMemory,
     );
     assert!(list_mounts().is_empty());
     assert!(lookup_mounted_mountpoint("/mount_rollback").is_none());
@@ -447,7 +447,7 @@ fn rejected_unmount_record_update_restores_the_same_mount_identity() {
     FAIL_NEXT_RECORD_UPDATE.store(true, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         unmount_filesystem(&mounted.root_location()),
-        Err(axfs_ng_vfs::VfsError::NoMemory),
+        Err(vfs::VfsError::NoMemory),
     );
     let rows = list_mounts();
     assert_eq!(rows.len(), 1);
@@ -482,7 +482,7 @@ fn busy_parent_unmount_preserves_parent_and_child_records() {
     .unwrap();
     assert_eq!(
         unmount_filesystem(&parent.root_location()),
-        Err(axfs_ng_vfs::VfsError::ResourceBusy),
+        Err(vfs::VfsError::ResourceBusy),
     );
     let rows = list_mounts();
     assert_eq!(rows.len(), 2);
@@ -509,7 +509,7 @@ fn record_conflict_created_during_probe_rolls_back_the_new_attachment() {
             Ok(MemFs::create("candidate"))
         })
         .unwrap_err(),
-        axfs_ng_vfs::VfsError::ResourceBusy,
+        vfs::VfsError::ResourceBusy,
     );
     let rows = list_mounts();
     assert_eq!(rows.len(), 1);
@@ -533,7 +533,7 @@ fn stale_unmount_cannot_remove_a_replacement_at_the_same_path() {
         mount_filesystem(&target, "new", "tmpfs", 0, || Ok(MemFs::create("new"))).unwrap();
     assert_eq!(
         unmount_filesystem(&old.root_location()),
-        Err(axfs_ng_vfs::VfsError::InvalidInput),
+        Err(vfs::VfsError::InvalidInput),
     );
     let rows = list_mounts();
     assert_eq!(rows.len(), 1);
@@ -576,7 +576,7 @@ fn competing_probes_publish_exactly_one_mount_and_record() {
     assert_eq!(
         results
             .iter()
-            .filter(|result| matches!(result, Err(axfs_ng_vfs::VfsError::ResourceBusy)))
+            .filter(|result| matches!(result, Err(vfs::VfsError::ResourceBusy)))
             .count(),
         1
     );

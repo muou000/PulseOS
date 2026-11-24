@@ -57,8 +57,8 @@ kernel_guard = { workspace = true, optional = true }
 crate_interface = { workspace = true, optional = true }
 cpumask = { workspace = true, optional = true }
 sched = { workspace = true, optional = true }
-axpoll.workspace = true
-axio.workspace = true
+poll.workspace = true
+io.workspace = true
 futures-util.workspace = true
 ipi = { workspace = true, optional = true }
 pulse_bpf_schema = { workspace = true, optional = true }

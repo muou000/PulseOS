@@ -18,15 +18,15 @@ config = { workspace = true }
 kernel_alloc.workspace = true
 task = { workspace = true, features = ["multitask"] }
 sync = { workspace = true, features = ["multitask"] }
-axfs.workspace = true
-axfs-ng-vfs.workspace = true
-axpoll.workspace = true
-axmm.workspace = true
+fs.workspace = true
+vfs.workspace = true
+poll.workspace = true
+mm.workspace = true
 axerrno.workspace = true
-axio.workspace = true
-axnet.workspace = true
+io.workspace = true
+net.workspace = true
 pulse_bpf_schema = { workspace = true }
-pulse_io_uring_core.workspace = true
+io_uring_core.workspace = true
 pulse_user_abi.workspace = true
 
 linux-raw-sys = { workspace = true, features = ["io_uring"] }
@@ -43,7 +43,7 @@ sha2 = { version = "0.10", default-features = false, optional = true }
 
 [features]
 ls2k1000 = ["cpu/ls2k1000"]
-bpf-trace = ["bpf/bpf-trace", "task/bpf-trace", "axmm/mapping-observer", "dep:sha2"]
-mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
-file-io-test = ["axfs/file-io-test"]
+bpf-trace = ["bpf/bpf-trace", "task/bpf-trace", "mm/mapping-observer", "dep:sha2"]
+mapping-lifecycle-test = ["fs/mapping-lifecycle-test"]
+file-io-test = ["fs/file-io-test"]
 guest-checks = []

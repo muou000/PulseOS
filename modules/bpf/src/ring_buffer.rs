@@ -46,7 +46,7 @@ pub struct BpfRingBuf {
     consumer_corrupt_records: AtomicU64,
     consumer_discarded_records: AtomicU64,
     #[cfg(target_os = "none")]
-    shared_frame: Option<Arc<axmm::SharedFrame>>,
+    shared_frame: Option<Arc<mm::SharedFrame>>,
     #[cfg(not(target_os = "none"))]
     _host_storage: Option<Vec<u8>>,
     #[cfg(target_os = "none")]
@@ -86,7 +86,7 @@ impl BpfRingBuf {
             core::ptr::write_bytes(vaddr as *mut u8, 0, total_size);
         }
 
-        let shared_frame = Arc::new(axmm::SharedFrame {
+        let shared_frame = Arc::new(mm::SharedFrame {
             vaddr,
             page_count: total_pages,
         });
@@ -152,7 +152,7 @@ impl BpfRingBuf {
     }
 
     #[cfg(target_os = "none")]
-    pub fn shared_frame(&self) -> Option<Arc<axmm::SharedFrame>> {
+    pub fn shared_frame(&self) -> Option<Arc<mm::SharedFrame>> {
         self.shared_frame.clone()
     }
 

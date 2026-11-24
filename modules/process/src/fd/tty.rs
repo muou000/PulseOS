@@ -17,11 +17,11 @@ use crate::Process;
 
 struct StdoutRaw;
 
-fn console_read_bytes(buf: &mut [u8]) -> axio::Result<usize> {
+fn console_read_bytes(buf: &mut [u8]) -> io::Result<usize> {
     Ok(hal::console::read_bytes(buf))
 }
 
-fn console_write_bytes(buf: &[u8]) -> axio::Result<usize> {
+fn console_write_bytes(buf: &[u8]) -> io::Result<usize> {
     hal::console::write_bytes(buf);
     Ok(buf.len())
 }
@@ -352,11 +352,11 @@ pub fn poll_stdin() {
 }
 
 impl Write for StdoutRaw {
-    fn write(&mut self, buf: &[u8]) -> axio::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         console_write_bytes(buf)
     }
 
-    fn flush(&mut self) -> axio::Result {
+    fn flush(&mut self) -> io::Result {
         Ok(())
     }
 }
@@ -664,7 +664,7 @@ fn read_tty_input(buf: &mut [u8]) -> LinuxResult<usize> {
 fn console_tty_stat() -> LinuxResult<stat> {
     // Reuse devfs metadata rather than duplicating its dynamically assigned
     // mount device ID. ttyname(3) compares this identity with /dev entries.
-    match axfs::lookup_location("/dev/tty") {
+    match fs::lookup_location("/dev/tty") {
         Ok(location) => location_to_stat(&location),
         Err(_) => Ok(synthetic_console_tty_stat()),
     }
@@ -676,7 +676,7 @@ fn synthetic_console_tty_stat() -> stat {
         st_nlink: 1,
         st_mode: S_IFCHR | 0o666,
         st_blksize: 4096,
-        st_rdev: axfs_ng_vfs::DeviceId::new(5, 0).0 as _,
+        st_rdev: vfs::DeviceId::new(5, 0).0 as _,
         ..empty_stat()
     }
 }
@@ -790,10 +790,10 @@ impl FdObject for StdinObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
-        if events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP) {
+        if events.intersects(poll::IoEvents::IN | poll::IoEvents::RDHUP) {
             let registration = STDIN_WAIT_QUEUE.register_owned_waker(cx.waker());
             registrations.push(PollRegistration::new(move || {
                 STDIN_WAIT_QUEUE.unregister_waker(registration);
@@ -890,7 +890,7 @@ impl FdObject for StdoutObject {
     fn register_poll(
         self: Arc<Self>,
         _cx: &mut core::task::Context<'_>,
-        _events: axpoll::IoEvents,
+        _events: poll::IoEvents,
         _registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         // Stdout writability is static. Non-writable event masks can still be
@@ -917,31 +917,31 @@ pub fn stdio_entries() -> [FdEntry; 3] {
 
 pub fn init_tty_callbacks() {
     struct TtyCallbacksImpl;
-    impl axfs::TtyCallbacks for TtyCallbacksImpl {
-        fn read(&self, buf: &mut [u8]) -> axfs_ng_vfs::VfsResult<usize> {
+    impl fs::TtyCallbacks for TtyCallbacksImpl {
+        fn read(&self, buf: &mut [u8]) -> vfs::VfsResult<usize> {
             read_tty_input(buf).map_err(|error| match error {
-                LinuxError::EINTR => axfs_ng_vfs::VfsError::Interrupted,
-                _ => axfs_ng_vfs::VfsError::Io,
+                LinuxError::EINTR => vfs::VfsError::Interrupted,
+                _ => vfs::VfsError::Io,
             })
         }
 
-        fn write(&self, buf: &[u8]) -> axfs_ng_vfs::VfsResult<usize> {
+        fn write(&self, buf: &[u8]) -> vfs::VfsResult<usize> {
             STDOUT_WRITER
                 .lock()
                 .write(buf)
-                .map_err(|_| axfs_ng_vfs::VfsError::Io)
+                .map_err(|_| vfs::VfsError::Io)
         }
 
-        fn poll(&self) -> axpoll::IoEvents {
+        fn poll(&self) -> poll::IoEvents {
             let has_data = tty_has_readable_data();
-            let mut events = axpoll::IoEvents::OUT;
+            let mut events = poll::IoEvents::OUT;
             if has_data {
-                events |= axpoll::IoEvents::IN;
+                events |= poll::IoEvents::IN;
             }
             events
         }
     }
-    axfs::register_tty_callbacks(Arc::new(TtyCallbacksImpl));
+    fs::register_tty_callbacks(Arc::new(TtyCallbacksImpl));
 }
 
 #[cfg(test)]

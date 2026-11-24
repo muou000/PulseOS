@@ -35,7 +35,7 @@ fn parse_cpu_list(list: &str) -> Result<usize, &'static str> {
 }
 
 fn read_cpu_list(path: &str) -> usize {
-    let fs = axfs::ROOT_FS_CONTEXT
+    let fs = fs::ROOT_FS_CONTEXT
         .get()
         .expect("root filesystem not mounted");
     // The rootfs is mounted and userspace has not started, so the configuration
@@ -45,7 +45,7 @@ fn read_cpu_list(path: &str) -> usize {
         Err(error) => panic!("{path}: {error:?}"),
         Ok(meta) => {
             assert!(
-                meta.node_type == axfs::NodeType::RegularFile && meta.size <= 4096,
+                meta.node_type == fs::NodeType::RegularFile && meta.size <= 4096,
                 "{path}: expected a regular file of at most 4096 bytes"
             );
             let list = block_on(fs.read_to_string(path))

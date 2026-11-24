@@ -10,7 +10,7 @@ extern crate axplat_loongarch64_ls2k1000;
 #[cfg(all(target_arch = "riscv64", feature = "visionfive2"))]
 extern crate axplat_riscv64_visionfive2;
 extern crate runtime;
-extern crate axnet;
+extern crate net;
 extern crate sync;
 extern crate pulse_core;
 extern crate pulse_syscalls;
@@ -67,7 +67,7 @@ fn main() {
             #[cfg(feature = "mapping-lifecycle-test")]
             {
                 pulse_core::mm::lifecycle_checks::run().expect("mapping lifecycle kernel checks failed");
-                axfs::run_mapping_lifecycle_checks().expect("mapping cache kernel checks failed");
+                fs::run_mapping_lifecycle_checks().expect("mapping cache kernel checks failed");
                 pulse_syscalls::run_mapping_shutdown_checks().expect("mapping shutdown kernel checks failed");
                 info!("MLC_KERNEL RESULT PASS");
             }
@@ -81,8 +81,8 @@ fn main() {
             }
             pulse_core::task::run_futex_guest_checks().expect("futex guest checks failed");
             pulse_core::task::run_process_registry_guest_checks().expect("process registry guest checks failed");
-            axfs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
-            axnet::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
+            fs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
+            net::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
             sync::run_lock_stress_checks().expect("sync lock stress checks failed");
 
             // Start the sampling worker after isolated boot checks: its timer

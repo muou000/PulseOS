@@ -310,9 +310,9 @@ fn handle_page_fault(
             };
             let classification = match &result {
                 Ok(resolution) if resolution.handled => match resolution.io {
-                    axmm::FilePageIo::NoStorageRead => PageFaultClassification::Minor,
-                    axmm::FilePageIo::StorageRead => PageFaultClassification::Major,
-                    axmm::FilePageIo::Unknown => PageFaultClassification::Unknown,
+                    mm::FilePageIo::NoStorageRead => PageFaultClassification::Minor,
+                    mm::FilePageIo::StorageRead => PageFaultClassification::Major,
+                    mm::FilePageIo::Unknown => PageFaultClassification::Unknown,
                 },
                 _ => PageFaultClassification::Unknown,
             };
@@ -384,10 +384,10 @@ fn handle_page_fault(
         if vaddr >= start && vaddr < end {
             fault_area = Some((start, end, flags));
             let mut curr_backend = backend.clone();
-            while let axmm::Backend::Cow(cow) = &curr_backend {
+            while let mm::Backend::Cow(cow) = &curr_backend {
                 curr_backend = cow.inner().clone();
             }
-            if !out_of_memory && let axmm::Backend::File(mapping) = curr_backend {
+            if !out_of_memory && let mm::Backend::File(mapping) = curr_backend {
                 let current_file_bytes = mapping.file_bytes();
                 let relative = vaddr.as_usize().saturating_sub(start.as_usize());
                 if relative >= current_file_bytes {
@@ -452,6 +452,6 @@ fn handle_page_fault(
 
 /// Ensure the module is linked and register memory reclaim callbacks.
 pub fn init() {
-    kernel_alloc::register_page_reclaim_fn(axfs::page_cache_reclaim);
+    kernel_alloc::register_page_reclaim_fn(fs::page_cache_reclaim);
     kernel_log::info!("page cache reclaim function registered");
 }

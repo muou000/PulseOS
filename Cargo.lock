@@ -8,14 +8,14 @@ version = "0.1.0"
 dependencies = [
  "axerrno",
  "axfeat",
- "axfs",
- "axnet",
  "axplat-loongarch64-ls2k1000",
  "axplat-loongarch64-qemu-virt",
  "axplat-riscv64-qemu-virt",
  "axplat-riscv64-visionfive2",
+ "fs",
  "hal",
  "kernel_log",
+ "net",
  "pulse_core",
  "pulse_syscalls",
  "runtime",
@@ -313,7 +313,6 @@ dependencies = [
  "axdriver_net",
  "axdriver_pci",
  "axdriver_virtio",
- "axpoll",
  "cfg-if",
  "config",
  "fdt-raw",
@@ -322,6 +321,7 @@ dependencies = [
  "kernel_log",
  "kspin",
  "log",
+ "poll",
  "task",
  "virtio-drivers",
 ]
@@ -335,11 +335,11 @@ name = "axdriver_block"
 version = "0.1.2"
 dependencies = [
  "axdriver_base",
- "axpoll",
  "bcm2835-sdhci",
  "dwmmc-host",
  "hal",
  "log",
+ "poll",
  "rdif-block",
  "sdio-host2",
  "sdmmc-protocol",
@@ -360,8 +360,8 @@ name = "axdriver_net"
 version = "0.1.2"
 dependencies = [
  "axdriver_base",
- "axpoll",
  "log",
+ "poll",
  "spin 0.9.8",
 ]
 
@@ -400,120 +400,14 @@ version = "0.1.0"
 dependencies = [
  "axdisplay",
  "axdriver",
- "axfs",
- "axnet",
+ "fs",
  "hal",
  "ipi",
  "kernel_alloc",
  "kernel_log",
  "kspin",
+ "net",
  "runtime",
- "sync",
- "task",
-]
-
-[[package]]
-name = "axfs"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-trait",
- "axdriver",
- "axerrno",
- "axfs-ng-vfs",
- "axio",
- "axmm",
- "axpoll",
- "bitflags 2.11.1",
- "cfg-if",
- "chrono",
- "config",
- "env_logger",
- "ext4plus",
- "futures-util",
- "hadris-fat",
- "hadris-fs",
- "hadris-io",
- "hadris-storage",
- "hal",
- "heapless 0.9.3",
- "intrusive-collections",
- "kernel_alloc",
- "kernel_log",
- "kspin",
- "log",
- "lru",
- "rand_core 0.10.1",
- "rand_pcg",
- "scope-local",
- "spin 0.10.0",
- "sync",
- "task",
-]
-
-[[package]]
-name = "axfs-ng-vfs"
-version = "0.1.1"
-dependencies = [
- "async-lock",
- "async-trait",
- "axerrno",
- "axpoll",
- "bitflags 2.11.1",
- "cfg-if",
- "hashbrown 0.16.1",
- "inherit-methods-macro",
- "kernel_guard",
- "kspin",
- "log",
- "smallvec",
- "spin 0.10.0",
-]
-
-[[package]]
-name = "axio"
-version = "0.3.0-pre.1"
-dependencies = [
- "autocfg",
- "axerrno",
- "heapless 0.9.3",
- "memchr",
-]
-
-[[package]]
-name = "axmm"
-version = "0.1.0"
-dependencies = [
- "axerrno",
- "bitflags 2.11.1",
- "config",
- "hal",
- "heapless 0.9.3",
- "ipi",
- "kernel_alloc",
- "kspin",
- "lazyinit",
- "log",
- "memory_addr",
- "memory_set",
- "spin 0.10.0",
-]
-
-[[package]]
-name = "axnet"
-version = "0.1.0"
-dependencies = [
- "axdriver",
- "axdriver_net",
- "axerrno",
- "axio",
- "axpoll",
- "cfg-if",
- "hal",
- "lazyinit",
- "log",
- "smoltcp",
- "spin 0.9.8",
  "sync",
  "task",
 ]
@@ -666,18 +560,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axpoll"
-version = "0.3.9"
-dependencies = [
- "ax-kspin",
- "bitflags 2.11.1",
- "futures",
- "linux-raw-sys",
- "spin 0.10.0",
- "tokio",
-]
-
-[[package]]
 name = "bcm2835-sdhci"
 version = "0.1.0"
 source = "git+https://github.com/lhw2002426/bcm2835-sdhci.git?rev=e974f16#e974f168efa72b470a01f61bdef32240c66f54fc"
@@ -752,10 +634,10 @@ name = "bpf"
 version = "0.1.0"
 dependencies = [
  "axerrno",
- "axmm",
  "hal",
  "kernel_alloc",
  "memory_addr",
+ "mm",
  "pulse_bpf_schema",
  "spin 0.10.0",
  "task",
@@ -1248,19 +1130,19 @@ name = "elf_loader"
 version = "0.1.0"
 dependencies = [
  "axerrno",
- "axfs",
- "axfs-ng-vfs",
- "axmm",
  "config",
  "cpu",
+ "fs",
  "hal",
  "kernel-elf-parser",
  "kernel_log",
  "linux-raw-sys",
  "memory_addr",
+ "mm",
  "spin 0.10.0",
  "starry-vdso",
  "task",
+ "vfs",
  "xmas-elf",
 ]
 
@@ -1406,6 +1288,45 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "fs"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "async-trait",
+ "axdriver",
+ "axerrno",
+ "bitflags 2.11.1",
+ "cfg-if",
+ "chrono",
+ "config",
+ "env_logger",
+ "ext4plus",
+ "futures-util",
+ "hadris-fat",
+ "hadris-fs",
+ "hadris-io",
+ "hadris-storage",
+ "hal",
+ "heapless 0.9.3",
+ "intrusive-collections",
+ "io",
+ "kernel_alloc",
+ "kernel_log",
+ "kspin",
+ "log",
+ "lru",
+ "mm",
+ "poll",
+ "rand_core 0.10.1",
+ "rand_pcg",
+ "scope-local",
+ "spin 0.10.0",
+ "sync",
+ "task",
+ "vfs",
+]
 
 [[package]]
 name = "futures"
@@ -1747,6 +1668,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "io"
+version = "0.3.0-pre.1"
+dependencies = [
+ "autocfg",
+ "axerrno",
+ "heapless 0.9.3",
+ "memchr",
+]
+
+[[package]]
+name = "io_uring_core"
+version = "0.1.0"
+dependencies = [
+ "axerrno",
+ "linux-raw-sys",
+ "poll",
+ "pulse_user_abi",
+]
+
+[[package]]
 name = "ipc"
 version = "0.1.0"
 dependencies = [
@@ -2020,6 +1961,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm"
+version = "0.1.0"
+dependencies = [
+ "axerrno",
+ "bitflags 2.11.1",
+ "config",
+ "hal",
+ "heapless 0.9.3",
+ "ipi",
+ "kernel_alloc",
+ "kspin",
+ "lazyinit",
+ "log",
+ "memory_addr",
+ "memory_set",
+ "spin 0.10.0",
+]
+
+[[package]]
 name = "mmio-api"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2036,6 +1996,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f87ad3b7b7bcf5da525c22221e3eb3a020cd68b2d55ae62f629c15e8bc3bd56e"
 dependencies = [
  "paste",
+]
+
+[[package]]
+name = "net"
+version = "0.1.0"
+dependencies = [
+ "axdriver",
+ "axdriver_net",
+ "axerrno",
+ "cfg-if",
+ "hal",
+ "io",
+ "lazyinit",
+ "log",
+ "poll",
+ "smoltcp",
+ "spin 0.9.8",
+ "sync",
+ "task",
 ]
 
 [[package]]
@@ -2127,6 +2106,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "poll"
+version = "0.3.9"
+dependencies = [
+ "ax-kspin",
+ "bitflags 2.11.1",
+ "futures",
+ "linux-raw-sys",
+ "spin 0.10.0",
+ "tokio",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2177,20 +2168,17 @@ name = "process"
 version = "0.1.0"
 dependencies = [
  "axerrno",
- "axfs",
- "axfs-ng-vfs",
- "axio",
- "axmm",
- "axnet",
- "axpoll",
  "bitflags 2.11.1",
  "bpf",
  "config",
  "cpu",
  "elf_loader",
+ "fs",
  "hal",
  "hashbrown 0.16.1",
  "heapless 0.9.3",
+ "io",
+ "io_uring_core",
  "ipc",
  "kernel_alloc",
  "kernel_guard",
@@ -2199,14 +2187,17 @@ dependencies = [
  "linkme",
  "linux-raw-sys",
  "memory_addr",
+ "mm",
+ "net",
  "percpu",
+ "poll",
  "pulse_bpf_schema",
- "pulse_io_uring_core",
  "pulse_user_abi",
  "sha2",
  "spin 0.10.0",
  "sync",
  "task",
+ "vfs",
 ]
 
 [[package]]
@@ -2217,20 +2208,10 @@ version = "0.1.0"
 name = "pulse_core"
 version = "0.1.0"
 dependencies = [
- "axmm",
  "config",
  "elf_loader",
+ "mm",
  "process",
-]
-
-[[package]]
-name = "pulse_io_uring_core"
-version = "0.1.0"
-dependencies = [
- "axerrno",
- "axpoll",
- "linux-raw-sys",
- "pulse_user_abi",
 ]
 
 [[package]]
@@ -2238,19 +2219,16 @@ name = "pulse_syscalls"
 version = "0.1.0"
 dependencies = [
  "axerrno",
- "axfs",
- "axfs-ng-vfs",
- "axio",
- "axmm",
- "axnet",
- "axpoll",
  "bitflags 2.11.1",
  "bpf",
  "chrono",
  "config",
  "cpu",
+ "fs",
  "hal",
  "heapless 0.9.3",
+ "io",
+ "io_uring_core",
  "ipc",
  "kernel_alloc",
  "kernel_guard",
@@ -2258,9 +2236,11 @@ dependencies = [
  "linkme",
  "linux-raw-sys",
  "memory_addr",
+ "mm",
+ "net",
+ "poll",
  "pulse_bpf_schema",
  "pulse_core",
- "pulse_io_uring_core",
  "pulse_user_abi",
  "rand_core 0.10.1",
  "rand_pcg",
@@ -2270,6 +2250,7 @@ dependencies = [
  "starry-vdso",
  "syscalls",
  "task",
+ "vfs",
 ]
 
 [[package]]
@@ -2471,19 +2452,19 @@ version = "0.1.0"
 dependencies = [
  "axdisplay",
  "axdriver",
- "axfs",
- "axmm",
- "axnet",
  "axplat",
  "chrono",
  "config",
  "crate_interface",
  "ctor_bare",
+ "fs",
  "hal",
  "ipi",
  "kernel_alloc",
  "kernel_guard",
  "kernel_log",
+ "mm",
+ "net",
  "percpu",
  "task",
 ]
@@ -2835,14 +2816,13 @@ name = "task"
 version = "0.1.0"
 dependencies = [
  "axerrno",
- "axio",
- "axpoll",
  "cfg-if",
  "config",
  "cpumask",
  "crate_interface",
  "futures-util",
  "hal",
+ "io",
  "ipi",
  "kernel_alloc",
  "kernel_guard",
@@ -2851,6 +2831,7 @@ dependencies = [
  "log",
  "memory_addr",
  "percpu",
+ "poll",
  "pulse_bpf_schema",
  "rand 0.9.5",
  "sched",
@@ -3008,6 +2989,25 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vfs"
+version = "0.1.1"
+dependencies = [
+ "async-lock",
+ "async-trait",
+ "axerrno",
+ "bitflags 2.11.1",
+ "cfg-if",
+ "hashbrown 0.16.1",
+ "inherit-methods-macro",
+ "kernel_guard",
+ "kspin",
+ "log",
+ "poll",
+ "smallvec",
+ "spin 0.10.0",
+]
 
 [[package]]
 name = "virtio-drivers"

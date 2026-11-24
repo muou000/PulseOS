@@ -10,7 +10,7 @@ pub mod config {
 }
 
 pub mod mm {
-    pub use axmm::copy_from_kernel;
+    pub use mm::copy_from_kernel;
     pub use elf_loader::{ExecCredentials, UserAppLoadInfo, check_elf_header, prefault_range};
     pub use process::exec::load_user_app;
     #[cfg(feature = "mapping-lifecycle-test")]

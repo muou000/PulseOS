@@ -532,17 +532,17 @@ impl FdObject for EventFdObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
-        if events.contains(axpoll::IoEvents::IN) {
+        if events.contains(poll::IoEvents::IN) {
             let owner = self.clone();
             let registration = owner.read_wait_queue.register_owned_waker(cx.waker());
             registrations.push(PollRegistration::new(move || {
                 owner.read_wait_queue.unregister_waker(registration);
             }));
         }
-        if events.contains(axpoll::IoEvents::OUT) {
+        if events.contains(poll::IoEvents::OUT) {
             let owner = self.clone();
             let registration = owner.write_wait_queue.register_owned_waker(cx.waker());
             registrations.push(PollRegistration::new(move || {
@@ -1034,7 +1034,7 @@ impl PipeObject {
 
         let total_gathered = gathered_pages.len();
         let mut read_pages = 0;
-        let mut pending_shootdown: Option<axmm::TlbShootdown> = None;
+        let mut pending_shootdown: Option<mm::TlbShootdown> = None;
         let mut remap_err = None;
 
         if total_gathered > 0 {
@@ -1226,9 +1226,9 @@ impl FdObject for PipeObject {
         &self,
         _process: &crate::Process,
         _thread: Option<&crate::Thread>,
-    ) -> LinuxResult<pulse_io_uring_core::poll::PollReadiness> {
+    ) -> LinuxResult<io_uring_core::poll::PollReadiness> {
         let (avail_read, avail_write, limit) = self.pipe_availability();
-        Ok(pulse_io_uring_core::poll::PollReadiness {
+        Ok(io_uring_core::poll::PollReadiness {
             readable: self.readable && avail_read > 0,
             writable: self.writable() && !self.read_end_closed() && avail_write >= limit,
             rdhup: false,
@@ -1308,11 +1308,11 @@ impl FdObject for PipeObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         if self.readable
-            && events.intersects(axpoll::IoEvents::IN | axpoll::IoEvents::RDHUP | axpoll::IoEvents::HUP)
+            && events.intersects(poll::IoEvents::IN | poll::IoEvents::RDHUP | poll::IoEvents::HUP)
         {
             let owner = self.clone();
             let registration = owner
@@ -1324,7 +1324,7 @@ impl FdObject for PipeObject {
             }));
         }
         if self.writable
-            && events.intersects(axpoll::IoEvents::OUT | axpoll::IoEvents::ERR | axpoll::IoEvents::HUP)
+            && events.intersects(poll::IoEvents::OUT | poll::IoEvents::ERR | poll::IoEvents::HUP)
         {
             let owner = self.clone();
             let registration = owner

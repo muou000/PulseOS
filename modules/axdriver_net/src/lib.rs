@@ -71,7 +71,7 @@ pub trait NetDriverOps: BaseDriverOps {
     fn poll_device(&self) {}
 
     /// Returns the poll set of the device, if supported.
-    fn poll_set(&self) -> Option<&axpoll::PollSet> {
+    fn poll_set(&self) -> Option<&poll::PollSet> {
         None
     }
 

@@ -2,8 +2,8 @@ use core::time::Duration;
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::timespec;
-use pulse_io_uring_core::poll::{PollReadiness, compute_poll_revents};
-pub(crate) use pulse_io_uring_core::resources::{UserIoSegment, validate_direct_io};
+use io_uring_core::poll::{PollReadiness, compute_poll_revents};
+pub(crate) use io_uring_core::resources::{UserIoSegment, validate_direct_io};
 
 pub(crate) fn iov_len_to_usize(iov_len: u64) -> Result<usize, LinuxError> {
     let len = usize::try_from(iov_len).map_err(|_| LinuxError::EINVAL)?;

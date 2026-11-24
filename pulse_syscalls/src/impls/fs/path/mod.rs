@@ -5,8 +5,8 @@ use alloc::{
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::LinuxError;
-use axfs::OpenOptions;
-use axfs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, VfsError, path::Path};
+use fs::OpenOptions;
+use vfs::{MetadataUpdate, NodePermission, NodeType, VfsError, path::Path};
 use linux_raw_sys::general::*;
 use pulse_core::fd_table::open_result_to_entry;
 
