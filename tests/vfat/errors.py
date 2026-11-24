@@ -22,9 +22,8 @@ def build_probe(repo, image, arch, temp):
                     "/vfat-probe"], check=True)
 
 
-def faults(repo, image, scratch, arch, boot):
-    temp = image.parent
-    build_probe(repo, image, arch, temp)
+def faults(scratch, boot):
+    temp = scratch.parent
 
     def shell(mode):
         return (f"mkdir -p /tmp/vfat-probe && mount -t vfat /dev/vdb /tmp/vfat-probe && "

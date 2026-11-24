@@ -52,6 +52,11 @@ const WRITEBACK_INTERVAL: Duration = Duration::from_secs(1);
 static WRITEBACK_DAEMON_STARTED: AtomicBool = AtomicBool::new(false);
 static WRITEBACK_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+// A global checkpoint holds mount roots and driver references across async
+// I/O. Finish the checkpoint before retiring a FAT volume or loop binding.
+#[cfg(feature = "fat")]
+static CHECKPOINT: async_lock::Mutex<()> = async_lock::Mutex::new(());
+
 /// Marks direct filesystem or raw-block state for background writeback.
 ///
 /// Cached-file writes use their own per-file generations instead. Keep this
@@ -104,6 +109,25 @@ pub async fn flush_mountpoint_before_unmount(
     let filesystem = root.filesystem();
     highlevel::flush_file_caches_for_filesystem_async(filesystem).await?;
     filesystem.flush().await
+}
+
+/// Drain a real mount before detaching it. Bind mounts share their source's
+/// cache and need no separate checkpoint.
+pub async fn flush_and_unmount(
+    target: &axfs_ng_vfs::Location,
+    subtree: bool,
+) -> axfs_ng_vfs::VfsResult<()> {
+    #[cfg(feature = "fat")]
+    let _checkpoint = CHECKPOINT.lock().await;
+    let mountpoint = target.mountpoint();
+    if !mounts::mountpoint_is_bind(mountpoint) {
+        flush_mountpoint_before_unmount(mountpoint).await?;
+    }
+    if subtree {
+        mounts::unmount_subtree(target)
+    } else {
+        mounts::unmount_filesystem(target)
+    }
 }
 
 async fn flush_filesystem_root(
@@ -165,6 +189,8 @@ async fn flush_registered_filesystems_and_disks(
 /// I/O lock. Explicit `sync`, unmount, and shutdown still use the complete
 /// cache walk below as their stronger semantic boundary.
 async fn flush_background_writeback_async() -> axfs_ng_vfs::VfsResult<()> {
+    #[cfg(feature = "fat")]
+    let _checkpoint = CHECKPOINT.lock().await;
     let (first_error, dirty_file_caches) = match highlevel::flush_pending_file_caches_async().await
     {
         Ok(dirty_file_caches) => (None, dirty_file_caches),
@@ -180,6 +206,8 @@ async fn flush_background_writeback_async() -> axfs_ng_vfs::VfsResult<()> {
 }
 
 pub async fn flush_all_filesystems_async() -> axfs_ng_vfs::VfsResult<()> {
+    #[cfg(feature = "fat")]
+    let _checkpoint = CHECKPOINT.lock().await;
     let first_error = highlevel::flush_all_file_caches_async().await.err();
     flush_registered_filesystems_and_disks(first_error).await
 }

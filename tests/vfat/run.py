@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from errors import build_probe, faults
+
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -57,9 +59,9 @@ def main():
             if reason or marker not in lines or "BPF_HOST_EXIT vfat 0" not in lines:
                 raise SystemExit(f"FAT32 {phase} failed ({reason or 'guest assertion'}), see {log}")
 
+        build_probe(REPO, image, args.arch, staging)
         if args.faults:
-            from errors import faults
-            faults(REPO, image, scratch, args.arch, boot)
+            faults(scratch, boot)
         else:
             subprocess.run([REPO / "scripts/install_to_rootfs.sh", image, HERE / "volume-lifecycle.sh",
                             "/vfat-volume-lifecycle.sh"], check=True)

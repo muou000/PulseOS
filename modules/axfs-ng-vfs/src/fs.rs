@@ -1,8 +1,8 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::boxed::Box;
 use async_trait::async_trait;
 
-use crate::{DirEntry, VfsResult};
+use crate::{DirEntry, VfsResult, WeakDirEntry};
 
 pub struct StatFs {
     pub fs_type: u32,
@@ -43,7 +43,30 @@ pub struct Filesystem {
     root_dir: DirEntry,
 }
 
+/// A device can reuse a mounted filesystem while its original root is live.
+/// Cached file I/O may retain the driver after that root has been released.
+pub struct WeakFilesystem {
+    ops: Weak<dyn FilesystemOps>,
+    root_dir: WeakDirEntry,
+}
+
+impl WeakFilesystem {
+    pub fn upgrade(&self) -> Option<Filesystem> {
+        Some(Filesystem {
+            root_dir: self.root_dir.upgrade()?,
+            ops: self.ops.upgrade()?,
+        })
+    }
+}
+
 impl Filesystem {
+    pub fn downgrade(&self) -> WeakFilesystem {
+        WeakFilesystem {
+            ops: Arc::downgrade(&self.ops),
+            root_dir: self.root_dir.downgrade(),
+        }
+    }
+
     pub fn name(&self) -> &str {
         self.ops.name()
     }

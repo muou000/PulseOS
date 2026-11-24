@@ -418,22 +418,7 @@ pub fn sys_umount2(target: usize, flags: usize) -> isize {
     // MNT_DETACH: lazy unmount – forcibly remove even if children exist.
     let is_detach = (flags & MNT_DETACH as usize) != 0;
 
-    let target_mp = target_loc.mountpoint().clone();
-    // Bind mounts share a filesystem which remains reachable through their
-    // source mount, so flushing them here would turn the fs_bind matrix into
-    // repeated whole-filesystem checkpoints. A real mount may be followed by
-    // LOOP_CLR_FD, and must drain its retained cache before that can happen.
-    if !axfs::mountpoint_is_bind(&target_mp)
-        && let Err(error) =
-            axtask::future::block_on(axfs::flush_mountpoint_before_unmount(&target_mp))
-    {
-        return -LinuxError::from(error.canonicalize()).code() as isize;
-    }
-    let result = if is_detach {
-        axfs::unmount_subtree(&target_loc)
-    } else {
-        axfs::unmount_filesystem(&target_loc)
-    };
+    let result = axtask::future::block_on(axfs::flush_and_unmount(&target_loc, is_detach));
 
     match result {
         Ok(()) => 0,

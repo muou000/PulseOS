@@ -2,9 +2,10 @@
 typedef unsigned long usize;
 
 enum {
-    unlinkat = 35, openat = 56, close = 57, read = 63,
+    ioctl = 29, unlinkat = 35, openat = 56, close = 57, read = 63,
     write = 64, pread64 = 67, fsync = 82, exit_group = 94, munmap = 215,
     mmap = 222, renameat2 = 276, AT_FDCWD = -100, O_RDWR = 2, O_CREAT = 64,
+    LOOP_SET_FD = 0x4c00, LOOP_CLR_FD = 0x4c01,
     PROT_READ = 1, MAP_SHARED = 1, EBUSY = 16, EIO = 5,
 };
 
@@ -132,7 +133,12 @@ __attribute__((noreturn)) void _start(void)
 {
     char mode = 0;
     expect("mode", CALL3(read, 0, &mode, 1), 1);
-    if (mode == 'b') lifetimes();
+    /* The loop-control shell opens the loop device on fd 3 and its backing
+       on fd 4 for attach; detach checks the driver's exact errno. */
+    if (mode == 'a') expect("attach loop", CALL3(ioctl, 3, LOOP_SET_FD, 4), 0);
+    else if (mode == 'l' || mode == 'd')
+        expect("detach loop", CALL3(ioctl, 3, LOOP_CLR_FD, 0), mode == 'l' ? -EBUSY : 0);
+    else if (mode == 'b') lifetimes();
     else if (mode == 's') seed();
     else if (mode == 'r' || mode == 'w' || mode == 'f') fault(mode);
     else finish(1);

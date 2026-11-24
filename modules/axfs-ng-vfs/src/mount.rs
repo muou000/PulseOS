@@ -2512,6 +2512,17 @@ mod tests {
     }
 
     #[test]
+    fn cached_filesystem_requires_a_live_root_even_when_io_retains_the_driver() {
+        let fs = MemFs::create("volume");
+        let cached = fs.downgrade();
+        let node = fs.root_dir().downcast::<MemDir>().unwrap();
+        assert_eq!(cached.upgrade().unwrap().root_dir(), fs.root_dir());
+        drop(fs);
+        assert!(cached.upgrade().is_none());
+        assert_eq!(node.filesystem().name(), "volume");
+    }
+
+    #[test]
     fn rejected_mount_commit_restores_the_underlying_directory() {
         let root_fs = MemFs::create("root");
         let mounted_fs = MemFs::create("mounted");

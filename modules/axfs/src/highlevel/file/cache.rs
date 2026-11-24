@@ -2370,14 +2370,19 @@ pub(crate) async fn flush_file_caches_for_filesystem_async(
         );
     }
     flush_file_cache_states(states.iter().cloned()).await?;
+    #[cfg(feature = "fat")]
     if filesystem.name() == "vfat" {
-        for candidate in states {
+        // Reclaim snapshots own temporary strong references, including states
+        // already pruned from their shard. Let them finish before deciding
+        // which caches are still owned by open files or mappings.
+        let _reclaim = FILE_CACHE_RECLAIM.write().await;
+        for candidate in &states {
             if let Some(key) = candidate.key()
                 && candidate.is_releasable_without_writeback()
             {
                 let removed = FILE_SHARED_STATES[file_state_registry_shard(key)]
                     .lock()
-                    .try_release_unreferenced(&candidate);
+                    .try_release_unreferenced(candidate);
                 drop(removed);
             }
         }
@@ -2396,6 +2401,8 @@ impl Drop for ReclaimGuard {
 }
 
 static PAGE_CACHE_RECLAIM_ACTIVE_CPUS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "fat")]
+static FILE_CACHE_RECLAIM: async_lock::RwLock<()> = async_lock::RwLock::new(());
 static PAGE_CACHE_RECLAIMED_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_RECLAIM_ZERO_STREAK: AtomicUsize = AtomicUsize::new(0);
 
@@ -2485,6 +2492,10 @@ pub fn page_cache_reclaim(num_pages: usize) -> usize {
     }
 
     let _guard = ReclaimGuard { slot_mask };
+    #[cfg(feature = "fat")]
+    let Some(_reclaim) = FILE_CACHE_RECLAIM.try_read() else {
+        return 0;
+    };
     let reclaimed = page_cache_reclaim_inner(num_pages);
     if reclaimed > 0 {
         PAGE_CACHE_RECLAIM_ZERO_STREAK.store(0, Ordering::Relaxed);

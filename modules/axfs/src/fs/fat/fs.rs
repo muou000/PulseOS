@@ -52,14 +52,14 @@ pub(super) fn vfs_error<E>(e: hadris_fs::Error<E>) -> VfsError {
 }
 
 impl<D: AsyncBlockDriverOps + Clone + 'static> FatFilesystem<D> {
-    pub(crate) async fn mount(dev: D) -> VfsResult<Arc<Self>> {
+    pub(crate) async fn new(dev: D) -> VfsResult<Filesystem> {
         let options = MountOptions::new().with_clock(&super::node::WallClock);
         let driver = FatFs::mount(FatDisk::new(dev)?, options)
             .await
             .map_err(|e| vfs_error(e.into_error()))?;
         let root_id = driver.root();
         let block_size = driver.info().cluster_size();
-        Ok(Arc::new_cyclic(|this| Self {
+        let fs = Arc::new_cyclic(|this| Self {
             namespace: Mutex::new(()),
             open_files: SpinNoPreempt::default(),
             volume: Mutex::new(Volume {
@@ -71,11 +71,8 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> FatFilesystem<D> {
             this: this.clone(),
             root: SpinNoPreempt::new(None),
             forgotten: SpinNoPreempt::new(Vec::new()),
-        }))
-    }
-
-    pub(crate) async fn new(dev: D) -> VfsResult<Filesystem> {
-        Ok(Filesystem::new(Self::mount(dev).await?))
+        });
+        Ok(Filesystem::new(fs))
     }
 
     pub(super) async fn lock(&self) -> MutexGuard<'_, Volume<D>> {
