@@ -154,14 +154,23 @@ impl FilePosition {
     }
 
     pub(super) fn reserve(self: &Arc<Self>) -> FilePositionTicket {
+        self.reserve_with(|ticket| ticket)
+    }
+
+    pub(super) fn reserve_with<R>(
+        self: &Arc<Self>,
+        publish: impl FnOnce(FilePositionTicket) -> R,
+    ) -> R {
         let mut state = self.state.lock();
         let ticket = state.next_ticket;
         state.next_ticket += 1;
-        FilePositionTicket {
+        let result = publish(FilePositionTicket {
             pos: Arc::clone(self),
             ticket,
             consumed: false,
-        }
+        });
+        drop(state);
+        result
     }
 
     pub(super) async fn lock(self: &Arc<Self>) -> FilePositionGuard<'_> {

@@ -1033,7 +1033,7 @@ pub fn execute_socket_request(
     };
     let state_wk = Arc::clone(state);
     let ctx_wk = ctx.clone();
-    global_worker_pool().submit(state.ring_id(), req_id, move || {
+    global_worker_pool().submit(state, req_id, move || {
         let _guard: OwnedInflightGuard = guard;
         if !state_wk.is_request_active(req_id) || state_wk.is_dying() {
             return;
@@ -1068,7 +1068,7 @@ pub fn execute_shutdown_request(
         return;
     };
     let state_wk = Arc::clone(state);
-    global_worker_pool().submit(state.ring_id(), req_id, move || {
+    global_worker_pool().submit(state, req_id, move || {
         let _guard: OwnedInflightGuard = guard;
         if !state_wk.is_request_active(req_id) || state_wk.is_dying() {
             return;
@@ -1162,7 +1162,7 @@ pub fn execute_accept_request(
     let ctx_cloned = ctx.clone();
 
     if force_async {
-        global_worker_pool().submit(state.ring_id(), req_id, move || {
+        global_worker_pool().submit(state, req_id, move || {
             let _guard: OwnedInflightGuard = guard;
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;
@@ -1305,7 +1305,7 @@ pub fn execute_connect_request(
     let ctx_cloned = ctx.clone();
 
     if force_async {
-        global_worker_pool().submit(state.ring_id(), req_id, move || {
+        global_worker_pool().submit(state, req_id, move || {
             let _guard: OwnedInflightGuard = guard;
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;
@@ -1395,7 +1395,7 @@ fn spawn_socket_transfer(
     };
 
     if needs_worker {
-        global_worker_pool().submit(state.ring_id(), req_id, move || {
+        global_worker_pool().submit(state, req_id, move || {
             let _guard: OwnedInflightGuard = guard;
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;

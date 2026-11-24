@@ -706,7 +706,7 @@ impl IoUringState {
                     if let Some(guard) = self.try_enter_inflight_owned() {
                         let state_wk = Arc::clone(self);
                         let ctx_wk = ctx.clone();
-                        global_worker_pool().submit(self.ring_id(), req_id, move || {
+                        global_worker_pool().submit(self, req_id, move || {
                             let _guard = guard;
                             if !state_wk.is_request_active(req_id) {
                                 return;
@@ -1636,6 +1636,7 @@ pub fn cancel_requests_for_process(owner_pid: u64) {
 pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     use memory_addr::VirtAddr;
 
+    worker_pool::check_overlapping_worker_finishes();
     axlog::ax_println!("[IO_URING_RSRC_GUEST] Starting fixed resources & frame refcount checks...");
 
     let process = crate::task::current_process()?;
@@ -1896,5 +1897,39 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     );
 
     axlog::ax_println!("[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS");
+    check_remote_first_poll()?;
+    Ok(())
+}
+
+/// Exercise a remote first dispatch even when the ring's own Path 3 predecessors
+/// already complete on the same CPU as its native executor.
+#[cfg(feature = "guest-checks")]
+fn check_remote_first_poll() -> LinuxResult<()> {
+    use core::time::Duration;
+
+    let original = axtask::current().cpumask();
+    let Some(target) = (1..axhal::cpu_num()).find(|&cpu| axtask::is_sqpoll_service_cpu(cpu)) else {
+        return Ok(());
+    };
+    if !original.get(0) {
+        return Ok(());
+    }
+    let executor = axtask::future::CpuExecutor::get(target)?;
+    assert!(axtask::set_current_affinity(axtask::AxCpuMask::one_shot(0)));
+    let submit_cpu = axhal::percpu::this_cpu_id();
+    let handle = executor.spawn(async move {
+        let poll_cpu = axhal::percpu::this_cpu_id();
+        axlog::ax_println!(
+            "[IO_URING_CPU_GUEST] first poll submit={} target={} cpu={} task={}",
+            submit_cpu, target, poll_cpu, axtask::current().name()
+        );
+        assert_eq!(poll_cpu, target);
+    });
+    assert!(axtask::set_current_affinity(original));
+    let deadline = axhal::time::monotonic_time() + Duration::from_secs(5);
+    while !handle.is_done() {
+        assert!(axhal::time::monotonic_time() < deadline, "remote first poll timed out");
+        axtask::sleep(Duration::from_millis(1));
+    }
     Ok(())
 }

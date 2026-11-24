@@ -871,6 +871,21 @@ impl File {
         self.position.as_ref().map(FilePosition::reserve)
     }
 
+    /// Publishes a deferred job in the same order as its shared-position ticket.
+    /// The callback runs with the position lock held when a ticket exists. It
+    /// must only transfer the ticket to the queue and return. In particular,
+    /// dropping or using the ticket, waking tasks and running I/O must wait
+    /// until this call returns and releases the lock.
+    pub fn publish_position_ticket<R>(
+        &self,
+        publish: impl FnOnce(Option<FilePositionTicket>) -> R,
+    ) -> R {
+        match &self.position {
+            Some(position) => position.reserve_with(|ticket| publish(Some(ticket))),
+            None => publish(None),
+        }
+    }
+
     /// Begins position ownership. Transfer methods check the access mode,
     /// allowing syscall alignment and user-memory validation to retain their
     /// existing precedence before the first actual transfer.

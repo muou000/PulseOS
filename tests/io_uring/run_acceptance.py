@@ -7,6 +7,8 @@ Modes:
   sqpoll       : Verify the shared-ring SQPOLL protocol and pinned sqpoll-sleep.t.
   sqpoll-reserved : Observe SQ consumption on a reserved CPU (guest-checks kernel).
   future-cpu   : Check native poll placement and ordinary-ring progress (guest-checks kernel).
+  worker-cpu   : Check Path 3 placement (guest-checks kernel with worker-scheduler.patch).
+  worker-limits: Saturate the shared pool and verify quotas and cross-ring ordering (guest-checks).
   fio          : Verify syscall-count reduction and ext4 O_DIRECT/cached fio-3.39.
   bpf          : Capture paired cpu+sched bpf-record sessions, run bpf-analyzer
                  and scripts/perf_pipeline.py (native perf + FlameGraph SVG).
@@ -56,6 +58,7 @@ GUEST_CHECK_MARKERS = (
     "[IO_URING_RSRC_GUEST] FixedFileRegistry sparse slots & partial update: PASS",
     "[IO_URING_RSRC_GUEST] Inflight munmap + close five-step teardown frame balance: PASS",
     "[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS",
+    "WORKER_OVERLAPPING_FINISH_PASS",
 )
 
 BPF_WORKLOADS: dict[str, dict[str, str | int]] = {
@@ -150,6 +153,7 @@ def run_guest_job(
     script_text: str,
     boot_timeout: float,
     timeout: float,
+    on_output=None,
 ) -> tuple[str, int]:
     install_script(image_copy, script_text, run)
     token = run.name.rsplit("-", 1)[-1]
@@ -167,6 +171,7 @@ def run_guest_job(
         READY_REGEX,
         boot_timeout,
         timeout,
+        on_output=on_output,
     )
     clean = strip_ansi(raw_text)
     if PANIC_RE.search(clean):
@@ -260,8 +265,8 @@ echo 'SQPOLL liburing-2.9 sqpoll-sleep.t PASS'
 
 
 def run_reserved_probe(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path,
-                       option: str) -> tuple[str, int]:
-    for name, cpus in (("pulse-kernel-cpus", "6-7"), ("pulse-sqpoll-cpus", "7")):
+                       option: str, on_output=None, service_cpus: str = "7") -> tuple[str, int]:
+    for name, cpus in (("pulse-kernel-cpus", "6-7"), ("pulse-sqpoll-cpus", service_cpus)):
         config = run / name
         config.write_text(cpus + "\n")
         install_verified_file(image_copy, config, f"/etc/{name}", run)
@@ -270,8 +275,35 @@ def run_reserved_probe(args: argparse.Namespace, run: Path, kernel: Path, image_
     return run_guest_job(
         arch=args.arch, kernel=kernel, image_copy=image_copy, run=run,
         script_text=f"#!/bin/sh\nexec /opt/io_uring/sqpoll {option}\n",
-        boot_timeout=args.boot_timeout, timeout=args.timeout,
+        boot_timeout=args.boot_timeout, timeout=args.timeout, on_output=on_output,
     )
+
+
+def run_worker_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
+    from worker_cpu import WorkerGates, check_worker_cpu
+
+    gates = WorkerGates()
+    clean, qemu_exit = run_reserved_probe(args, run, kernel, image_copy, "--reserved-workers",
+                                         lambda text, stdin: gates(strip_ansi(text), stdin))
+    return {"mode": "worker-cpu", "arch": args.arch, "qemu_exit": qemu_exit, **check_worker_cpu(clean)}
+
+
+def run_worker_limits(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
+    from worker_cpu import JOB, check_worker_limits
+
+    released = False
+
+    def signal_full(log, stdin):
+        nonlocal released
+        trace = log.partition("WORKER_LIMITS_BEGIN")[2]
+        if not released and sum(m["phase"] == "start" for m in JOB.finditer(trace)) >= 16:
+            stdin.write(b"full\n")
+            stdin.flush()
+            released = True
+
+    clean, qemu_exit = run_reserved_probe(args, run, kernel, image_copy, "--worker-limits",
+                                          signal_full, service_cpus="6-7")
+    return {"mode": "worker-limits", "arch": args.arch, "qemu_exit": qemu_exit, **check_worker_limits(clean)}
 
 
 def run_sqpoll_reserved(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
@@ -303,23 +335,14 @@ def run_sqpoll_reserved(args: argparse.Namespace, run: Path, kernel: Path, image
 
 
 def run_future_cpu(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path) -> dict:
-    # Workers can legitimately run on the target. Collect an actual remote
-    # activation for each successor, checking every poll on every attempt.
-    remote_submissions = {}
-    for attempt in range(1, 6):
-        clean, qemu_exit = run_reserved_probe(args, run, kernel, image_copy, "--reserved-futures")
-        summary = check_future_cpu(clean)
-        for request, cpu, _ in summary["worker_submissions"]:
-            if int(cpu) != summary["target"]:
-                remote_submissions[request] = {"cpu": int(cpu), "attempt": attempt}
-        if len(remote_submissions) == 2:
-            return {**summary, "arch": args.arch, "qemu_exit": qemu_exit,
-                    "attempts": attempt, "remote_submissions": remote_submissions}
-        (run / "guest.log").rename(run / f"guest-{attempt}.log")
-    raise ValueError(f"Missing remote worker activation after {attempt} runs: {remote_submissions}")
+    clean, qemu_exit = run_reserved_probe(args, run, kernel, image_copy, "--reserved-futures")
+    return {**check_future_cpu(clean), "arch": args.arch, "qemu_exit": qemu_exit}
 
 
 def check_future_cpu(clean: str) -> dict:
+    remote = re.findall(r"\[IO_URING_CPU_GUEST\] first poll submit=(\d+) target=(\d+) cpu=(\d+) task=(\S+)", clean)
+    if remote != [("0", "7", "7", "async-exec-cpu-7")]:
+        raise ValueError(f"Expected one first poll dispatched from CPU 0 to the CPU 7 driver: {remote}")
     _, begin, workload = clean.partition("FUTURE_CPU_BEGIN")
     trace, _, native_io = workload.partition("FUTURE_CPU_NATIVE_IO_BEGIN")
     if not begin or "FUTURE_CPU CQ order, unique completions, close and writer release PASS" not in trace:
@@ -354,8 +377,8 @@ def check_future_cpu(clean: str) -> dict:
         raise ValueError("Reserved request 1 did not resume after the CPU 0 pipe write")
 
     workers = re.findall(rf"io_uring native submit ring={ring} req=(4|6) cpu=(\d+) task=(io-uring-wk-\d+)", trace)
-    if sorted(req for req, _, _ in workers) != ["4", "6"]:
-        raise ValueError(f"Missing worker dispatch of link/drain successors: {workers}")
+    if sorted((req, cpu) for req, cpu, _ in workers) != [("4", "7"), ("6", "7")]:
+        raise ValueError(f"Expected link/drain predecessors to dispatch successors from CPU 7: {workers}")
     ordinary = {rid for rid, *_ in polls} - reserved_ids
     if len(ordinary) != 1:
         raise ValueError(f"Expected one ordinary ring alongside reserved ring {ring}, got {ordinary}")
@@ -377,6 +400,7 @@ def check_future_cpu(clean: str) -> dict:
     return {"mode": "future-cpu",
             "ring": int(ring), "target": 7, "first": len(first), "resume": len(dedicated) - len(first),
             "polls": dedicated, "outside": len(outside), "worker_submissions": workers, "ordinary_ring": int(ordinary_id),
+            "remote_first_poll": {"submit_cpu": int(remote[0][0]), "poll_cpu": int(remote[0][2])},
             "getevents_calls": int(competition[1]), "io_ring": int(io_ring[1]),
             "io_polls": io_polls, "passed": True}
 
@@ -916,7 +940,7 @@ def run_bpf(args: argparse.Namespace, run: Path, kernel: Path, image_copy: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "sqpoll", "sqpoll-reserved", "future-cpu", "fio", "bpf"))
+    parser.add_argument("--mode", required=True, choices=("guest-checks", "functional", "sqpoll", "sqpoll-reserved", "future-cpu", "worker-cpu", "worker-limits", "fio", "bpf"))
     parser.add_argument("--arch", required=True, choices=tuple(ARCHES))
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--boot-timeout", type=float, default=60.0)
@@ -941,6 +965,8 @@ def main() -> int:
         "sqpoll": run_sqpoll,
         "sqpoll-reserved": run_sqpoll_reserved,
         "future-cpu": run_future_cpu,
+        "worker-cpu": run_worker_cpu,
+        "worker-limits": run_worker_limits,
         "fio": run_fio,
         "bpf": run_bpf,
     }
