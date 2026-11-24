@@ -7,6 +7,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="${REPO_ROOT}/rootfs/base"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}}"
+RISCV_PLATFORM="${RISCV_PLATFORM:-qemu-virt}"
+source "${REPO_ROOT}/scripts/rootfs-riscv64.sh"
 
 MIN_IMG_MIB="${MIN_IMG_MIB:-128}"
 EXTRA_MARGIN_MIB="${EXTRA_MARGIN_MIB:-128}"
@@ -23,13 +25,14 @@ have_cmd() {
 usage() {
     cat <<USAGE
 Usage:
-  scripts/build_img.sh [all|riscv64|loongarch64]   (default: \${ARCH:-riscv64})
+  scripts/build_img.sh [--fetch] [all|riscv64|loongarch64]   (default: \${ARCH:-riscv64})
 
 Base tarballs are expected under rootfs/base; run scripts/fetch-rootfs.sh
-if they are missing.
+if they are missing, or pass --fetch to download missing inputs.
 
 Env:
   OUTPUT_DIR          image output directory (default: repo root)
+  RISCV_PLATFORM      qemu-virt (default, Ubuntu 26.10) or visionfive2 (RV64GC)
   ROOTFS_VARIANT      tarball variant: auto (default, prefers tests), tests, or base
   IMG_SIZE            fixed image size (e.g. 128M, 1G); overrides auto-size
   MIN_IMG_MIB         minimum auto-sized image size in MiB (default: 128)
@@ -58,80 +61,62 @@ parse_size_to_mib() {
     echo $(((bytes + 1048575) / 1048576))
 }
 
-find_base_tar() {
-    local arch="$1"
-    local variant="${ROOTFS_VARIANT:-auto}"
-    local candidates=()
-
-    case "${variant}" in
-        auto)
-            candidates+=(
-                "${BASE_DIR}/rootfs-tests-${arch}.tar.xz"
-                "${BASE_DIR}/rootfs-tests-${arch}.tar.gz"
-            )
-            if [[ "${arch}" == "riscv64" ]]; then
-                candidates+=(
-                    "${BASE_DIR}/ubuntu-base-24.04.5-base-riscv64.tar.gz"
-                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.gz"
-                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.xz"
-                )
-            else
-                candidates+=(
-                    "${BASE_DIR}/base-rootfs-${arch}.tar.xz"
-                    "${BASE_DIR}/base-rootfs-${arch}.tar.gz"
-                )
-            fi
-            ;;
-        tests)
-            candidates+=(
-                "${BASE_DIR}/rootfs-tests-${arch}.tar.xz"
-                "${BASE_DIR}/rootfs-tests-${arch}.tar.gz"
-            )
-            ;;
-        base)
-            if [[ "${arch}" == "riscv64" ]]; then
-                candidates+=(
-                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.gz"
-                    "${BASE_DIR}/alpine-minirootfs-riscv64.tar.xz"
-                    "${BASE_DIR}/ubuntu-base-24.04.5-base-riscv64.tar.gz"
-                )
-            else
-                candidates+=(
-                    "${BASE_DIR}/base-rootfs-${arch}.tar.xz"
-                    "${BASE_DIR}/base-rootfs-${arch}.tar.gz"
-                )
-            fi
-            ;;
-        *)
-            die "Invalid ROOTFS_VARIANT='${variant}' (expected: auto, tests, or base)"
-            ;;
-    esac
-
-    local f
-    for f in "${candidates[@]}"; do
-        [[ -f "${f}" ]] && { echo "${f}"; return 0; }
+first_cached() {
+    local name
+    for name in "$@"; do
+        if [[ -f "${BASE_DIR}/${name}" ]]; then
+            echo "${BASE_DIR}/${name}"
+            return
+        fi
     done
     return 1
 }
 
+# Emit the base archive, followed by the optional test overlay.
+rootfs_archives() {
+    local arch="$1" variant="$2" suites=""
+    if [[ "${variant}" != base ]]; then
+        if [[ "${arch}" == riscv64 ]]; then
+            if ! suites="$(riscv_test_archive)"; then
+                # Auto may use a minimal image if no test bundle was requested
+                # or cached. A stale bundle must not silently drop test suites.
+                [[ "${variant}" == auto && ! -e "${BASE_DIR}/${rv_tests_cache}" \
+                    && ! -e "${BASE_DIR}/${rv_tests_asset}" ]] || return 1
+            fi
+        else
+            suites="$(first_cached rootfs-tests-loongarch64.tar.{xz,gz})" || [[ "${variant}" == auto ]] || return 1
+        fi
+    fi
+    if [[ "${arch}" == riscv64 && "${RISCV_PLATFORM}" == qemu-virt ]]; then
+        verified_archive "${rv_ubuntu_sha}" "${BASE_DIR}/${rv_ubuntu}" || return 1
+        if [[ -n "${suites}" ]]; then echo "${suites}"; fi
+    elif [[ -n "${suites}" ]]; then
+        echo "${suites}"
+    elif [[ "${arch}" == loongarch64 ]]; then
+        first_cached base-rootfs-loongarch64.tar.{xz,gz}
+    elif [[ "${variant}" == auto ]]; then
+        first_cached ubuntu-base-24.04.5-base-riscv64.tar.gz alpine-minirootfs-riscv64.tar.{gz,xz}
+    else
+        first_cached alpine-minirootfs-riscv64.tar.{gz,xz} ubuntu-base-24.04.5-base-riscv64.tar.gz
+    fi
+}
+
 validate_riscv_elf_isa() {
-    local stage_dir="$1" jobs hit
+    local stage_dir="$1" hit
     command -v readelf >/dev/null 2>&1 || die "Missing command: readelf (required for RISC-V ISA validation)"
-    jobs="$(nproc 2>/dev/null || echo 4)"
-    hit="$(find "${stage_dir}" -type f -print0 \
-        | xargs -0 -r -n 128 -P "${jobs}" sh -c 'readelf -A "$@" 2>/dev/null || true' _ \
+    hit="$(find "${stage_dir}" -type f -exec sh -c 'readelf -A "$@" 2>/dev/null || true' _ {} + \
         | awk '
             /^File: / { cur = substr($0, 7) }
-            /Tag_RISCV_arch:/ {
+            /Tag_RISCV_arch:/ && !found {
                 split($0, a, "\"")
                 if (a[2] ~ /(^|_)(v[0-9]|zv)/) {
                     print cur ? cur : "<elf>"
-                    exit 0
+                    found = 1
                 }
             }
         ')"
     if [[ -n "${hit}" ]]; then
-        die "RISC-V rootfs ELF requires vector state unsupported by PulseOS: ${hit}"
+        die "VisionFive 2 rootfs ELF requires the unsupported RISC-V vector extension: ${hit}"
     fi
 }
 
@@ -165,24 +150,38 @@ ensure_loongarch64_gnu_libdir_compat() {
     ln -sfn ../lib64 "${usr_lib64}"
 }
 
-build_one_arch() {
-    local arch="$1" base_tar
-    base_tar="$(find_base_tar "${arch}")" \
-        || die "Missing base tar for ${arch}. Run scripts/fetch-rootfs.sh first."
+build_one_arch() (
+    local arch="$1" name="$1" variant="${ROOTFS_VARIANT:-auto}"
+    local inputs
+    if [[ "${arch}" == riscv64 && "${RISCV_PLATFORM}" == visionfive2 ]]; then
+        name=visionfive2
+    fi
+    if ! inputs="$(rootfs_archives "${arch}" "${variant}")"; then
+        [[ "${fetch}" == yes ]] || die "Missing ${variant} rootfs input for ${name}. Run with --fetch."
+        local fetch_variant="${variant}"
+        [[ "${fetch_variant}" != auto ]] || fetch_variant=tests
+        "${REPO_ROOT}/scripts/fetch-rootfs.sh" "--${fetch_variant}" --arch "${arch}"
+        inputs="$(rootfs_archives "${arch}" "${variant}")" || die "Missing archives for ${name} after fetch"
+    fi
+    local archives=()
+    mapfile -t archives <<< "${inputs}"
 
     local tmpdir stage_dir tmp_img
-    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/pulseos-rootfs-${arch}-XXXXXX")"
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/pulseos-rootfs-${name}-XXXXXX")"
+    trap 'rm -rf "${tmpdir}"' EXIT
     stage_dir="${tmpdir}/stage"
-    tmp_img="${tmpdir}/rootfs-${arch}.img"
+    tmp_img="${tmpdir}/rootfs-${name}.img"
     mkdir -p "${stage_dir}"
 
-    cleanup_one() {
-        rm -rf "${tmpdir}"
-    }
-    trap cleanup_one RETURN
-
-    echo "[${arch}] Extracting base: ${base_tar}"
-    tar --no-same-owner -xaf "${base_tar}" -C "${stage_dir}"
+    echo "[${name}] Extracting base: ${archives[0]}"
+    tar --no-same-owner -xaf "${archives[0]}" -C "${stage_dir}"
+    if (( ${#archives[@]} == 2 )); then
+        echo "[${name}] Installing bundled test programs from: ${archives[1]}"
+        tar --no-same-owner -xaf "${archives[1]}" -C "${stage_dir}" \
+            ./opt/{lmbench,ltp,sysbench,unixbench,io_uring/liburing-tests} \
+            ./usr/bin/{lat_syscall,bw_pipe,lat_pipe,sysbench,fio} \
+            ./usr/local/bin/sysbench ./usr/local/share/sysbench
+    fi
     # Base tarballs carry restrictive modes (read-only dirs, 000 files like
     # /etc/gshadow); normalize owner rwx so patches, mkfs -d population and
     # cleanup can always access the stage. Exec bits are preserved.
@@ -191,7 +190,7 @@ build_one_arch() {
     if [[ "${arch}" == "loongarch64" ]]; then
         patch_loongarch64_musl_sched_stubs "${stage_dir}"
         ensure_loongarch64_gnu_libdir_compat "${stage_dir}"
-    else
+    elif [[ "${RISCV_PLATFORM}" == visionfive2 ]]; then
         validate_riscv_elf_isa "${stage_dir}"
     fi
 
@@ -206,11 +205,11 @@ build_one_arch() {
     fi
 
     mkdir -p "${OUTPUT_DIR}"
-    local out_img="${OUTPUT_DIR}/rootfs-${arch}.img"
-    local fs_label="${FS_LABEL_PREFIX}-${arch}"
+    local out_img="${OUTPUT_DIR}/rootfs-${name}.img"
+    local fs_label="${FS_LABEL_PREFIX}-${name}"
     fs_label="${fs_label:0:15}"
 
-    echo "[${arch}] Building ext4 image (${img_mib} MiB): ${out_img}"
+    echo "[${name}] Building ext4 image (${img_mib} MiB): ${out_img}"
     truncate -s "${img_mib}M" "${tmp_img}"
     mkfs.ext4 -q -F -O ^has_journal,^metadata_csum -L "${fs_label}" -d "${stage_dir}" "${tmp_img}"
     mv -f "${tmp_img}" "${out_img}"
@@ -219,13 +218,26 @@ build_one_arch() {
     logical_size="$(ls -lh "${out_img}" | awk '{print $5}')"
     disk_usage="$(du -h "${out_img}" | awk '{print $1}')"
 
-    echo "[${arch}] Done. logical=${logical_size}, disk=${disk_usage}"
-}
+    echo "[${name}] Done. logical=${logical_size}, disk=${disk_usage}"
+)
 
 for cmd in tar mkfs.ext4 perl mktemp truncate du awk mv; do
     have_cmd "${cmd}" || die "Missing command: ${cmd}"
 done
 
+case "${RISCV_PLATFORM}" in
+    qemu-virt|visionfive2) ;;
+    *) die "Unknown RISCV_PLATFORM '${RISCV_PLATFORM}'" ;;
+esac
+case "${ROOTFS_VARIANT:-auto}" in
+    auto|tests|base) ;;
+    *) die "Unknown ROOTFS_VARIANT '${ROOTFS_VARIANT}'" ;;
+esac
+fetch=no
+if [[ "${1:-}" == --fetch ]]; then
+    fetch=yes
+    shift
+fi
 TARGET="${1:-${ARCH:-riscv64}}"
 
 case "${TARGET}" in

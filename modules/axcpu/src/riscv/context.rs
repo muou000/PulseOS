@@ -211,6 +211,8 @@ pub struct TaskContext {
     pub asid: usize,
     #[cfg(feature = "fp-simd")]
     pub fp_state: FpState,
+    #[cfg(all(target_arch = "riscv64", feature = "uspace"))]
+    vector_state: Option<super::riscv_vector::VectorState>,
 }
 
 impl TaskContext {
@@ -227,6 +229,12 @@ impl TaskContext {
             satp: crate::asm::read_kernel_page_table(),
             ..Default::default()
         }
+    }
+
+    /// Installs the initial or inherited vector image of an unpublished user task.
+    #[cfg(all(target_arch = "riscv64", feature = "uspace"))]
+    pub fn set_user_vectors(&mut self, state: Option<super::riscv_vector::VectorState>) {
+        self.vector_state = state;
     }
 
     /// Initializes the context for a new task, with the given entry point and
@@ -278,6 +286,9 @@ impl TaskContext {
         {
             self.fp_state.switch_to(&next_ctx.fp_state);
         }
+
+        #[cfg(all(target_arch = "riscv64", feature = "uspace"))]
+        super::riscv_vector::switch(self.vector_state.as_mut(), next_ctx.vector_state.as_ref());
 
         unsafe { context_switch(self, next_ctx) }
     }

@@ -39,7 +39,7 @@
     LDR     t0, sp, 32
     LDR     t1, sp, 33
     csrw    sepc, t0                    // restore sepc
-    csrw    sstatus, t1                 // restore sstatus, except FS state (already handled in trap handler)
+    RESTORE_SSTATUS t1, t2              // restore status with the live VS field
 
     POP_GENERAL_REGS
     LDR     sp, sp, 2                   // load sp from tf.regs.sp

@@ -24,7 +24,7 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 ├── scripts                    # 构建支撑与镜像生成脚本
 │   ├── make                   # 模块化 Makefile 片段 (cargo.mk, qemu.mk 等)
 │   ├── build_img.sh           # 生成 RISC-V 64/LoongArch 64 根文件系统镜像
-│   └── fetch-rootfs.sh        # 从 GitHub Release 下载 rootfs 底包并校验
+│   └── fetch-rootfs.sh        # 下载并校验各平台的 rootfs 与测试套件
 ├── src
 │   └── main.rs                # 内核启动与初始用户进程加载
 ├── api                        # 统一功能特性接口
@@ -155,18 +155,30 @@ echo 7 > /etc/pulse-sqpoll-cpus
 
 `/etc/pulse-sqpoll-cpus` 采用相同的 CPU 列表语法，缺失或空白表示服务集合为空。服务集合必须是在线保留核的子集，配置有误时启动会在 PID 1 前报告错误。应用使用 `IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF` 并设置 `sq_thread_cpu=7` 后，该 ring 的轮询线程从第一次取 SQE 起就在 CPU 7 上运行。用户线程仍在自己的有效掩码内运行。对普通非保留 CPU 的 SQPOLL 绑核请求，目标必须在线且位于创建者的有效掩码中。删除或清空两个文件后重启，即可恢复默认配置。
 
+### 准备测试镜像
+
+| 目标 | 制盘命令 | 产物 | 用户态 |
+| --- | --- | --- | --- |
+| RISC-V QEMU virt | `make img ARCH=riscv64` | `disk.img` | Ubuntu Base 26.10，平台默认启用 RVV（`plat.user-rvv = true`） |
+| VisionFive 2 | `make img ARCH=riscv64 RISCV_PLATFORM=visionfive2` | `disk-vf2.img` | **VisionFive 2 使用（RV64GC，无 RVV）**，Ubuntu 24.04.5 LTS（`plat.user-rvv = false`） |
+| LoongArch64 QEMU virt | `make img ARCH=loongarch64` | `disk-la.img` | Loongnix-Server 8 |
+
+QEMU virt 的默认启动参数为 `-cpu max`。内核确认所有可调度 hart 均提供 V 后，才向用户态报告并启用 RVV。VisionFive 2 的 U74 核使用 RV64GC。
+
+RISC-V QEMU 测试镜像使用 Ubuntu 官方的 `ubuntu-base-26.10-base-riscv64.tar.gz`。lmbench、LTP、sysbench、UnixBench、fio 和 liburing 测试程序取自 PulseOS 发布的 `rootfs-tests-riscv64.tar.xz`。VisionFive 2 直接使用这份完整的测试包。两份归档均可缓存在 `rootfs/base/`，分别用 `./scripts/fetch-rootfs.sh --arch riscv64` 和 `RISCV_PLATFORM=visionfive2 ./scripts/fetch-rootfs.sh --arch riscv64` 下载并校验。[Ubuntu Base 26.10](https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release/) · [PulseOS 测试制品及校验和](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261120)
+
 ### 运行测试 (QEMU)
 
 #### RISC-V 64
 
 ```bash
-qemu-system-riscv64 -machine virt -kernel kernel-rv -m 8G -nographic -smp 8 -bios default -drive file=disk.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
+qemu-system-riscv64 -machine virt -cpu max -kernel kernel-rv -m 8G -nographic -smp 8 -bios default -drive file=disk.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
 ```
 
 #### LoongArch64
 
 ```bash
-qemu-system-loongarch64 -machine virt -kernel kernel-la -m 8G -nographic -smp 8 -drive file=disk.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
+qemu-system-loongarch64 -machine virt -kernel kernel-la -m 8G -nographic -smp 8 -drive file=disk-la.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
 ```
 
 ## 注

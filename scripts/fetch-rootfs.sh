@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Download the PulseOS rootfs tarballs from GitHub Releases (or upstream Alpine
-# for the minimal RISC-V base variant). Existing files are checksum-verified.
+# Fetch checksum-pinned rootfs archives and test suites for the target platform.
 # Usage: scripts/fetch-rootfs.sh [--tests|--base] [--arch all|riscv64|loongarch64]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="${REPO_ROOT}/rootfs/base"
 mkdir -p "${BASE_DIR}"
+source "${REPO_ROOT}/scripts/rootfs-riscv64.sh"
 
 REPO="muou000/PulseOS"
 BASE_TAG="rootfs-base-20260929"
@@ -15,6 +15,7 @@ BASE_URL="https://github.com/${REPO}/releases/download/${BASE_TAG}"
 TESTS_URL="https://github.com/${REPO}/releases/download/${TESTS_TAG}"
 ALPINE_BASE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/riscv64"
 
+RISCV_PLATFORM="${RISCV_PLATFORM:-qemu-virt}"
 VARIANT="${ROOTFS_VARIANT:-tests}"
 ARCH_FILTER="${ARCH_FILTER:-all}"
 
@@ -31,6 +32,7 @@ Options:
   -h, --help       Show this help message.
 
 Env:
+  RISCV_PLATFORM   riscv64 platform: qemu-virt (Ubuntu 26.10) or visionfive2 (RV64GC)
   ROOTFS_VARIANT   Same as --tests / --base (tests or base; default: tests)
   ARCH_FILTER      Same as --arch (all, riscv64, loongarch64; default: all)
 EOF
@@ -79,23 +81,38 @@ case "${ARCH_FILTER}" in
         ;;
 esac
 
-fetch_one() {
+case "${RISCV_PLATFORM}" in
+    qemu-virt|visionfive2) ;;
+    *) echo "Error: unknown RISCV_PLATFORM '${RISCV_PLATFORM}'" >&2; exit 1 ;;
+esac
+
+fetch_one() (
     local asset="$1" out="$2" sum="$3" base_url="$4"
-    if [[ -f "${BASE_DIR}/${out}" ]]; then
-        echo "${out} already present, verifying checksum"
-    else
-        echo "Downloading ${asset} -> rootfs/base/${out}"
-        curl -fL --retry 3 -o "${BASE_DIR}/${out}.tmp" "${base_url}/${asset}"
-        mv -f "${BASE_DIR}/${out}.tmp" "${BASE_DIR}/${out}"
+    if verified_archive "${sum}" "${BASE_DIR}/${out}" >/dev/null; then
+        echo "Verified ${out}"
+        return
     fi
-    echo "${sum}  ${BASE_DIR}/${out}" | sha256sum -c -
-}
+    echo "Downloading ${asset} -> rootfs/base/${out}"
+    local tmp
+    tmp="$(mktemp "${BASE_DIR}/${out}.XXXXXX")"
+    trap 'rm -f "${tmp}"' EXIT
+    curl -fL --retry 3 -o "${tmp}" "${base_url}/${asset}"
+    echo "${sum}  ${tmp}" | sha256sum -c -
+    mv -f "${tmp}" "${BASE_DIR}/${out}"
+)
+
+if [[ "${ARCH_FILTER}" != loongarch64 && "${RISCV_PLATFORM}" == qemu-virt ]]; then
+    fetch_one "${rv_ubuntu}" "${rv_ubuntu}" "${rv_ubuntu_sha}" \
+        "https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release"
+fi
 
 if [[ "${VARIANT}" == "tests" ]]; then
     if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "riscv64" ]]; then
-        fetch_one "rootfs-tests-riscv64.tar.xz" "rootfs-tests-riscv64.tar.xz" \
-            "1a95dc30d246a71e6d8a79d52d75e4942c6a958687ca289c7067ead258066285" \
-            "${TESTS_URL}"
+        if cached="$(riscv_test_archive)"; then
+            echo "Verified ${cached}"
+        else
+            fetch_one "${rv_tests_asset}" "${rv_tests_cache}" "${rv_tests_sha}" "${TESTS_URL}"
+        fi
     fi
     if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "loongarch64" ]]; then
         fetch_one "rootfs-tests-loongarch64.tar.xz" "rootfs-tests-loongarch64.tar.xz" \
@@ -103,9 +120,7 @@ if [[ "${VARIANT}" == "tests" ]]; then
             "${TESTS_URL}"
     fi
 else
-    # PulseOS targets riscv64gc-unknown-none-elf and does not save RVV state.
-    # Use a minimal userland built for RV64GC.
-    if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "riscv64" ]]; then
+    if [[ "${ARCH_FILTER}" != loongarch64 && "${RISCV_PLATFORM}" == visionfive2 ]]; then
         fetch_one "alpine-minirootfs-3.23.3-riscv64.tar.gz" "alpine-minirootfs-riscv64.tar.gz" \
             "eee00ce9bb795e372d054b059e61c3f2586089227454561c2e0f2fa0454e04c5" \
             "${ALPINE_BASE_URL}"

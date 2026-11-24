@@ -22,7 +22,7 @@ impl Process {
         let new_aspace = clone_result.complete_after_unlock()?;
         let _guard = NoPreemptIrqSave::new();
 
-        let inner = TaskInner::try_new(
+        let inner = task::try_new_user_task(
             move || {
                 let thread = task::current_thread().expect("fork child without Thread context");
                 if let Err(e) = thread.prepare_for_user_entry() {
@@ -93,7 +93,7 @@ impl Process {
             child_uctx.set_sp(sp);
         }
 
-        let inner = TaskInner::try_new(
+        let inner = task::try_new_user_task(
             move || {
                 let thread = task::current_thread().expect("clone child without Thread context");
                 if let Err(e) = thread.prepare_for_user_entry() {

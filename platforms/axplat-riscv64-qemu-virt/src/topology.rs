@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use fdt_raw::{Fdt, Header, Node};
 
 use crate::{
-    config::plat::{MAX_CPU_NUM, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE},
+    config::plat::{MAX_CPU_NUM, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, USER_RVV},
     cpu_topology::CpuTopology,
 };
 
@@ -42,6 +42,13 @@ pub(super) fn init_platform_from_dtb(dtb_paddr: usize) {
     };
 
     crate::mem::init_from_fdt(&fdt, dtb_paddr);
+    if USER_RVV && all_harts_have_vector(&fdt) {
+        // SAFETY: the QEMU CPU model describes every schedulable hart as V-capable.
+        // Firmware enters primary boot in S-mode with interrupts masked, before
+        // secondary startup and user task creation.
+        // Each secondary verifies its hardware width before joining the scheduler.
+        unsafe { axcpu::riscv_vector::initialize() };
+    }
     if !parse_plic_topology(&fdt) {
         warn!("incomplete PLIC topology in DTB; using legacy QEMU virt context mapping");
         publish_legacy_plic_topology();
@@ -120,6 +127,31 @@ fn parse_cpu_topology(boot_hart_id: usize, dtb_paddr: usize) -> Option<CpuTopolo
         }
     }
     Some(topology)
+}
+
+/// User tasks can migrate between any of the harts in the published topology.
+fn all_harts_have_vector(fdt: &Fdt<'_>) -> bool {
+    let mut supported = [false; MAX_CPU_NUM];
+    for node in fdt.find_children_by_path("/cpus").filter(is_available_cpu) {
+        let Some(cpu) = cpu_hart_id(&node).and_then(try_logical_cpu_id) else {
+            continue;
+        };
+        supported[cpu] = match node.find_property("riscv,isa-extensions") {
+            Some(extensions) => extensions.as_str_iter().any(|ext| ext == "v"),
+            // Older QEMU versions list single-letter extensions together before
+            // the first underscore. Multi-letter extensions such as zv* are distinct.
+            None => node
+                .find_property_str("riscv,isa")
+                .and_then(|isa| isa.strip_prefix("rv64"))
+                .and_then(|isa| isa.split('_').next())
+                .is_some_and(|base| {
+                    base.bytes()
+                        .take_while(|b| !matches!(b, b'x' | b's' | b'z'))
+                        .any(|b| b == b'v')
+                }),
+        };
+    }
+    supported[..cpu_count()].iter().all(|&has_v| has_v)
 }
 
 fn parse_plic_topology(fdt: &Fdt<'_>) -> bool {

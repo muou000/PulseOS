@@ -51,6 +51,12 @@ const RISCV_HWCAP_ISA_IMAFDC: usize = (1 << 0) // A
     | (1 << 8) // I
     | (1 << 12); // M
 
+#[cfg(target_arch = "riscv64")]
+const fn riscv_hwcap(vector: bool) -> usize {
+    const ISA_V: usize = 1 << (b'V' - b'A');
+    RISCV_HWCAP_ISA_IMAFDC | if vector { ISA_V } else { 0 }
+}
+
 struct CachedElfImage {
     prefix: Vec<u8>,
     file: CachedFile,
@@ -615,7 +621,10 @@ fn build_auxv(
         auxv.push(AuxEntry::new(AuxType::HWCAP, loongarch_hwcap(cpucfg1)));
     }
     #[cfg(target_arch = "riscv64")]
-    auxv.push(AuxEntry::new(AuxType::HWCAP, RISCV_HWCAP_ISA_IMAFDC));
+    {
+        let vector = axcpu::riscv_vector::vlenb() != 0;
+        auxv.push(AuxEntry::new(AuxType::HWCAP, riscv_hwcap(vector)));
+    }
     append_process_auxv(&mut auxv, credentials);
     Ok(auxv)
 }
@@ -1080,9 +1089,9 @@ mod tests {
 
     #[cfg(target_arch = "riscv64")]
     #[test]
-    fn riscv_hardware_capabilities_match_the_rv64gc_kernel_contract() {
-        assert_eq!(RISCV_HWCAP_ISA_IMAFDC, 0x112d);
-        assert_eq!(RISCV_HWCAP_ISA_IMAFDC & (1 << 21), 0);
+    fn riscv_hwcap_reflects_user_vector_support() {
+        assert_eq!(riscv_hwcap(false), 0x112d);
+        assert_eq!(riscv_hwcap(true), 0x20112d);
     }
 
     #[test]

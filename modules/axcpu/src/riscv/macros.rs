@@ -152,6 +152,16 @@ macro_rules! include_asm_macros {
             .ifndef REGS_MACROS_FLAG
             .equ REGS_MACROS_FLAG, 1
 
+            // A trap may have slept and resumed through a task switch. The
+            // live VS bits describe the register file installed by the scheduler.
+            .macro RESTORE_SSTATUS, saved, tmp
+                csrr \tmp, sstatus
+                xor \tmp, \tmp, \saved
+                andi \tmp, \tmp, 0x600
+                xor \saved, \saved, \tmp
+                csrw sstatus, \saved
+            .endm
+
             .macro PUSH_POP_GENERAL_REGS, op
                 \op ra, sp, 1
                 \op t0, sp, 5

@@ -58,9 +58,7 @@ fn main() {
 
     const SHELL_ELF_PATH: &str = "/bin/sh";
 
-    use axtask::TaskInner;
-
-    let inner = TaskInner::new(
+    let inner = pulse_core::task::try_new_user_task(
         || {
             let thread =
                 pulse_core::task::current_thread().expect("init task entered without Thread");
@@ -126,7 +124,7 @@ fn main() {
         },
         "pulse_init".into(),
         0x8000,
-    );
+    ).expect("allocate init task context");
 
     // Linux reserves PID/TID 1 for init. Kernel tasks have already consumed
     // scheduler IDs, which remain independent of this userspace identity.

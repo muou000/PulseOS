@@ -106,7 +106,7 @@ def main():
     folder=BASE/'runs';folder.mkdir(exist_ok=True)
     output=Path(tempfile.mkdtemp(prefix=a.label+'-',dir=folder))
     command=[qemu,'-machine','virt','-kernel',str(kernel),'-m','8G','-nographic','-smp','8']
-    if a.arch=='riscv64':command+=['-bios','default']
+    if a.arch=='riscv64':command+=['-cpu','max','-bios','default']
     command+=['-drive',f'file={image},if=none,format=raw,id=x0,snapshot=on']
     if a.arch=='riscv64':command+=['-device','virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0','-no-reboot','-device','virtio-net-device,netdev=net','-netdev','user,id=net']
     else:command+=['-device','virtio-blk-pci,drive=x0','-no-reboot','-device','virtio-net-pci,netdev=net0','-netdev','user,id=net0']

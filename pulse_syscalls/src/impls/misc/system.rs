@@ -619,16 +619,13 @@ pub fn sys_riscv_hwprobe(
     }
 
     let res = pulse_core::task::with_current_process(|process| {
-        let mut cpu_0_included = true;
+        let mut selected_cpus = axhal::online_cpu_mask();
         if cpus_addr != 0 && cpusetsize != 0 {
-            let mut first_byte = 0u8;
-            if process
-                .read_user_bytes(cpus_addr, core::slice::from_mut(&mut first_byte))
-                .is_err()
-            {
-                return Err(axerrno::AxError::BadAddress);
-            }
-            cpu_0_included = (first_byte & 1) != 0;
+            let mut mask = [0u8; size_of::<usize>()];
+            let len = mask.len().min(cpusetsize);
+            process.read_user_bytes(cpus_addr, &mut mask[..len])
+                .map_err(|_| axerrno::AxError::BadAddress)?;
+            selected_cpus &= usize::from_le_bytes(mask);
         }
 
         let mut pairs =
@@ -649,13 +646,14 @@ pub fn sys_riscv_hwprobe(
 
         const RISCV_HWPROBE_IMA_FD: u64 = 1 << 0;
         const RISCV_HWPROBE_IMA_C: u64 = 1 << 1;
+        const RISCV_HWPROBE_IMA_V: u64 = 1 << 2;
 
         let mvendorid = sbi_rt::get_mvendorid() as u64;
         let marchid = sbi_rt::get_marchid() as u64;
         let mimpid = sbi_rt::get_mimpid() as u64;
 
         for pair in pairs.iter_mut() {
-            if !cpu_0_included {
+            if selected_cpus == 0 {
                 match pair.key {
                     RISCV_HWPROBE_KEY_MVENDORID
                     | RISCV_HWPROBE_KEY_MARCHID
@@ -691,6 +689,9 @@ pub fn sys_riscv_hwprobe(
                 }
                 RISCV_HWPROBE_KEY_IMA_EXT_0 => {
                     pair.value = RISCV_HWPROBE_IMA_FD | RISCV_HWPROBE_IMA_C;
+                    if axcpu::riscv_vector::vlenb() != 0 {
+                        pair.value |= RISCV_HWPROBE_IMA_V;
+                    }
                 }
                 RISCV_HWPROBE_KEY_CPUPERF_0 => {
                     pair.value = 0;

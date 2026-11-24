@@ -49,7 +49,7 @@ def qemu_command(arch, kernel, image):
     command = ["qemu-system-" + arch, "-machine", "virt", "-kernel", str(kernel),
                "-m", "8G", "-nographic", "-smp", "8"]
     if arch == "riscv64":
-        command += ["-bios", "default"]
+        command += ["-cpu", "max", "-bios", "default"]
     command += ["-drive", f"file={image},if=none,format=raw,id=x0,snapshot=on"]
     if arch == "riscv64":
         command += ["-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0", "-no-reboot",

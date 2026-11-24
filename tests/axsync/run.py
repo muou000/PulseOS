@@ -29,7 +29,7 @@ def main():
     command = [qemu, "-machine", "virt", "-kernel", str(kernel), "-m", "8G",
                "-nographic", "-smp", "8"]
     if args.arch == "riscv64":
-        command += ["-bios", "default"]
+        command += ["-cpu", "max", "-bios", "default"]
     command += ["-drive", "file=disk.img,if=none,format=raw,id=x0,snapshot=on"]
     if args.arch == "riscv64":
         command += ["-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",

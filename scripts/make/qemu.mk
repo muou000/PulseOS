@@ -35,6 +35,7 @@ qemu_args-x86_64 := \
   -kernel $(OUT_ELF)
 
 qemu_args-riscv64 := \
+  -cpu max \
   -machine $(machine) \
   -bios default \
   -kernel $(FINAL_IMG)

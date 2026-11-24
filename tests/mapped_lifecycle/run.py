@@ -345,7 +345,7 @@ def qemu_command(arch: str, qemu: str, kernel: Path,
     argv = [qemu, "-machine", "virt", "-kernel", str(kernel), "-m", "8G",
             "-nographic", "-smp", "8"]
     if arch == "riscv64":
-        argv += ["-bios", "default"]
+        argv += ["-cpu", "max", "-bios", "default"]
     argv += ["-drive", f"file={primary},if=none,format=raw,id=x0,snapshot=on"]
     if arch == "riscv64":
         argv += ["-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",

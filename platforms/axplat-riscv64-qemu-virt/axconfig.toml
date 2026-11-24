@@ -9,6 +9,8 @@ package = "axplat-riscv64-qemu-virt"            # str
 # Platform configs
 #
 [plat]
+# Enable user RVV when all schedulable harts advertise V.
+user-rvv = true # bool
 # Maximum number of CPUs. For platforms that do not support runtime CPU number
 # detection, it's also the number of CPUs to boot.
 max-cpu-num = 8                     # uint

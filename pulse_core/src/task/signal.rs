@@ -163,6 +163,13 @@ struct SavedSignalContext {
     fp: SignalFpState,
 }
 
+/// Kernel-owned state associated with one nested user signal frame.
+struct SavedSignalFrame {
+    context: SavedSignalContext,
+    #[cfg(target_arch = "riscv64")]
+    vectors: Option<axcpu::riscv_vector::VectorState>,
+}
+
 /// The Linux limit is a per-real-UID count, while each queued record keeps the
 /// UID it charged. Keeping the UID in the record means a later credential
 /// change cannot release the wrong account.
@@ -872,7 +879,7 @@ pub struct ThreadSignal {
     in_handler: AtomicBool,
     skip_once: AtomicBool,
     signal_wait: WaitQueue,
-    saved_ctx: Mutex<Vec<SavedSignalContext>>,
+    saved_ctx: Mutex<Vec<SavedSignalFrame>>,
     altstack: Mutex<SignalAltStack>,
     sigsuspend_restore: Mutex<Option<u64>>,
 }
@@ -1130,7 +1137,7 @@ impl ThreadSignal {
     pub fn restore_from_sigreturn(&self, process: &Process, tf: &mut TrapFrame) -> AxResult<usize> {
         let saved = {
             let frames = self.saved_ctx.lock();
-            *frames.last().ok_or(AxError::InvalidInput)?
+            frames.last().ok_or(AxError::InvalidInput)?.context
         };
         let (restored_tf, restored_mask, restored_altstack) =
             restore_user_signal_context(process, saved)?;
@@ -1139,11 +1146,17 @@ impl ThreadSignal {
         // Do not consume the frame until all user reads and address validation
         // have succeeded.  In particular, an invalid inner frame must not make
         // its outer handler frame unrecoverable.
-        let still_in_handler = {
+        let (frame, still_in_handler) = {
             let mut frames = self.saved_ctx.lock();
-            frames.pop().ok_or(AxError::InvalidInput)?;
-            !frames.is_empty()
+            let frame = frames.pop().ok_or(AxError::InvalidInput)?;
+            (frame, !frames.is_empty())
         };
+        #[cfg(target_arch = "riscv64")]
+        if let Some(vectors) = frame.vectors {
+            vectors.restore_after_signal();
+        }
+        #[cfg(not(target_arch = "riscv64"))]
+        let _ = frame;
 
         *tf = restored_tf;
         restore_signal_fp_state(&restored_fp);
@@ -1216,13 +1229,15 @@ impl ThreadSignal {
         old_mask: u64,
         user_ucontext: Option<usize>,
         fp: SignalFpState,
-    ) {
-        self.saved_ctx.lock().push(SavedSignalContext {
-            tf: *tf,
-            old_mask,
-            user_ucontext,
-            fp,
+    ) -> AxResult<()> {
+        #[cfg(target_arch = "riscv64")]
+        let vectors = axcpu::riscv_vector::VectorState::capture().map_err(|_| AxError::NoMemory)?;
+        self.saved_ctx.lock().push(SavedSignalFrame {
+            context: SavedSignalContext { tf: *tf, old_mask, user_ucontext, fp },
+            #[cfg(target_arch = "riscv64")]
+            vectors,
         });
+        Ok(())
     }
 }
 
@@ -2747,9 +2762,13 @@ pub fn check_signals_and_deliver(thread: &Thread, tf: &mut TrapFrame) -> Option<
             }
             new_mask = sanitize_mask(new_mask);
             let fp = capture_signal_fp_state();
-            match write_user_signal_frame(thread, tf, restore_mask, Some(siginfo), act.flags, &fp) {
+            let frame = write_user_signal_frame(thread, tf, restore_mask, Some(siginfo), act.flags, &fp)
+                .and_then(|(siginfo, ucontext, altstack)| {
+                    sig_state.save_context(tf, restore_mask, Some(ucontext), fp)?;
+                    Ok((siginfo, ucontext, altstack))
+                });
+            match frame {
                 Ok((siginfo_addr, ucontext_addr, used_altstack)) => {
-                    sig_state.save_context(tf, restore_mask, Some(ucontext_addr), fp);
                     if used_altstack {
                         sig_state.enter_altstack();
                     }
