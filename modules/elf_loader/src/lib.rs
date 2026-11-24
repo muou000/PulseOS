@@ -17,9 +17,9 @@ use config::user::{
     USER_HEAP_BASE, USER_SPACE_BASE, USER_SPACE_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
 };
 use axerrno::{AxError, AxResult};
-use axfs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
+use fs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
 use hal::{mem::MemRegionFlags, paging::MappingFlags};
-use axmm::{AddrSpace, FileMappingSource};
+use mm::{AddrSpace, FileMappingSource};
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser};
 use linux_raw_sys::elf_uapi::{EM_LOONGARCH, PT_GNU_STACK};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
@@ -326,28 +326,28 @@ fn resolve_page_fault(
     flags: hal::trap::PageFaultFlags,
 ) -> AxResult<bool> {
     let initial = aspace.handle_page_fault(page, flags);
-    axmm::drive_page_fault(initial, |work| match work {
-        axmm::PageFaultWork::Retry => aspace.handle_page_fault(page, flags),
-        axmm::PageFaultWork::Completion(wait) => {
+    mm::drive_page_fault(initial, |work| match work {
+        mm::PageFaultWork::Retry => aspace.handle_page_fault(page, flags),
+        mm::PageFaultWork::Completion(wait) => {
             while wait.is_pending() {
                 task::yield_now();
             }
             if wait.result().is_err() {
-                axmm::PageFaultResult::Handled(false)
+                mm::PageFaultResult::Handled(false)
             } else {
                 aspace.handle_page_fault(page, flags)
             }
         }
-        axmm::PageFaultWork::File(prepared) => {
+        mm::PageFaultWork::File(prepared) => {
             aspace.handle_prepared_file_page(page, flags, prepared)
         }
-        axmm::PageFaultWork::Anon(prepared) => {
+        mm::PageFaultWork::Anon(prepared) => {
             aspace.handle_prepared_anon_page(page, flags, prepared)
         }
-        axmm::PageFaultWork::Cow(prepared) => {
+        mm::PageFaultWork::Cow(prepared) => {
             aspace.handle_prepared_cow_page(page, flags, prepared)
         }
-        axmm::PageFaultWork::WriteLock => aspace.handle_page_fault_write(page, flags),
+        mm::PageFaultWork::WriteLock => aspace.handle_page_fault_write(page, flags),
     })
 }
 
@@ -793,17 +793,17 @@ fn build_initial_stack(
 
 fn read_at_random() -> [u8; AT_RANDOM_BYTES] {
     let mut random = [0; AT_RANDOM_BYTES];
-    axfs::fill_random_bytes(&mut random);
+    fs::fill_random_bytes(&mut random);
     random
 }
 
-fn same_file(left: &axfs_ng_vfs::Location, right: &axfs_ng_vfs::Location) -> bool {
-    let left_fs = left.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const ();
-    let right_fs = right.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const ();
+fn same_file(left: &vfs::Location, right: &vfs::Location) -> bool {
+    let left_fs = left.filesystem() as *const dyn vfs::FilesystemOps as *const ();
+    let right_fs = right.filesystem() as *const dyn vfs::FilesystemOps as *const ();
     left_fs == right_fs && left.inode() == right.inode()
 }
 
-fn get_from_cache(path: &str, location: &axfs_ng_vfs::Location) -> Option<Arc<CachedElfImage>> {
+fn get_from_cache(path: &str, location: &vfs::Location) -> Option<Arc<CachedElfImage>> {
     ELF_FILE_CACHE
         .lock()
         .iter()
@@ -862,7 +862,7 @@ fn put_into_cache(path: &str, data: Arc<CachedElfImage>) {
 }
 
 fn read_prefix(file: &CachedFile, limit: usize) -> AxResult<Vec<u8>> {
-    let size = axfs::cached_file_size(file.location()).map_err(|_| AxError::NotFound)?;
+    let size = fs::cached_file_size(file.location()).map_err(|_| AxError::NotFound)?;
     let read_len = usize::try_from(size.min(limit as u64)).map_err(|_| AxError::OutOfRange)?;
     let mut prefix = vec![0u8; read_len];
     let read = file
@@ -872,7 +872,7 @@ fn read_prefix(file: &CachedFile, limit: usize) -> AxResult<Vec<u8>> {
     Ok(prefix)
 }
 
-fn read_elf_file_at(path: &str, location: axfs_ng_vfs::Location) -> AxResult<Arc<CachedElfImage>> {
+fn read_elf_file_at(path: &str, location: vfs::Location) -> AxResult<Arc<CachedElfImage>> {
     if let Some(image) = get_from_cache(path, &location) {
         if validate_cached_image(path, &image) {
             return Ok(image);
@@ -903,7 +903,7 @@ fn read_elf_file_at(path: &str, location: axfs_ng_vfs::Location) -> AxResult<Arc
 
 fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
     let fs_ctx = {
-        let guard = axfs::FS_CONTEXT.lock();
+        let guard = fs::FS_CONTEXT.lock();
         guard.clone()
     };
     let location = task::future::block_on(fs_ctx.resolve(path)).map_err(|_| AxError::NotFound)?;
@@ -937,7 +937,7 @@ pub fn check_elf_header(path: &str) -> AxResult<()> {
 
 /// Creates an empty user address space with the initial stack reserved.
 pub fn new_user_aspace() -> AxResult<AddrSpace> {
-    let mut aspace = axmm::new_user_aspace(VirtAddr::from(USER_SPACE_BASE), USER_SPACE_SIZE)?;
+    let mut aspace = mm::new_user_aspace(VirtAddr::from(USER_SPACE_BASE), USER_SPACE_SIZE)?;
     aspace.map_alloc(
         VirtAddr::from(USER_STACK_TOP - USER_STACK_SIZE),
         USER_STACK_SIZE,
@@ -949,7 +949,7 @@ pub fn new_user_aspace() -> AxResult<AddrSpace> {
 
 /// The resolved executable and the arguments to publish on its initial stack.
 pub struct ExecImageInput<'a> {
-    pub location: axfs_ng_vfs::Location,
+    pub location: vfs::Location,
     pub exec_access: ExecAccessGuard,
     pub path: &'a str,
     /// Original pathname passed to exec, including when a shebang redirected it.
@@ -1011,7 +1011,7 @@ pub fn load_user_app(
 
     if let Some(interp_path) = interp_path {
         let interp_location = task::future::block_on(fs.resolve(&interp_path))?;
-        let interp_exec_access = axfs::acquire_exec_access(&interp_location)?;
+        let interp_exec_access = fs::acquire_exec_access(&interp_location)?;
         let interp_image = read_elf_file_at(&interp_path, interp_location)?;
         exec_access.push(interp_exec_access);
         let interp_data = interp_image.bytes();

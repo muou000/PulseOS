@@ -2,7 +2,7 @@
 extern crate alloc;
 
 #[cfg(test)]
-#[path = "../../../modules/axfs/src/highlevel/file/position.rs"]
+#[path = "../../../modules/fs/src/highlevel/file/position.rs"]
 mod position;
 
 #[cfg(test)]

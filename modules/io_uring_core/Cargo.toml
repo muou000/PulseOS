@@ -1,0 +1,14 @@
+[package]
+name = "io_uring_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core state machine and ring protocol for PulseOS io_uring"
+
+[dependencies]
+axerrno.workspace = true
+poll.workspace = true
+linux-raw-sys = { workspace = true, features = ["general", "net", "io_uring"] }
+pulse_user_abi.workspace = true

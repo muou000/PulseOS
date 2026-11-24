@@ -1,6 +1,6 @@
 use axerrno::LinuxError;
-use axfs::FsContext;
-use axfs_ng_vfs::Location;
+use fs::FsContext;
+use vfs::Location;
 use linux_raw_sys::general::*;
 
 use crate::impls::utils::with_process;

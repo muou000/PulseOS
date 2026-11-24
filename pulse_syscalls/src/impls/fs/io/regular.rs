@@ -50,7 +50,7 @@ fn execute(
         if file.inner().is_direct_regular_file() {
             let position = match offset {
                 Some(position) => position,
-                None => match file.seek(axio::SeekFrom::Current(0)) {
+                None => match file.seek(io::SeekFrom::Current(0)) {
                     Ok(position) => position,
                     Err(error) => return -(error.code() as isize),
                 },

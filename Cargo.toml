@@ -28,15 +28,15 @@ members = [
     "modules/axdriver_net",
     "modules/axdriver_pci",
     "modules/axdriver_virtio",
-    "modules/axfs",
-    "modules/axfs-ng-vfs",
+    "modules/fs",
+    "modules/vfs",
     "modules/hal",
-    "modules/axio",
+    "modules/io",
     "modules/ipi",
     "modules/kernel_log",
-    "modules/axmm",
-    "modules/axnet",
-    "modules/axpoll",
+    "modules/mm",
+    "modules/net",
+    "modules/poll",
     "modules/runtime",
     "modules/sched",
     "modules/sync",
@@ -47,7 +47,7 @@ members = [
     "modules/process",
     "api/axfeat",
     "platforms/axplat",
-    "modules/pulse_io_uring_core",
+    "modules/io_uring_core",
 ]
 
 [workspace.package]
@@ -70,7 +70,7 @@ pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }
 pulse_bpf_schema = { path = "crates/pulse_bpf_schema" }
 pulse_user_abi = { path = "crates/pulse_user_abi" }
-pulse_io_uring_core = { path = "modules/pulse_io_uring_core" }
+io_uring_core = { path = "modules/io_uring_core" }
 bpf-capture = { path = "crates/bpf-capture" }
 bpf-analyzer = { path = "crates/bpf-analyzer" }
 
@@ -89,17 +89,17 @@ config = { path = "modules/config" }
 hal = { path = "modules/hal", features = ["uspace", "fp-simd"] }
 kernel_log = { path = "modules/kernel_log" }
 runtime = { path = "modules/runtime" }
-axnet = { path = "modules/axnet", features = ["monolithic"] }
+net = { path = "modules/net", features = ["monolithic"] }
 kernel_alloc = { path = "modules/kernel_alloc", default-features = false }
 task = { path = "modules/task" }
 sync = { path = "modules/sync" }
-axfs = { path = "modules/axfs", features = ["times"] }
-axmm = { path = "modules/axmm" }
+fs = { path = "modules/fs", features = ["times"] }
+mm = { path = "modules/mm" }
 axdisplay = { path = "modules/axdisplay" }
 axdriver = { path = "modules/axdriver" }
 ipi = { path = "modules/ipi" }
 axerrno = "0.2"
-axpoll = { path = "modules/axpoll" }
+poll = { path = "modules/poll" }
 
 axdriver_base = { path = "modules/axdriver_base" }
 axdriver_block = { path = "modules/axdriver_block" }
@@ -125,10 +125,10 @@ linux-raw-sys = { version = "0.12", default-features = false, features = [
     "loop_device",
     "io_uring",
 ] }
-axio = { path = "modules/axio", default-features = false, features = [
+io = { path = "modules/io", default-features = false, features = [
     "alloc",
 ] }
-axfs-ng-vfs = { path = "modules/axfs-ng-vfs" }
+vfs = { path = "modules/vfs" }
 linkme = "0.3"
 memory_addr = "0.4"
 memory_set = "0.4"
@@ -189,14 +189,11 @@ lto = true
 [patch.crates-io]
 memory_set = { path = "crates/memory_set" }
 memory_addr = { path = "crates/memory_addr" }
-axfs-ng-vfs = { path = "modules/axfs-ng-vfs" }
 axcpu = { path = "crates/compat/axcpu" }
 axplat-loongarch64-qemu-virt = { path = "platforms/axplat-loongarch64-qemu-virt" }
 axplat-loongarch64-ls2k1000 = { path = "platforms/axplat-loongarch64-ls2k1000" }
 axplat-riscv64-qemu-virt = { path = "platforms/axplat-riscv64-qemu-virt" }
 axplat-riscv64-visionfive2 = { path = "platforms/axplat-riscv64-visionfive2" }
-axio = { path = "modules/axio" }
-axpoll = { path = "modules/axpoll" }
 virtio-drivers = { path = "crates/virtio-drivers" }
 page_table_multiarch = { path = "crates/page_table_multiarch" }
 axplat = { path = "platforms/axplat" }
@@ -263,11 +260,11 @@ axerrno.workspace = true
 hal.workspace = true
 kernel_log.workspace = true
 runtime = { workspace = true, features = ["pcp-boot-checks"] }
-axfs.workspace = true
+fs.workspace = true
 axfeat.workspace = true
 task.workspace = true
 sync.workspace = true
-axnet.workspace = true
+net.workspace = true
 pulse_syscalls.workspace = true
 pulse_core.workspace = true
 starry-vdso.workspace = true

@@ -5,7 +5,7 @@ use core::time::Duration;
 use axerrno::LinuxError;
 use linux_raw_sys::io_uring::{__kernel_timespec, io_uring_getevents_arg};
 
-use pulse_io_uring_core::whitelist::validate_enter_flags;
+use io_uring_core::whitelist::validate_enter_flags;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EnterArgKind {

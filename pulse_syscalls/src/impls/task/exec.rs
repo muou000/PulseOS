@@ -117,7 +117,7 @@ pub fn sys_execveat(
     };
 
     if (flags & linux_raw_sys::general::AT_SYMLINK_NOFOLLOW as i32) != 0
-        && metadata.node_type == axfs_ng_vfs::NodeType::Symlink
+        && metadata.node_type == vfs::NodeType::Symlink
     {
         return -LinuxError::ELOOP.code() as isize;
     }

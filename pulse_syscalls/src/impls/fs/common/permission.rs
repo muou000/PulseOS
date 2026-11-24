@@ -1,5 +1,5 @@
 use axerrno::LinuxError;
-use axfs_ng_vfs::{Location, Metadata, NodePermission, NodeType};
+use vfs::{Location, Metadata, NodePermission, NodeType};
 use linux_raw_sys::general::*;
 
 pub(crate) fn permission_mask_from_bits(

@@ -16,9 +16,9 @@
 | 热路径开销 | 无订阅时只走订阅检查，不读取观察时钟、不分配、不入队。有订阅时保存标量，resolver 返回后向既有有界队列复制 80 字节；worker 执行 BPF。实际开销仍须 baseline/loaded-detached/attached 实测。 |
 | kmalloc/vmalloc | 不在此事件/第一阶段范围内。缺页 resolver 墙钟不是分配器延迟，不为统一工具而混用指标。 |
 
-现有 trap 有真实 `is_user`、VA 和 access flags；`Process::handle_page_fault` 委托 `AddressSpaceLock::resolve_page_fault`，最终只返回 `AxResult<bool>`。driver 可经历 file/anon/COW 准备、completion 等待、重新提交与 TLB completion；这些来源没有通过最终 bool 返回为 Linux major/minor 分类。[trap](../../modules/process/src/trap.rs)、[process resolver](../../modules/process/src/lifecycle/runtime.rs)、[address-space coordinator](../../modules/process/src/aspace_lock.rs)、[fault driver](../../modules/axmm/src/aspace.rs)。
+现有 trap 有真实 `is_user`、VA 和 access flags；`Process::handle_page_fault` 委托 `AddressSpaceLock::resolve_page_fault`，最终只返回 `AxResult<bool>`。driver 可经历 file/anon/COW 准备、completion 等待、重新提交与 TLB completion；这些来源没有通过最终 bool 返回为 Linux major/minor 分类。[trap](../../modules/process/src/trap.rs)、[process resolver](../../modules/process/src/lifecycle/runtime.rs)、[address-space coordinator](../../modules/process/src/aspace_lock.rs)、[fault driver](../../modules/mm/src/aspace.rs)。
 
-Linux v6.12 的 `VM_FAULT_MAJOR` 指示存储读取，fault accounting 接收 resolver 返回码并对 retry/error 作专门处理。PulseOS 的 `FileMappingSource::get_shared_page_paddrs` 返回 page batch，没有相应的 I/O provenance。因此本版**全部 classification=Unknown**；不能根据地址是否 file-backed、延迟长短、事前缓存检查或“匿名页大概是 minor”来填分类。若后续添加精确分类，必须沿实际填页/等待路径传播事实并另测并发共享读取。[Linux mm_types.h](https://github.com/torvalds/linux/blob/v6.12/include/linux/mm_types.h#L1241)、[Linux fault accounting](https://github.com/torvalds/linux/blob/v6.12/mm/memory.c#L5912)、[PulseOS FileMappingSource](../../modules/axmm/src/backend/file.rs)。
+Linux v6.12 的 `VM_FAULT_MAJOR` 指示存储读取，fault accounting 接收 resolver 返回码并对 retry/error 作专门处理。PulseOS 的 `FileMappingSource::get_shared_page_paddrs` 返回 page batch，没有相应的 I/O provenance。因此本版**全部 classification=Unknown**；不能根据地址是否 file-backed、延迟长短、事前缓存检查或“匿名页大概是 minor”来填分类。若后续添加精确分类，必须沿实际填页/等待路径传播事实并另测并发共享读取。[Linux mm_types.h](https://github.com/torvalds/linux/blob/v6.12/include/linux/mm_types.h#L1241)、[Linux fault accounting](https://github.com/torvalds/linux/blob/v6.12/mm/memory.c#L5912)、[PulseOS FileMappingSource](../../modules/mm/src/backend/file.rs)。
 
 ## 时间与结果
 

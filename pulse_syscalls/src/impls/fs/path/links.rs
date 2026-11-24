@@ -216,7 +216,7 @@ pub fn sys_symlinkat(target: usize, newdirfd: i32, linkpath: usize) -> isize {
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
                 if let Ok((parent_loc, _)) = task::future::block_on(
-                    ctx.resolve_parent(axfs_ng_vfs::path::Path::new(link_str)),
+                    ctx.resolve_parent(vfs::path::Path::new(link_str)),
                 ) {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
@@ -268,7 +268,7 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
                 if let Ok((parent_loc, _)) =
-                    task::future::block_on(ctx.resolve_parent(axfs_ng_vfs::path::Path::new(path)))
+                    task::future::block_on(ctx.resolve_parent(vfs::path::Path::new(path)))
                 {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {
@@ -421,7 +421,7 @@ pub fn sys_linkat(
             Ok(loc) => crate::impls::fs::common::is_location_readonly(&loc),
             Err(_) => {
                 if let Ok((parent_loc, _)) = task::future::block_on(
-                    new_ctx.resolve_parent(axfs_ng_vfs::path::Path::new(newpath_str)),
+                    new_ctx.resolve_parent(vfs::path::Path::new(newpath_str)),
                 ) {
                     crate::impls::fs::common::is_location_readonly(&parent_loc)
                 } else {

@@ -20,7 +20,7 @@ pub type AxNetDevice = Box<dyn NetDriverOps>;
 /// `DynAsyncBlockDriverOps` for every concrete `T: AsyncBlockDriverOps + Send
 /// + Sync + 'static`, so all current drivers (e.g. `VirtIoBlkDevWrapper`)
 /// continue to satisfy this bound. The async surface is stored in
-/// `arceos::axfs::disk::SharedBlockDevice` as
+/// `arceos::fs::disk::SharedBlockDevice` as
 /// `Arc<dyn DynAsyncBlockDriverOps + Send + Sync>`.
 #[cfg(all(feature = "block", feature = "async"))]
 pub type AxBlockDevice = Box<dyn DynAsyncBlockDriverOps + Send + Sync>;

@@ -10,12 +10,12 @@ pub(crate) fn after_shutdown_checkpoint<T, E>(
 pub fn run_mapping_shutdown_checks() -> axerrno::AxResult<()> {
     let mut reset_reached = false;
     let result =
-        after_shutdown_checkpoint(axfs::mapping_lifecycle_failed_sync, || reset_reached = true);
+        after_shutdown_checkpoint(fs::mapping_lifecycle_failed_sync, || reset_reached = true);
     if result.is_ok() || reset_reached {
         return Err(axerrno::AxError::BadState);
     }
     let result =
-        after_shutdown_checkpoint(|| axfs::flush_all_filesystems(), || reset_reached = true);
+        after_shutdown_checkpoint(|| fs::flush_all_filesystems(), || reset_reached = true);
     if result.is_err() || !reset_reached {
         return Err(axerrno::AxError::BadState);
     }

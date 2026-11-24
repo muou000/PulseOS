@@ -19,14 +19,14 @@ pub(super) fn prctl(command: usize, address: usize, size: usize, reserved: usize
         }
         match command {
             0 if address == 0 && size == 0 => {
-                axfs::file_io_test_begin(task::current().id().as_u64());
+                fs::file_io_test_begin(task::current().id().as_u64());
                 Ok(())
             }
             1 if size == 5 * size_of::<u64>() => {
-                if !axfs::file_io_test_pins_balanced() {
+                if !fs::file_io_test_pins_balanced() {
                     return Err(LinuxError::EIO);
                 }
-                let snapshot = axfs::file_io_test_snapshot();
+                let snapshot = fs::file_io_test_snapshot();
                 let values = [
                     1u64,
                     snapshot.position_acquisitions,
@@ -41,14 +41,14 @@ pub(super) fn prctl(command: usize, address: usize, size: usize, reserved: usize
                 super::utils::write_user_bytes(address, &bytes)
             }
             2 if address == 0 && size == 0 => {
-                if !axfs::file_io_test_pins_balanced() {
+                if !fs::file_io_test_pins_balanced() {
                     return Err(LinuxError::EIO);
                 }
-                axfs::file_io_test_disable();
+                fs::file_io_test_disable();
                 Ok(())
             }
             4 if address == 0 && size == 0 => {
-                axfs::run_file_io_checks().map_err(Into::into)
+                fs::run_file_io_checks().map_err(Into::into)
             }
             _ => Err(LinuxError::EINVAL),
         }

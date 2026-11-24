@@ -9,7 +9,7 @@ use crate::{current_process, process_by_pid, processes_snapshot, thread_handle_f
 
 struct PulseProcessProvider;
 
-impl axfs::ProcfsProcessProvider for PulseProcessProvider {
+impl fs::ProcfsProcessProvider for PulseProcessProvider {
     fn bpf_mappings(&self) -> Option<String> {
         #[cfg(feature = "bpf-trace")]
         { Some(crate::bpf::mappings::render()) }
@@ -326,21 +326,21 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
             let mut dev_minor = 0;
 
             let mut curr_backend = backend;
-            while let axmm::Backend::Cow(cow) = &curr_backend {
+            while let mm::Backend::Cow(cow) = &curr_backend {
                 curr_backend = cow.inner().clone();
             }
 
             match curr_backend {
-                axmm::Backend::Shared { .. } => {
+                mm::Backend::Shared { .. } => {
                     is_shared = true;
                 }
-                axmm::Backend::File(mapping) => {
+                mm::Backend::File(mapping) => {
                     is_shared = mapping.is_shared();
                     offset = mapping.file_offset();
                     #[cfg(feature = "bpf-trace")]
                     let cached_file = crate::bpf::mappings::cached_file(mapping.file().as_ref());
                     #[cfg(not(feature = "bpf-trace"))]
-                    let cached_file = mapping.file().as_any().downcast_ref::<axfs::CachedFile>();
+                    let cached_file = mapping.file().as_any().downcast_ref::<fs::CachedFile>();
                     if let Some(cached_file) = cached_file {
                         let loc = cached_file.location();
                         if let Ok(meta) = task::future::block_on(loc.metadata()) {
@@ -559,5 +559,5 @@ impl axfs::ProcfsProcessProvider for PulseProcessProvider {
 }
 
 pub fn init_procfs_provider() {
-    axfs::register_process_provider(Arc::new(PulseProcessProvider));
+    fs::register_process_provider(Arc::new(PulseProcessProvider));
 }

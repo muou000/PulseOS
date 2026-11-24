@@ -6,8 +6,8 @@ use alloc::{
 use core::sync::atomic::Ordering;
 
 use axerrno::{AxError, AxResult};
-use axfs::FsContext;
-use axfs_ng_vfs::{Location, NodePermission, NodeType};
+use fs::FsContext;
+use vfs::{Location, NodePermission, NodeType};
 use elf_loader::{ExecCredentials, UserAppLoadInfo};
 use memory_addr::va;
 
@@ -15,11 +15,11 @@ use super::{AddressSpaceLock, Process, Thread};
 
 /// Supplies the process-side mapping source for the executable and its interpreter.
 pub fn load_user_app(
-    aspace: &mut axmm::AddrSpace,
+    aspace: &mut mm::AddrSpace,
     fs: &FsContext,
     credentials: ExecCredentials,
     main_location: Location,
-    main_exec_access: axfs::ExecAccessGuard,
+    main_exec_access: fs::ExecAccessGuard,
     path: &str,
     execfn_path: &str,
     args: &[&str],
@@ -62,7 +62,7 @@ struct PreparedExec {
 
 struct ResolvedExec {
     location: Location,
-    exec_access: axfs::ExecAccessGuard,
+    exec_access: fs::ExecAccessGuard,
     path: String,
     execfn_path: String,
     argv: Vec<String>,
@@ -99,7 +99,7 @@ fn parse_shebang_line(file_data: &[u8]) -> AxResult<Option<(String, Option<Strin
 }
 
 fn read_exec_prefix(location: &Location) -> AxResult<Vec<u8>> {
-    let file = axfs::CachedFile::get_or_create(location.clone())?;
+    let file = fs::CachedFile::get_or_create(location.clone())?;
     let mut prefix = alloc::vec![0u8; SHEBANG_PROBE_LEN];
     let read = file.read_at(&mut prefix[..], 0)?;
     prefix.truncate(read);
@@ -161,7 +161,7 @@ fn resolve_exec_target_and_args(
     };
 
     for _ in 0..SHEBANG_MAX_DEPTH {
-        let exec_access = axfs::acquire_exec_access(&current_location)?;
+        let exec_access = fs::acquire_exec_access(&current_location)?;
         kernel_log::debug!("resolve_exec_path_and_args: probing {}", current_path);
         let file_data = read_exec_prefix(&current_location).map_err(|_| AxError::NotFound)?;
         let Some((interp, interp_arg)) = parse_shebang_line(&file_data)? else {

@@ -8,7 +8,7 @@ pub mod prelude {
     };
 }
 
-#[path = "../../../modules/axfs/src/fs/fat/disk.rs"]
+#[path = "../../../modules/fs/src/fs/fat/disk.rs"]
 mod disk;
 
 use core::{

@@ -18,12 +18,12 @@ tls = ["hal/tls", "task?/tls"]
 alloc = ["kernel_alloc"]
 # Opt-in boot validation while initialized secondary CPUs are still parked.
 pcp-boot-checks = ["alloc", "dep:kernel_guard"]
-paging = ["hal/paging", "axmm"]
-ipi = ["dep:ipi", "axmm?/ipi"]
+paging = ["hal/paging", "mm"]
+ipi = ["dep:ipi", "mm?/ipi"]
 
 multitask = ["task/multitask"]
-fs = ["axdriver", "axfs"]
-net = ["axdriver", "axnet"]
+fs = ["axdriver", "dep:fs"]
+net = ["axdriver", "dep:net"]
 display = ["axdriver", "axdisplay"]
 rtc = []
 
@@ -32,10 +32,10 @@ hal = { workspace = true }
 kernel_log = { workspace = true }
 config = { workspace = true }
 kernel_alloc = { workspace = true, optional = true }
-axmm = { workspace = true, optional = true }
+mm = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
-axfs = { workspace = true, optional = true }
-axnet = { workspace = true, optional = true }
+fs = { workspace = true, optional = true }
+net = { workspace = true, optional = true }
 axdisplay = { workspace = true, optional = true }
 task = { workspace = true, optional = true }
 ipi = { workspace = true, optional = true }

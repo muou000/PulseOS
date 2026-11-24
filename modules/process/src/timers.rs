@@ -262,5 +262,5 @@ pub fn adjust_absolute_timers() {
 pub fn init_itimer_hook() {
     start_timer_worker();
     task::register_timer_hook(itimer_tick_hook);
-    axnet::register_have_signals_callback(current_have_signals);
+    net::register_have_signals_callback(current_have_signals);
 }

@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axerrno::{AxError, AxResult};
-use axpoll::{IoEvents, Pollable};
+use poll::{IoEvents, Pollable};
 
 use crate::{WaitQueue, api as task, current};
 

@@ -3,7 +3,7 @@ extern crate alloc;
 
 #[cfg(test)]
 #[allow(dead_code)]
-#[path = "../../../modules/axfs/src/mounts.rs"]
+#[path = "../../../modules/fs/src/mounts.rs"]
 mod mounts;
 
 #[cfg(test)]

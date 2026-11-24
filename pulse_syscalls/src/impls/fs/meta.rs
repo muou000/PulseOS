@@ -1,5 +1,5 @@
 use axerrno::LinuxError;
-use axfs_ng_vfs::{Location, MetadataUpdate};
+use vfs::{Location, MetadataUpdate};
 use linux_raw_sys::general::{
     AT_EACCESS, AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, CAP_CHOWN, CAP_FOWNER,
     MS_NOSYMFOLLOW, R_OK, STATX_BASIC_STATS, STATX_MNT_ID, W_OK, X_OK, statfs, statx,
@@ -259,10 +259,10 @@ pub fn sys_statx(
     new_statx.stx_btime = to_statx_timestamp(0, 0);
     new_statx.stx_ctime = to_statx_timestamp(stat.st_ctime as i64, stat.st_ctime_nsec as i64);
     new_statx.stx_mtime = to_statx_timestamp(stat.st_mtime as i64, stat.st_mtime_nsec as i64);
-    let rdev = axfs_ng_vfs::DeviceId(stat.st_rdev as u64);
+    let rdev = vfs::DeviceId(stat.st_rdev as u64);
     new_statx.stx_rdev_major = rdev.major();
     new_statx.stx_rdev_minor = rdev.minor();
-    let dev = axfs_ng_vfs::DeviceId(stat.st_dev as u64);
+    let dev = vfs::DeviceId(stat.st_dev as u64);
     new_statx.stx_dev_major = dev.major();
     new_statx.stx_dev_minor = dev.minor();
     new_statx.stx_mnt_id = 0;
@@ -475,11 +475,11 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
                 return -LinuxError::EPERM.code() as isize;
             }
 
-            let mut perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+            let mut perm = vfs::NodePermission::from_bits_truncate(mode as u16);
 
             // POSIX: 若进程非 root，且文件 GID 既不匹配 EGID 也不在附属组中，
             // 则自动清除 S_ISGID，即便用户请求中包含该位。
-            if perm.contains(axfs_ng_vfs::NodePermission::SET_GID) {
+            if perm.contains(vfs::NodePermission::SET_GID) {
                 let should_clear = match with_process(|p| (p.euid(), p.egid(), p.groups())) {
                     Ok((euid, egid, groups)) => {
                         euid != 0 && current_meta.gid != egid && !groups.contains(&current_meta.gid)
@@ -491,11 +491,11 @@ pub fn sys_fchmodat(dirfd: i32, pathname: usize, mode: usize, flags: usize) -> i
                         "sys_fchmodat: clearing S_ISGID on \"{}\" (non-root, GID mismatch)",
                         path_str
                     );
-                    perm.remove(axfs_ng_vfs::NodePermission::SET_GID);
+                    perm.remove(vfs::NodePermission::SET_GID);
                 }
             }
 
-            match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+            match task::future::block_on(location.update_metadata(vfs::MetadataUpdate {
                 mode: Some(perm),
                 ..Default::default()
             })) {
@@ -568,11 +568,11 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         return -LinuxError::EPERM.code() as isize;
     }
 
-    let mut perm = axfs_ng_vfs::NodePermission::from_bits_truncate(mode as u16);
+    let mut perm = vfs::NodePermission::from_bits_truncate(mode as u16);
 
     // POSIX: 若进程非 root，且文件 GID 既不匹配 EGID 也不在附属组中，
     // 则自动清除 S_ISGID，即便用户请求中包含该位。
-    if perm.contains(axfs_ng_vfs::NodePermission::SET_GID) {
+    if perm.contains(vfs::NodePermission::SET_GID) {
         let should_clear = match with_process(|p| (p.euid(), p.egid(), p.groups())) {
             Ok((euid, egid, groups)) => {
                 euid != 0 && current_meta.gid != egid && !groups.contains(&current_meta.gid)
@@ -584,11 +584,11 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
                 "sys_fchmod: clearing S_ISGID on fd={} (non-root, GID mismatch)",
                 fd
             );
-            perm.remove(axfs_ng_vfs::NodePermission::SET_GID);
+            perm.remove(vfs::NodePermission::SET_GID);
         }
     }
 
-    match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+    match task::future::block_on(location.update_metadata(vfs::MetadataUpdate {
         mode: Some(perm),
         ..Default::default()
     })) {
@@ -692,20 +692,20 @@ pub fn sys_fchownat(dirfd: i32, pathname: usize, uid: usize, gid: usize, flags: 
             };
 
             let mut new_mode = current_meta.mode;
-            if current_meta.node_type == axfs_ng_vfs::NodeType::RegularFile
+            if current_meta.node_type == vfs::NodeType::RegularFile
                 && ((uid as u32) != u32::MAX || (gid as u32) != u32::MAX)
             {
-                if new_mode.contains(axfs_ng_vfs::NodePermission::SET_UID) {
-                    new_mode.remove(axfs_ng_vfs::NodePermission::SET_UID);
+                if new_mode.contains(vfs::NodePermission::SET_UID) {
+                    new_mode.remove(vfs::NodePermission::SET_UID);
                 }
-                if new_mode.contains(axfs_ng_vfs::NodePermission::SET_GID)
-                    && new_mode.contains(axfs_ng_vfs::NodePermission::GROUP_EXEC)
+                if new_mode.contains(vfs::NodePermission::SET_GID)
+                    && new_mode.contains(vfs::NodePermission::GROUP_EXEC)
                 {
-                    new_mode.remove(axfs_ng_vfs::NodePermission::SET_GID);
+                    new_mode.remove(vfs::NodePermission::SET_GID);
                 }
             }
 
-            match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+            match task::future::block_on(location.update_metadata(vfs::MetadataUpdate {
                 owner: Some((new_uid, new_gid)),
                 mode: Some(new_mode),
                 ..Default::default()
@@ -788,20 +788,20 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
     };
 
     let mut new_mode = current_meta.mode;
-    if current_meta.node_type == axfs_ng_vfs::NodeType::RegularFile
+    if current_meta.node_type == vfs::NodeType::RegularFile
         && ((uid as u32) != u32::MAX || (gid as u32) != u32::MAX)
     {
-        if new_mode.contains(axfs_ng_vfs::NodePermission::SET_UID) {
-            new_mode.remove(axfs_ng_vfs::NodePermission::SET_UID);
+        if new_mode.contains(vfs::NodePermission::SET_UID) {
+            new_mode.remove(vfs::NodePermission::SET_UID);
         }
-        if new_mode.contains(axfs_ng_vfs::NodePermission::SET_GID)
-            && new_mode.contains(axfs_ng_vfs::NodePermission::GROUP_EXEC)
+        if new_mode.contains(vfs::NodePermission::SET_GID)
+            && new_mode.contains(vfs::NodePermission::GROUP_EXEC)
         {
-            new_mode.remove(axfs_ng_vfs::NodePermission::SET_GID);
+            new_mode.remove(vfs::NodePermission::SET_GID);
         }
     }
 
-    match task::future::block_on(location.update_metadata(axfs_ng_vfs::MetadataUpdate {
+    match task::future::block_on(location.update_metadata(vfs::MetadataUpdate {
         owner: Some((new_uid, new_gid)),
         mode: Some(new_mode),
         ..Default::default()

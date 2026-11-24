@@ -3,9 +3,9 @@
 
 use alloc::sync::Arc;
 use axerrno::{AxError, AxResult};
-use axfs::{CachedFile, File, OpenOptions, ROOT_FS_CONTEXT};
+use fs::{CachedFile, File, OpenOptions, ROOT_FS_CONTEXT};
 use hal::{paging::MappingFlags, trap::PageFaultFlags};
-use axmm::{
+use mm::{
     FileMappingPageBatch, FileMappingSource, FilePageIo, FilePageLoad, MappingPlacement,
     PageFaultOutcome, PageFaultResult, PageFaultWork, PreparedMapping,
 };
@@ -103,7 +103,7 @@ fn resolve(aspace: &AddressSpaceLock, address: VirtAddr, flags: PageFaultFlags, 
     // Every file fixture is populated through the cache before these cases;
     // anonymous allocation and private COW also issue no target storage read.
     check(case, "cached/anonymous/COW fault has no storage read",
-        resolution.io == axmm::FilePageIo::NoStorageRead)
+        resolution.io == mm::FilePageIo::NoStorageRead)
 }
 
 fn file_request(case: &str, result: PageFaultResult) -> AxResult<FilePageLoad> {
@@ -131,7 +131,7 @@ fn new_aspace(case: &str) -> AxResult<AddressSpaceLock> {
     checked(
         case,
         "create guest user address space",
-        axmm::new_user_aspace(VirtAddr::from(USER_SPACE_BASE), USER_SPACE_SIZE),
+        mm::new_user_aspace(VirtAddr::from(USER_SPACE_BASE), USER_SPACE_SIZE),
     ).map(AddressSpaceLock::new)
 }
 
@@ -293,7 +293,7 @@ fn fault_io_retry_and_cancel(fixture: &Fixture) -> AxResult<()> {
         let initial = aspace.read().handle_page_fault(address, PageFaultFlags::READ);
         let mut attempts = 0;
         let mut callback_error = None;
-        let resolution = axmm::drive_page_fault_with_io(initial, |work| {
+        let resolution = mm::drive_page_fault_with_io(initial, |work| {
             let attempt = (|| -> AxResult<PageFaultResult> {
                 let PageFaultWork::File(prepared) = work else {
                     return Err(failure(CASE, "file-only mapping needs only file preparation"));

@@ -3,18 +3,18 @@ use super::*;
 fn is_ns_location(location: &Location) -> Option<(u64, u32)> {
     let metadata = task::future::block_on(location.metadata()).ok()?;
     let ino = metadata.inode;
-    if ino >= axfs::fs::procfs::PID_INODE_START {
-        let offset = ino - axfs::fs::procfs::PID_INODE_START;
-        let pid = offset >> axfs::fs::procfs::PID_INODE_SHIFT;
-        let sub = offset & ((1 << axfs::fs::procfs::PID_INODE_SHIFT) - 1);
+    if ino >= fs::fs::procfs::PID_INODE_START {
+        let offset = ino - fs::fs::procfs::PID_INODE_START;
+        let pid = offset >> fs::fs::procfs::PID_INODE_SHIFT;
+        let sub = offset & ((1 << fs::fs::procfs::PID_INODE_SHIFT) - 1);
         let ns_type = match sub {
-            axfs::fs::procfs::SUB_INO_NS_UTS => CLONE_NEWUTS,
-            axfs::fs::procfs::SUB_INO_NS_IPC => CLONE_NEWIPC,
-            axfs::fs::procfs::SUB_INO_NS_NET => CLONE_NEWNET,
-            axfs::fs::procfs::SUB_INO_NS_MNT => CLONE_NEWNS,
-            axfs::fs::procfs::SUB_INO_NS_PID => CLONE_NEWPID,
-            axfs::fs::procfs::SUB_INO_NS_USER => CLONE_NEWUSER,
-            axfs::fs::procfs::SUB_INO_NS_CGROUP => CLONE_NEWCGROUP,
+            fs::fs::procfs::SUB_INO_NS_UTS => CLONE_NEWUTS,
+            fs::fs::procfs::SUB_INO_NS_IPC => CLONE_NEWIPC,
+            fs::fs::procfs::SUB_INO_NS_NET => CLONE_NEWNET,
+            fs::fs::procfs::SUB_INO_NS_MNT => CLONE_NEWNS,
+            fs::fs::procfs::SUB_INO_NS_PID => CLONE_NEWPID,
+            fs::fs::procfs::SUB_INO_NS_USER => CLONE_NEWUSER,
+            fs::fs::procfs::SUB_INO_NS_CGROUP => CLONE_NEWCGROUP,
             _ => return None,
         };
         Some((pid, ns_type))

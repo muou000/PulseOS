@@ -8,7 +8,7 @@ publish = false
 
 [dev-dependencies]
 axdriver_block = { path = "../../modules/axdriver_block", features = ["async"] }
-axfs-ng-vfs = { path = "../../modules/axfs-ng-vfs" }
+vfs = { path = "../../modules/vfs" }
 hadris-io = { version = "=3.0.0-rc.4", default-features = false }
 hadris-storage = { version = "=3.0.0-rc.4", default-features = false, features = ["async"] }
 kspin = { version = "0.1", features = ["smp"] }
@@ -16,6 +16,3 @@ futures-lite = "2"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("file-io-test"))'] }
-
-[patch.crates-io]
-axpoll = { path = "../../modules/axpoll" }

@@ -6,7 +6,7 @@ use core::{
 };
 
 use axerrno::{LinuxError, LinuxResult};
-use axio::PollState;
+use io::PollState;
 use linux_raw_sys::general::{
     POLLIN, SI_SIGIO, SI_TIMER, SI_USER, SIGBUS, SIGCHLD, SIGFPE, SIGILL, SIGSEGV, SIGSYS,
     SIGTRAP, S_IFREG, siginfo,
@@ -313,10 +313,10 @@ impl FdObject for SignalFdObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut alloc::vec::Vec<PollRegistration>,
     ) -> LinuxResult {
-        if !events.contains(axpoll::IoEvents::IN) {
+        if !events.contains(poll::IoEvents::IN) {
             return Ok(());
         }
 
@@ -329,7 +329,7 @@ impl FdObject for SignalFdObject {
         _process: &Arc<crate::Process>,
         thread: Option<&Arc<crate::Thread>>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut alloc::vec::Vec<PollRegistration>,
     ) -> LinuxResult {
         let Some(thread) = thread else {
@@ -342,10 +342,10 @@ impl FdObject for SignalFdObject {
         self: Arc<Self>,
         thread: &Arc<crate::Thread>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut alloc::vec::Vec<PollRegistration>,
     ) -> LinuxResult {
-        if !events.contains(axpoll::IoEvents::IN) {
+        if !events.contains(poll::IoEvents::IN) {
             return Ok(());
         }
 

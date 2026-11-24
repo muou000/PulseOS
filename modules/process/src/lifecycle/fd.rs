@@ -156,7 +156,7 @@ impl Process {
         Ok(())
     }
 
-    pub fn get_fd_location(&self, fd: usize) -> Result<axfs_ng_vfs::Location, axerrno::LinuxError> {
+    pub fn get_fd_location(&self, fd: usize) -> Result<vfs::Location, axerrno::LinuxError> {
         self.get_fd_object(fd)?
             .location()
             .ok_or(axerrno::LinuxError::EBADF)

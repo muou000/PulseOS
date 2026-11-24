@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsiz
 
 use config::TASK_STACK_SIZE;
 use axerrno::{AxError, AxErrorKind, AxResult};
-use axfs::FsContext;
+use fs::FsContext;
 use hal::{
     context::{TrapFrame, UspaceContext},
     paging::MappingFlags,
@@ -66,7 +66,7 @@ unsafe impl Sync for PosixTimer {}
 
 static ZOMBIE_ASPACE_HANDLE: Lazy<Arc<AddressSpaceLock>> = Lazy::new(|| {
     Arc::new(AddressSpaceLock::new(
-        axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)
+        mm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)
             .expect("failed to create shared zombie addrspace"),
     ))
 });
@@ -486,7 +486,7 @@ pub struct Process {
     /// 进程可执行文件的绝对路径
     exec_path: RwLock<Option<String>>,
     /// Keeps executable inodes write-denied for the lifetime of this image.
-    exec_access: RwLock<Vec<axfs::ExecAccessGuard>>,
+    exec_access: RwLock<Vec<fs::ExecAccessGuard>>,
     /// 命令行参数列表
     pub args: RwLock<Vec<String>>,
     /// 用户态信号处理器蹦床地址
@@ -660,8 +660,8 @@ impl Process {
 
     pub(super) fn replace_exec_access(
         &self,
-        access: Vec<axfs::ExecAccessGuard>,
-    ) -> Vec<axfs::ExecAccessGuard> {
+        access: Vec<fs::ExecAccessGuard>,
+    ) -> Vec<fs::ExecAccessGuard> {
         core::mem::replace(&mut *self.exec_access.write(), access)
     }
 

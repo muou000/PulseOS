@@ -4,7 +4,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use axerrno::{LinuxError, LinuxResult};
-use axfs::FsContext;
+use fs::FsContext;
 use pulse_user_abi::{FromUserAbi, IntoUserAbi};
 
 use crate::fd::{FdEntry, FdObject, FdTable, SharedFdTable};

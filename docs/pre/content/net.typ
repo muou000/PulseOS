@@ -30,7 +30,7 @@ pub enum SocketInner {
 ```
 
 1. Tcp / Udp 套接字：
-   - 封装底层的 `axnet` 驱动，并调用 `smoltcp` 完成 IP、TCP、UDP 协议栈的数据包分发、解析和滑动窗口维护。
+   - 封装底层的 `net` 驱动，并调用 `smoltcp` 完成 IP、TCP、UDP 协议栈的数据包分发、解析和滑动窗口维护。
 
 2. Packet 原始套接字（Mock 桩实现）：
    - 提供 `AF_PACKET` 类型的原始链路访问抽象，支持相关的套接字配置选项。目前为 Mock 占位实现，写操作会直接丢弃数据包并报告成功，读操作返回 `0`。

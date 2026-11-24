@@ -21,9 +21,9 @@ use alloc::vec::Vec;
 use kernel_alloc::{frame_table, global_allocator};
 use axerrno::{AxError, AxResult, LinuxError};
 use hal::{mem::phys_to_virt, paging::MappingFlags};
-use axio::{IoBuf, IoBufMut, Read, Segmented, Write};
+use io::{IoBuf, IoBufMut, Read, Segmented, Write};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
-pub use pulse_io_uring_core::resources::{
+pub use io_uring_core::resources::{
     FixedBufferSlice, FixedBufferSlot, MAX_PIN_WINDOW_BYTES, MAX_PIN_WINDOW_FRAGMENTS,
     UserIoSegment, fits_single_pin_window,
 };
@@ -246,7 +246,7 @@ impl PinnedUserBuffers {
                                 break 'window;
                             }
                             #[cfg(feature = "file-io-test")]
-                            axfs::file_io_test_pin_acquired();
+                            fs::file_io_test_pin_acquired();
                             if !frame.is_aligned_4k() {
                                 release_pinned_user_frame(frame);
                                 note_pin_released();
@@ -359,7 +359,7 @@ impl IoBuf for PinnedUserBuffers {
 }
 
 impl Read for PinnedUserBuffers {
-    fn read(&mut self, dst: &mut [u8]) -> axio::Result<usize> {
+    fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
         self.stream.read(dst)
     }
 }
@@ -371,11 +371,11 @@ impl IoBufMut for PinnedUserBuffers {
 }
 
 impl Write for PinnedUserBuffers {
-    fn write(&mut self, src: &[u8]) -> axio::Result<usize> {
+    fn write(&mut self, src: &[u8]) -> io::Result<usize> {
         self.stream.write(src)
     }
 
-    fn flush(&mut self) -> axio::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -409,7 +409,7 @@ impl Drop for PinnedFrames {
 #[inline]
 fn note_pin_released() {
     #[cfg(feature = "file-io-test")]
-    axfs::file_io_test_pin_released();
+    fs::file_io_test_pin_released();
 }
 
 struct PinnedFragment {
@@ -433,7 +433,7 @@ impl IoBufMut for PinnedFragment {
 }
 
 impl Read for PinnedFragment {
-    fn read(&mut self, dst: &mut [u8]) -> axio::Result<usize> {
+    fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
         if self.writable {
             return Err(AxError::PermissionDenied);
         }
@@ -449,7 +449,7 @@ impl Read for PinnedFragment {
 }
 
 impl Write for PinnedFragment {
-    fn write(&mut self, src: &[u8]) -> axio::Result<usize> {
+    fn write(&mut self, src: &[u8]) -> io::Result<usize> {
         if !self.writable {
             return Err(AxError::PermissionDenied);
         }
@@ -460,7 +460,7 @@ impl Write for PinnedFragment {
         Ok(copied)
     }
 
-    fn flush(&mut self) -> axio::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -512,7 +512,7 @@ fn pin_fixed_page_list(
     flags: MappingFlags,
 ) -> Result<FixedBufferPages, LinuxError> {
     let base_page_offset = user_base & (PAGE_SIZE_4K - 1);
-    let num_pages = pulse_io_uring_core::resources::page_count_for_range(user_base, len)?;
+    let num_pages = io_uring_core::resources::page_count_for_range(user_base, len)?;
     let start_vaddr = VirtAddr::from(user_base).align_down_4k();
     let user_end = user_base.checked_add(len).ok_or(LinuxError::EFAULT)?;
     let aspace_handle = process.aspace_handle();
@@ -576,7 +576,7 @@ fn pin_fixed_page_list(
     Ok(pages)
 }
 
-/// Adapter exposing a sub-range of a registered [`FixedBufferSlot`] as `axio::{Read, Write}`.
+/// Adapter exposing a sub-range of a registered [`FixedBufferSlot`] as `io::{Read, Write}`.
 /// Writable slots support both reads (for `WRITE_FIXED`) and writes (for `READ_FIXED`);
 /// read-only slots permit only reads and reject writes with `PermissionDenied` / `-EFAULT`.
 pub struct FixedBufferIo {
@@ -621,7 +621,7 @@ impl FixedBufferIo {
         &mut self,
         max_bytes: usize,
         mut copy_page: impl FnMut(PhysAddr, usize, usize, usize) -> AxResult<usize>,
-    ) -> axio::Result<usize> {
+    ) -> io::Result<usize> {
         let total = max_bytes.min(self.remaining_bytes());
         if total == 0 {
             return Ok(0);
@@ -652,7 +652,7 @@ impl IoBuf for FixedBufferIo {
 }
 
 impl Read for FixedBufferIo {
-    fn read(&mut self, dst: &mut [u8]) -> axio::Result<usize> {
+    fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
         self.step_pages(dst.len(), |frame, page_off, done, chunk| {
             copy_pinned_page_to_kernel(frame, page_off, &mut dst[done..done + chunk])
         })
@@ -666,7 +666,7 @@ impl IoBufMut for FixedBufferIo {
 }
 
 impl Write for FixedBufferIo {
-    fn write(&mut self, src: &[u8]) -> axio::Result<usize> {
+    fn write(&mut self, src: &[u8]) -> io::Result<usize> {
         if !self.slice.slot.writable {
             return Err(AxError::PermissionDenied);
         }
@@ -675,7 +675,7 @@ impl Write for FixedBufferIo {
         })
     }
 
-    fn flush(&mut self) -> axio::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }

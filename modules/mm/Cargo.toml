@@ -1,0 +1,30 @@
+[package]
+name = "mm"
+version.workspace = true
+edition.workspace = true
+authors = ["Yuekai Jia <equation618@gmail.com>"]
+description = "ArceOS virtual memory management module"
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/axmm"
+documentation = "https://arceos-org.github.io/arceos/axmm/index.html"
+
+[features]
+ipi = ["dep:ipi"]
+mapping-observer = []
+
+[dependencies]
+hal = { workspace = true, features = ["paging"] }
+kernel_alloc = { workspace = true }
+config = { workspace = true }
+bitflags.workspace = true
+heapless.workspace = true
+ipi = { workspace = true, optional = true }
+
+log.workspace = true
+axerrno.workspace = true
+lazyinit.workspace = true
+memory_addr.workspace = true
+kspin.workspace = true
+spin.workspace = true
+memory_set.workspace = true

@@ -15,7 +15,7 @@ use axdriver_net::{
     },
 };
 use hal::mem::{PAGE_SIZE_4K, flush_dcache_range, phys_to_virt, virt_to_phys};
-use axpoll::PollSet;
+use poll::PollSet;
 use fdt_raw::{Fdt, Node};
 use kspin::{SpinNoIrq, SpinNoPreempt};
 
@@ -152,7 +152,7 @@ impl Drop for IrqRegistration {
 
 static JH7110_DWMAC_IRQ: SpinNoIrq<Option<(usize, Weak<Jh7110DwmacInner>)>> = SpinNoIrq::new(None);
 
-/// Network device wrapper that connects DWMAC completions to `axpoll`.
+/// Network device wrapper that connects DWMAC completions to `poll`.
 pub(crate) struct Jh7110DwmacDevice {
     inner: Arc<Jh7110DwmacInner>,
     _irq_registration: IrqRegistration,

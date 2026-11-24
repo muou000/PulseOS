@@ -10,7 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use axfs_ng_vfs::{
+use vfs::{
     DirEntry, DirEntrySink, DirNode, DirNodeOps, Filesystem, FilesystemOps, Location, Metadata,
     MetadataUpdate, NodeOps, NodePermission, NodeType, Reference, StatFs, VfsError, VfsResult,
     WeakDirEntry,

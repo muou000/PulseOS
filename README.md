@@ -36,15 +36,15 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   ├── cpu                    # 架构相关的特权级指令与硬件上下文
 │   ├── axdriver               # 设备驱动管理层
 │   ├── axdriver_*             # 基础、块设备、网络、PCI、VirtIO 驱动模块
-│   ├── axfs                   # 文件系统运行时与挂载
-│   ├── axfs-ng-vfs            # 虚拟文件系统抽象层
+│   ├── fs                     # 文件系统运行时与挂载
+│   ├── vfs                    # 虚拟文件系统抽象层
 │   ├── hal                    # 硬件抽象层与页表管理
-│   ├── axio                   # no_std I/O 抽象库
+│   ├── io                     # no_std I/O 抽象库
 │   ├── ipi                    # 核间中断处理
 │   ├── kernel_log             # 内核日志输出
-│   ├── axmm                   # 虚存管理与映射
-│   ├── axnet                  # 网络协议栈运行时
-│   ├── axpoll                 # I/O 多路复用与等待队列
+│   ├── mm                     # 虚存管理与映射
+│   ├── net                    # 网络协议栈运行时
+│   ├── poll                   # I/O 多路复用与等待队列
 │   ├── runtime                # 内核运行时初始化
 │   ├── sched                  # 调度器集成层
 │   ├── sync                   # 内核同步原语
@@ -53,7 +53,7 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   ├── elf_loader             # 准备 ELF 映像和初始用户栈
 │   ├── ipc                    # System V IPC
 │   ├── process                # 用户进程、线程、FD、socket、trap 与 io_uring 执行
-│   └── pulse_io_uring_core    # io_uring 请求与注册资源状态机
+│   └── io_uring_core          # io_uring 请求与注册资源状态机
 ├── platforms                  # 硬件平台抽象与具体实现
 │   ├── axplat                 # 统一硬件平台抽象接口
 │   ├── axplat-riscv64-qemu-virt

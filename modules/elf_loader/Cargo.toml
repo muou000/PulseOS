@@ -11,11 +11,11 @@ description = "ELF user image preparation for PulseOS"
 config.workspace = true
 cpu.workspace = true
 axerrno.workspace = true
-axfs.workspace = true
-axfs-ng-vfs.workspace = true
+fs.workspace = true
+vfs.workspace = true
 hal = { workspace = true, features = ["paging"] }
 kernel_log.workspace = true
-axmm.workspace = true
+mm.workspace = true
 task = { workspace = true, features = ["multitask"] }
 kernel-elf-parser.workspace = true
 linux-raw-sys = { workspace = true, features = ["elf_uapi"] }

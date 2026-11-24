@@ -173,7 +173,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     init_allocator();
 
     #[cfg(feature = "paging")]
-    axmm::init_memory_management();
+    mm::init_memory_management();
 
     info!("Initialize platform devices...");
     hal::init_later(cpu_id, arg);
@@ -201,10 +201,10 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         let all_devices = axdriver::init_drivers();
 
         #[cfg(feature = "fs")]
-        axfs::init_filesystems(all_devices.block);
+        fs::init_filesystems(all_devices.block);
 
         #[cfg(feature = "net")]
-        axnet::init_network(all_devices.net);
+        net::init_network(all_devices.net);
 
         #[cfg(feature = "display")]
         axdisplay::init_display(all_devices.display);

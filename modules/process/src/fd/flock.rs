@@ -14,7 +14,7 @@ pub enum LockTarget {
 
 pub fn get_lock_target(obj: &Arc<dyn FdObject>) -> LockTarget {
     if let Some(loc) = obj.location() {
-        let fs_id = loc.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const () as usize;
+        let fs_id = loc.filesystem() as *const dyn vfs::FilesystemOps as *const () as usize;
         LockTarget::Location {
             fs_id,
             inode: loc.inode(),

@@ -18,6 +18,6 @@ spin.workspace = true
 [target.'cfg(target_os = "none")'.dependencies]
 kernel_alloc.workspace = true
 hal.workspace = true
-axmm.workspace = true
+mm.workspace = true
 task = { workspace = true, features = ["multitask"] }
 memory_addr.workspace = true

@@ -45,7 +45,7 @@ ls2k1000-ahci = ["dep:hal", "dep:simple-ahci"]
 ramdisk = []
 starfive-jh7110-sdmmc = [
     "dep:hal",
-    "dep:axpoll",
+    "dep:poll",
     "dep:dwmmc-host",
     "dep:rdif-block",
     "dep:sdio-host2",
@@ -78,8 +78,8 @@ optional = true
 path = "../hal"
 optional = true
 
-[dependencies.axpoll]
-path = "../axpoll"
+[dependencies.poll]
+path = "../poll"
 optional = true
 
 [dependencies.simple-ahci]

@@ -61,7 +61,7 @@ PulseOS 中的虚拟文件系统采用面向对象的接口抽象设计，以支
   align: (left, left, left),
   [*实体分类*], [*具体实现结构*], [*说明*],
   [标准 I/O 实体], [StdinObject, StdoutObject], [封装控制台 TTY 读写，内置 STDIN_WAIT_QUEUE 支持异步就绪唤醒。],
-  [文件系统实体], [FileObject, DirObject], [封装常规文件与目录的底层 `axfs` 系统调用交互。],
+  [文件系统实体], [FileObject, DirObject], [封装常规文件与目录的底层 `fs` 系统调用交互。],
   [进程与控制句柄], [PidfdObject], [进程文件描述符，提供跨进程信号发送与状态监测机制。],
   [低延迟控制], [CpuDmaLatencyObject], [用于电源管理与低延迟 DMA 调优的专用描述符。目前底层驱动并未使用该限制值，其实现主要是为了满足 `cyclictest` 测例的运行要求。],
   [IPC 与网络通信], [PipeObject, Socket, EpollObject], [分别对应管道双端、网络套接字以及事件多路复用轮询实体。],
@@ -185,7 +185,7 @@ PulseOS 实现了标准的`flock`文件锁语义，用于在多个进程或线�
 
 == 特殊文件系统
 
-PulseOS 在 `axfs/src/fs` 中实现了多种特殊文件系统，用来向用户态提供运行期状态以及虚拟硬件接口：
+PulseOS 在 `modules/fs/src/fs` 中实现了多种特殊文件系统，用来向用户态提供运行期状态以及虚拟硬件接口：
 
 1. `procfs` 进程文件系统：
    - `/proc/self`：动态指向当前发出请求的进程 PID 目录的符号链接。

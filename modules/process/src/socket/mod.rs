@@ -7,9 +7,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 use axerrno::{LinuxError, LinuxResult};
-use axio::PollState;
-use axnet::{IcmpSocket, TcpSocket, UdpSocket};
-use axpoll::IoEvents;
+use io::PollState;
+use net::{IcmpSocket, TcpSocket, UdpSocket};
+use poll::IoEvents;
 use linux_raw_sys::general::{O_CLOEXEC, O_NONBLOCK, S_IFSOCK, stat};
 use linux_raw_sys::ioctl::{SIOCATMARK, SIOCGIFCONF};
 use linux_raw_sys::net::{
@@ -21,7 +21,7 @@ use crate::fd::{FdObject, PollRegistration};
 const RING_BUFFER_SIZE: usize = 65536;
 
 fn eth0_ipv4_config() -> ([u8; 4], u8) {
-    axnet::interface_ipv4_address()
+    net::interface_ipv4_address()
 }
 
 fn ipv4_netmask(prefix_len: u8) -> [u8; 4] {
@@ -54,11 +54,11 @@ pub static UNIX_REGISTRY: spin::Mutex<
     alloc::collections::BTreeMap<UnixSocketKey, UnixRegistryEntry>,
 > = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
-/// Derives `(filesystem_id, inode)` for a resolved VFS [`axfs_ng_vfs::Location`].
+/// Derives `(filesystem_id, inode)` for a resolved VFS [`vfs::Location`].
 #[inline]
-pub fn vfs_node_key(loc: &axfs_ng_vfs::Location) -> (u64, u64) {
+pub fn vfs_node_key(loc: &vfs::Location) -> (u64, u64) {
     let fs_id =
-        loc.filesystem() as *const dyn axfs_ng_vfs::FilesystemOps as *const () as usize as u64;
+        loc.filesystem() as *const dyn vfs::FilesystemOps as *const () as usize as u64;
     (fs_id, loc.inode())
 }
 
@@ -71,14 +71,14 @@ fn is_abstract_unix_path(path: &str) -> bool {
 /// returning `UnixSocketKey::Abstract` for abstract names and `UnixSocketKey::Pathname`
 /// for VFS-backed pathname sockets (or `-ENOENT` when missing or outside `chroot`).
 pub async fn resolve_unix_path_async(
-    fs: &axfs::FsContext,
+    fs: &fs::FsContext,
     path: &str,
 ) -> LinuxResult<UnixSocketKey> {
     if is_abstract_unix_path(path) {
         return Ok(UnixSocketKey::Abstract(alloc::string::String::from(path)));
     }
     let loc = fs
-        .resolve(axfs_ng_vfs::path::Path::new(path))
+        .resolve(vfs::path::Path::new(path))
         .await
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
     let (fs_id, inode) = vfs_node_key(&loc);
@@ -86,13 +86,13 @@ pub async fn resolve_unix_path_async(
 }
 
 /// Synchronous wrapper around [`resolve_unix_path_async`].
-pub fn resolve_unix_path_sync(fs: &axfs::FsContext, path: &str) -> LinuxResult<UnixSocketKey> {
+pub fn resolve_unix_path_sync(fs: &fs::FsContext, path: &str) -> LinuxResult<UnixSocketKey> {
     task::future::block_on(resolve_unix_path_async(fs, path))
 }
 
 /// Pre-checks whether binding an `AF_UNIX` socket to `path` within `fs` can succeed
 /// before allocating an underlying loopback endpoint.
-pub fn check_unix_bind_available(fs: &axfs::FsContext, path: &str) -> LinuxResult {
+pub fn check_unix_bind_available(fs: &fs::FsContext, path: &str) -> LinuxResult {
     if is_abstract_unix_path(path) {
         let key = UnixSocketKey::Abstract(alloc::string::String::from(path));
         let mut registry = UNIX_REGISTRY.lock();
@@ -106,7 +106,7 @@ pub fn check_unix_bind_available(fs: &axfs::FsContext, path: &str) -> LinuxResul
     }
 
     task::future::block_on(async {
-        let vfs_path = axfs_ng_vfs::path::Path::new(path);
+        let vfs_path = vfs::path::Path::new(path);
         fs.resolve_parent(vfs_path)
             .await
             .map_err(|e| LinuxError::from(e.canonicalize()))?;
@@ -119,7 +119,7 @@ pub fn check_unix_bind_available(fs: &axfs::FsContext, path: &str) -> LinuxResul
 
 /// Binds a pathname (inside `fs`) or abstract `AF_UNIX` socket and records it in [`UNIX_REGISTRY`].
 pub fn bind_unix_socket_with_fs(
-    fs: &axfs::FsContext,
+    fs: &fs::FsContext,
     path: &str,
     addr: SocketAddr,
     sock: &Arc<Socket>,
@@ -128,7 +128,7 @@ pub fn bind_unix_socket_with_fs(
         UnixSocketKey::Abstract(alloc::string::String::from(path))
     } else {
         task::future::block_on(async {
-            let vfs_path = axfs_ng_vfs::path::Path::new(path);
+            let vfs_path = vfs::path::Path::new(path);
             if fs.resolve(vfs_path).await.is_ok() {
                 return Err(LinuxError::EADDRINUSE);
             }
@@ -722,7 +722,7 @@ impl NetlinkSocket {
 
     fn handle_rtm_getlink(seq: u32, pid: u32) -> alloc::vec::Vec<u8> {
         let mut resp = alloc::vec::Vec::new();
-        let eth_mac = axnet::interface_mac_address();
+        let eth_mac = net::interface_mac_address();
 
         // 1. "lo" link
         let mut lo_msg = alloc::vec::Vec::new();
@@ -1355,7 +1355,7 @@ impl FdObject for Socket {
                 if name.starts_with("lo") {
                     // Loopback MAC is all zeros
                 } else {
-                    hwaddr[2..8].copy_from_slice(&axnet::interface_mac_address());
+                    hwaddr[2..8].copy_from_slice(&net::interface_mac_address());
                 }
                 process.write_user_bytes(arg + 16, &hwaddr)?;
                 return Ok(0);
@@ -1525,7 +1525,7 @@ impl FdObject for Socket {
     }
 
     fn poll(&self) -> Result<PollState, LinuxError> {
-        axnet::poll_interfaces();
+        net::poll_interfaces();
         let mut state = match &self.inner {
             SocketInner::Tcp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
             SocketInner::Udp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
@@ -1601,7 +1601,7 @@ impl FdObject for Socket {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut alloc::vec::Vec<PollRegistration>,
     ) -> Result<(), LinuxError> {
         match &self.inner {

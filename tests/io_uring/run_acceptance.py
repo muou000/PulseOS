@@ -631,7 +631,7 @@ run_fio_case direct_psync /root/fio-uring-bench 64m --ioengine=psync --direct=1 
 run_fio_case direct_uring_qd1 /root/fio-uring-bench 64m --ioengine=io_uring --direct=1 --rw=randread --iodepth=1
 run_fio_case direct_uring_qd16 /root/fio-uring-bench 64m --ioengine=io_uring --direct=1 --rw=randread --iodepth=16 --iodepth_batch_submit=8 --iodepth_batch_complete_min=1 --iodepth_batch_complete_max=8 --fixedbufs=1 --registerfiles=1
 
-echo "Warming 4 MiB page cache file (within axfs 1024-page soft limit)..."
+echo "Warming 4 MiB page cache file (within fs 1024-page soft limit)..."
 dd if=/root/fio-uring-cached of=/dev/null bs=1M
 
 run_fio_case cached_psync /root/fio-uring-cached 4m --ioengine=psync --direct=0 --rw=read --iodepth=1

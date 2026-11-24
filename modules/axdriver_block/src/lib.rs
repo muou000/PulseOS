@@ -496,12 +496,12 @@ pub trait BlockDriverOps: BaseDriverOps {
 ///
 /// `+ Send + Sync` is required on the trait itself so that
 /// `Arc<dyn AsyncBlockDriverOps + Send + Sync>` (the unified handle used by
-/// `arceos::axfs::disk::SharedBlockDevice`) is valid. Implementors do not need
+/// `arceos::fs::disk::SharedBlockDevice`) is valid. Implementors do not need
 /// to provide separate `unsafe impl Send/Sync` — the bound enforces them.
 ///
 /// # Integration Points
 ///
-/// - `axfs` block I/O path is built around `SharedBlockDevice`, whose inner
+/// - `fs` block I/O path is built around `SharedBlockDevice`, whose inner
 ///   handle is `Arc<dyn DynAsyncBlockDriverOps + Send + Sync>`. Async methods
 ///   take `&self`, allowing independent requests to be in flight without an
 ///   outer device mutex.
@@ -552,7 +552,7 @@ pub trait AsyncBlockDriverOps: BlockDriverOps + Send + Sync {
 /// **not** dyn-compatible: `Box<dyn AsyncBlockDriverOps>` is rejected by the
 /// compiler (`E0038`). To represent a clonable, type-erased handle such as
 /// `Arc<dyn DynAsyncBlockDriverOps + Send + Sync>` (used by
-/// `arceos::axfs::disk::SharedBlockDevice`), we provide this alternate trait
+/// `arceos::fs::disk::SharedBlockDevice`), we provide this alternate trait
 /// whose futures are boxed.
 ///
 /// # Blanket implementation

@@ -150,7 +150,7 @@ pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
     let std_addr = core::net::SocketAddr::from(addr);
 
     // Validate local IP
-    if !axnet::is_local_ip(&std_addr.ip()) {
+    if !net::is_local_ip(&std_addr.ip()) {
         return -(LinuxError::EADDRNOTAVAIL.code() as isize);
     }
 

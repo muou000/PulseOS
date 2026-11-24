@@ -72,7 +72,7 @@ impl Process {
     /// the process address-space slot (exec) and its VMAs (unmap/mprotect).
     /// The observer is the current task with IRQs disabled throughout `capture`.
     #[cfg(feature = "bpf-trace")]
-    pub(crate) fn with_sampling_aspace<R>(&self, capture: impl FnOnce(&axmm::AddrSpace) -> R) -> Option<R> {
+    pub(crate) fn with_sampling_aspace<R>(&self, capture: impl FnOnce(&mm::AddrSpace) -> R) -> Option<R> {
         if hal::asm::irqs_enabled() {
             return None;
         }

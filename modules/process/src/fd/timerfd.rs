@@ -9,7 +9,7 @@ use core::{
 };
 
 use axerrno::{LinuxError, LinuxResult};
-use axio::PollState;
+use io::PollState;
 use task::future::{CancelHandle, global_executor, sleep_until, yield_now};
 use linux_raw_sys::{
     general::{
@@ -388,10 +388,10 @@ impl FdObject for TimerFdObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        events: axpoll::IoEvents,
+        events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
-        if events.contains(axpoll::IoEvents::IN) {
+        if events.contains(poll::IoEvents::IN) {
             let owner = self.clone();
             let registration = owner.read_wait_queue.register_owned_waker(cx.waker());
             registrations.push(PollRegistration::new(move || {

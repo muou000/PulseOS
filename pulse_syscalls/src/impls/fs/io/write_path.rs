@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use axerrno::LinuxError;
-use axio::SeekFrom;
+use io::SeekFrom;
 use linux_raw_sys::general::iovec;
 use pulse_core::fd_table::{FdObject, FileObject};
 

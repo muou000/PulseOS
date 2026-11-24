@@ -109,8 +109,8 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             }
 
             let location = match &opened {
-                axfs::OpenResult::File(file) => file.location(),
-                axfs::OpenResult::Dir(dir) => dir,
+                fs::OpenResult::File(file) => file.location(),
+                fs::OpenResult::Dir(dir) => dir,
             };
 
             if let Err(err) = crate::impls::fs::common::check_faccess_permission_with_metadata(
@@ -172,7 +172,7 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
         };
         let ctx = context_for_dirfd(resolved_dirfd)?;
         let (parent_loc, entry_name) = task::future::block_on(
-            ctx.resolve_nonexistent(axfs_ng_vfs::path::Path::new(path)),
+            ctx.resolve_nonexistent(vfs::path::Path::new(path)),
         )
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
         if crate::impls::fs::common::is_location_readonly(&parent_loc) {

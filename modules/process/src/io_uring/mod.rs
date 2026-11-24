@@ -1,7 +1,7 @@
 //! Core kernel `io_uring` instance state (`IoUringState`) and file descriptor (`IoUringObject`).
 //!
 //! # Lock ordering (ADR-0007)
-//! `submit_lock` -> `register_lock` (sleepable) -> `Process` / `FdObject` / `axfs` / `axnet` ->
+//! `submit_lock` -> `register_lock` (sleepable) -> `Process` / `FdObject` / `fs` / `net` ->
 //! `inner` / `fixed_buffers` / `fixed_files` (`SpinNoIrq`) ->
 //! `eventfd` (`SpinNoIrq`) -> `WaitQueue`.
 //! Never invoke `Future::poll`, pin user pages, drop futures/FDs/processes/fixed-buffer tables,
@@ -23,11 +23,11 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use kernel_alloc::global_allocator;
 use axerrno::{LinuxError, LinuxResult};
-use axfs::FileFlags as AxFileFlags;
+use fs::FileFlags as AxFileFlags;
 use hal::paging::MappingFlags;
-use axio::PollState;
-use axmm::{PreparedMapping, SharedFrame};
-use axpoll::IoEvents;
+use io::PollState;
+use mm::{PreparedMapping, SharedFrame};
+use poll::IoEvents;
 use sync::Mutex;
 use task::WaitQueue;
 use task::future::CancelHandle;
@@ -38,15 +38,15 @@ use linux_raw_sys::io_uring::{
     io_uring_params,
 };
 use memory_addr::PAGE_SIZE_4K;
-use pulse_io_uring_core::capacity::validate_and_compute_ring_geometry;
-use pulse_io_uring_core::orchestrator::{
+use io_uring_core::capacity::validate_and_compute_ring_geometry;
+use io_uring_core::orchestrator::{
     OrchestratorEffects, PreparedRequest, RequestId, RequestKind, RequestOrchestrator, RequestPhase,
 };
-use pulse_io_uring_core::resources::{
+use io_uring_core::resources::{
     FixedBufferRegistry, FixedBufferSlot, FixedBufferTable, FixedFileRegistry, UserIoSegment,
     validate_fixed_buffer_specs,
 };
-use pulse_io_uring_core::ring::{
+use io_uring_core::ring::{
     CompletionRingState, PostCqeOutcome, SharedRingMemory, SubmitRingState,
 };
 use pulse_user_abi::io_uring::{

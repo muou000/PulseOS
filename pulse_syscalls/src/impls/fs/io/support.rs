@@ -13,7 +13,7 @@ pub(super) fn fault_in_user_io_range(user_addr: usize, len: usize, write: bool) 
 }
 
 #[inline]
-pub(super) fn requested_poll_revents(events: i16, state: axio::PollState) -> i16 {
+pub(super) fn requested_poll_revents(events: i16, state: io::PollState) -> i16 {
     crate::validation::io::requested_poll_revents(events, state.readable, state.writable)
 }
 

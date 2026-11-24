@@ -1,6 +1,6 @@
 use alloc::{sync::Arc, vec::Vec};
 
-use axfs::{CachedFile, FileFlags};
+use fs::{CachedFile, FileFlags};
 use hal::paging::MappingFlags;
 use linux_raw_sys::general::{
     MADV_DOFORK, MADV_DONTFORK, MADV_DONTNEED, MADV_FREE, MADV_NORMAL, MADV_RANDOM,
@@ -297,7 +297,7 @@ pub fn sys_mmap(
                 .absolute_path()
                 .is_ok_and(|path| path.as_str() == "/dev/zero")
             {
-                match axmm::PreparedMapping::anonymous(
+                match mm::PreparedMapping::anonymous(
                     aligned_length,
                     map_flags,
                     is_shared,
@@ -319,7 +319,7 @@ pub fn sys_mmap(
                     Ok(cached) => cached,
                     Err(_) => return -LinuxError::ENODEV.code() as isize,
                 };
-                match axmm::PreparedMapping::file(
+                match mm::PreparedMapping::file(
                     aligned_length,
                     map_flags,
                     {
@@ -340,7 +340,7 @@ pub fn sys_mmap(
             }
         }
     } else {
-        match axmm::PreparedMapping::anonymous(
+        match mm::PreparedMapping::anonymous(
             aligned_length,
             map_flags,
             is_shared,
@@ -355,11 +355,11 @@ pub fn sys_mmap(
         if addr == 0 || !is_page_aligned(addr) {
             return -LinuxError::EINVAL.code() as isize;
         }
-        axmm::MappingPlacement::FixedNoReplace(aligned_addr)
+        mm::MappingPlacement::FixedNoReplace(aligned_addr)
     } else if flags & MAP_FIXED as usize != 0 {
-        axmm::MappingPlacement::Fixed(aligned_addr)
+        mm::MappingPlacement::Fixed(aligned_addr)
     } else {
-        axmm::MappingPlacement::Anywhere(if addr == 0 {
+        mm::MappingPlacement::Anywhere(if addr == 0 {
             VirtAddr::from(pulse_core::config::USER_SPACE_BASE)
         } else {
             aligned_addr
@@ -370,7 +370,7 @@ pub fn sys_mmap(
         Ok(address) => address.as_usize(),
         Err(error) => return -LinuxError::from(error).code() as isize,
     };
-    if matches!(placement, axmm::MappingPlacement::Fixed(_)) {
+    if matches!(placement, mm::MappingPlacement::Fixed(_)) {
         let _ = proc.memlock_unlock_range(map_addr, aligned_length);
     }
     if let Err(error) = proc.maybe_lock_future_range(map_addr, aligned_length) {

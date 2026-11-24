@@ -1,5 +1,5 @@
 use axerrno::LinuxError;
-use axio::SeekFrom;
+use io::SeekFrom;
 use linux_raw_sys::general::{
     AT_FDCWD, F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_GETFL, F_GETLK, F_GETPIPE_SZ, F_OFD_GETLK,
     F_OFD_SETLK, F_OFD_SETLKW, F_RDLCK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW, F_SETPIPE_SZ, F_UNLCK,

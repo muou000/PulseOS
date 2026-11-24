@@ -106,7 +106,7 @@ separate card.
 ## Ethernet
 
 The VisionFive 2 feature set registers GMAC0 (`0x16030000`, PLIC source 7) as
-a DWMAC 5.20 network device and enables the normal PulseOS `axnet` runtime.
+a DWMAC 5.20 network device and enables the normal PulseOS `net` runtime.
 Probe data comes from the live FDT, including the MAC address and PHY phandle.
 Both the mainline `starfive,jh7110-dwmac` compatible and the older vendor
 U-Boot `starfive,jh7110-eqos-5.20` compatible are accepted.
@@ -166,7 +166,7 @@ test returned `HTTP/1.1 200 OK`, read `/etc/os-release` completely, and exited
 with curl status 0. Physical VisionFive 2 RX/TX acceptance is recorded below
 from separate host-to-board ARP, ICMP, and numeric-address TCP tests.
 
-Interface-query responses are derived from the live `axnet` interface rather
+Interface-query responses are derived from the live `net` interface rather
 than QEMU constants. `RTM_GETLINK`, `RTM_GETADDR`, `SIOCGIFCONF`,
 `SIOCGIFHWADDR`, `SIOCGIFADDR`, `SIOCGIFNETMASK`, and `SIOCGIFBRDADDR` therefore
 report the VisionFive 2 address and EEPROM MAC. The current root filesystem

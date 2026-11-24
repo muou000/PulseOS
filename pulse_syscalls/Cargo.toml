@@ -10,17 +10,17 @@ repository.workspace = true
 [features]
 default = ["irq", "ext4"]
 irq = ["task/irq"]
-ext4 = ["axfs/ext4"]
-fat = ["axfs/fat"]
+ext4 = ["fs/ext4"]
+fat = ["fs/fat"]
 bpf-trace = ["task/bpf-trace", "pulse_core/bpf-trace"]
-mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
+mapping-lifecycle-test = ["fs/mapping-lifecycle-test"]
 guest-checks = ["pulse_core/guest-checks"]
-file-io-test = ["axfs/file-io-test", "pulse_core/file-io-test"]
+file-io-test = ["fs/file-io-test", "pulse_core/file-io-test"]
 
 [dependencies]
 bpf.workspace = true
 axerrno.workspace = true
-pulse_io_uring_core.workspace = true
+io_uring_core.workspace = true
 linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy", "io_uring"] }
 pulse_bpf_schema = { workspace = true }
 pulse_user_abi.workspace = true
@@ -30,16 +30,16 @@ spin.workspace = true
 ipc.workspace = true
 cpu.workspace = true
 kernel_alloc.workspace = true
-axmm.workspace = true
+mm.workspace = true
 hal.workspace = true
 kernel_log.workspace = true
 task = { workspace = true, features = ["multitask"] }
 config.workspace = true
-axnet.workspace = true
-axio.workspace = true
-axpoll.workspace = true
-axfs.workspace = true
-axfs-ng-vfs.workspace = true
+net.workspace = true
+io.workspace = true
+poll.workspace = true
+fs.workspace = true
+vfs.workspace = true
 linkme.workspace = true
 memory_addr.workspace = true
 bitflags.workspace = true

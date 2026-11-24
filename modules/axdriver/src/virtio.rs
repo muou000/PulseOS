@@ -10,7 +10,7 @@ use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
 use hal::mem::{phys_to_virt, virt_to_phys};
 #[cfg(net_dev = "virtio-net")]
-use axpoll::PollSet;
+use poll::PollSet;
 use cfg_if::cfg_if;
 use kspin::SpinNoIrq;
 
@@ -331,7 +331,7 @@ cfg_if! {
             fn alloc_tx_buffer(&mut self, size: usize) -> DevResult<axdriver_net::NetBufPtr> {
                 self.inner.inner.lock().alloc_tx_buffer(size)
             }
-            fn poll_set(&self) -> Option<&axpoll::PollSet> {
+            fn poll_set(&self) -> Option<&poll::PollSet> {
                 Some(&self.inner.poll_set)
             }
         }
@@ -362,7 +362,7 @@ cfg_if! {
             Dma,
         };
 
-        // axfs fills up to 16 page-cache pages (64 KiB) per sequential read,
+        // fs fills up to 16 page-cache pages (64 KiB) per sequential read,
         // while ext4 coalesces up to 32 common 4 KiB metadata blocks (128 KiB)
         // for one asynchronous flush. Retain both request shapes: otherwise
         // every coalesced metadata flush bypasses this pool and churns a large

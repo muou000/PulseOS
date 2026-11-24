@@ -193,7 +193,7 @@ pub fn sys_copy_file_range(
     let Some(out_file) = output.as_any().downcast_ref::<FileObject>() else {
         return -LinuxError::EINVAL.code() as isize;
     };
-    if out_file.inner().flags().contains(axfs::FileFlags::APPEND) {
+    if out_file.inner().flags().contains(fs::FileFlags::APPEND) {
         return -LinuxError::EBADF.code() as isize;
     }
 

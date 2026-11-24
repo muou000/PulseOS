@@ -85,20 +85,20 @@ impl EpollObject {
             control_wait_queue.unregister_waker(registration);
         }));
 
-        let targets: Vec<(Arc<dyn FdObject>, axpoll::IoEvents)> = {
+        let targets: Vec<(Arc<dyn FdObject>, poll::IoEvents)> = {
             let monitored = self.events.lock();
             let mut list = Vec::new();
             for (&fd, ev) in monitored.iter() {
                 if let Ok(entry) = process.get_fd_entry(fd) {
-                    let mut target_events = axpoll::IoEvents::ALWAYS_POLL;
+                    let mut target_events = poll::IoEvents::ALWAYS_POLL;
                     if ev.event.events & EPOLLIN != 0 {
-                        target_events |= axpoll::IoEvents::IN;
+                        target_events |= poll::IoEvents::IN;
                     }
                     if ev.event.events & EPOLLOUT != 0 {
-                        target_events |= axpoll::IoEvents::OUT;
+                        target_events |= poll::IoEvents::OUT;
                     }
                     if ev.event.events & EPOLLRDHUP != 0 {
-                        target_events |= axpoll::IoEvents::RDHUP;
+                        target_events |= poll::IoEvents::RDHUP;
                     }
                     list.push((entry.object.clone(), target_events));
                 }
@@ -143,7 +143,7 @@ impl FdObject for EpollObject {
     fn register_poll(
         self: Arc<Self>,
         cx: &mut core::task::Context<'_>,
-        _events: axpoll::IoEvents,
+        _events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         let process = crate::current_process()?;
@@ -155,7 +155,7 @@ impl FdObject for EpollObject {
         process: &Arc<crate::Process>,
         thread: Option<&Arc<crate::Thread>>,
         cx: &mut core::task::Context<'_>,
-        _events: axpoll::IoEvents,
+        _events: poll::IoEvents,
         registrations: &mut Vec<PollRegistration>,
     ) -> LinuxResult {
         self.register_poll_for_process(process, thread, cx, registrations)

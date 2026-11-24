@@ -43,7 +43,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
     if major == 10 && minor == 237 {
         // /dev/loop-control
         if cmd == LOOP_CTL_GET_FREE {
-            if let Some(id) = axfs::find_free_loop_device() {
+            if let Some(id) = fs::find_free_loop_device() {
                 return Ok(id as isize);
             } else {
                 return Err(LinuxError::ENOSPC);
@@ -62,7 +62,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                     .downcast_ref::<pulse_core::fd_table::FileObject>()
                 {
                     let file = file_obj.inner();
-                    axfs::set_loop_backing(loop_id, file.clone_with_new_position())
+                    fs::set_loop_backing(loop_id, file.clone_with_new_position())
                         .map_err(LinuxError::from)?;
                     return Ok(0);
                 } else {
@@ -70,27 +70,27 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                 }
             }
             LOOP_CLR_FD => {
-                if !axfs::is_loop_bound(loop_id) {
+                if !fs::is_loop_bound(loop_id) {
                     return Err(LinuxError::ENXIO);
                 }
-                axfs::clear_loop_backing(loop_id).map_err(LinuxError::from)?;
+                fs::clear_loop_backing(loop_id).map_err(LinuxError::from)?;
                 return Ok(0);
             }
             LOOP_SET_STATUS | LOOP_SET_STATUS64 | LOOP_GET_STATUS | LOOP_GET_STATUS64 => {
-                if axfs::is_loop_bound(loop_id) {
+                if fs::is_loop_bound(loop_id) {
                     return Ok(0);
                 } else {
                     return Err(LinuxError::ENXIO);
                 }
             }
             BLKGETSIZE64 => {
-                let size = axfs::get_loop_size(loop_id).unwrap_or(0);
+                let size = fs::get_loop_size(loop_id).unwrap_or(0);
                 write_user_value(arg, &size)?;
                 return Ok(0);
             }
             0x127a => {
                 // BLKGETSIZE (unsigned long)
-                let size = axfs::get_loop_size(loop_id).unwrap_or(0);
+                let size = fs::get_loop_size(loop_id).unwrap_or(0);
                 let sectors = (size / 512) as usize;
                 write_user_value(arg, &sectors)?;
                 return Ok(0);
@@ -133,7 +133,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                     "do_handle_loop_ioctl: handling HDIO_GETGEO for loop{}",
                     loop_id
                 );
-                let size = axfs::get_loop_size(loop_id).unwrap_or(0);
+                let size = fs::get_loop_size(loop_id).unwrap_or(0);
                 let heads = 255u8;
                 let sectors = 63u8;
                 let cylinders = (size / (heads as u64 * sectors as u64 * 512)) as u16;
@@ -196,7 +196,7 @@ fn is_devfs_tty(entry: &FdEntry) -> bool {
     };
     location
         .entry()
-        .downcast::<axfs::DevNode>()
+        .downcast::<fs::DevNode>()
         .map(|node| node.is_tty())
         .unwrap_or(false)
 }

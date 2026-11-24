@@ -43,7 +43,7 @@ multitask = [
     "task/multitask",
     "sync/multitask",
     "runtime/multitask",
-    "axnet?/multitask",
+    "net?/multitask",
     "axdriver?/multitask",
 ]
 sched-fifo = ["task/sched-fifo"]
@@ -59,12 +59,12 @@ fs = [
     "paging",
     "axdriver/virtio-blk",
     "axdriver/dyn",
-    "dep:axfs",
+    "dep:fs",
     "runtime/fs",
 ]
 
 # Networking
-net = ["alloc", "paging", "axdriver/net", "dep:axnet", "runtime/net"]
+net = ["alloc", "paging", "axdriver/net", "dep:net", "runtime/net"]
 
 # Display
 display = [
@@ -82,7 +82,7 @@ rtc = ["hal/rtc", "runtime/rtc"]
 # Device drivers
 bus-mmio = ["axdriver?/bus-mmio"]
 bus-pci = ["axdriver?/bus-pci"]
-driver-ramdisk = ["axdriver?/ramdisk", "axfs?/use-ramdisk"]
+driver-ramdisk = ["axdriver?/ramdisk", "fs?/use-ramdisk"]
 driver-virtio-net = ["axdriver?/virtio-net"]
 driver-starfive-jh7110-dwmac = ["axdriver?/starfive-jh7110-dwmac"]
 driver-bcm2835-sdhci = ["axdriver?/bcm2835-sdhci"]
@@ -103,8 +103,8 @@ hal = { workspace = true }
 kernel_log = { workspace = true }
 kernel_alloc = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
-axfs = { workspace = true, optional = true }
-axnet = { workspace = true, optional = true }
+fs = { workspace = true, optional = true }
+net = { workspace = true, optional = true }
 axdisplay = { workspace = true, optional = true }
 sync = { workspace = true, optional = true }
 task = { workspace = true, optional = true }
