@@ -40,8 +40,8 @@ const fn direct_map_index(paddr: usize) -> usize {
 
 unsafe fn init_mmu() {
     unsafe {
-        axcpu::asm::write_kernel_page_table(pa!(&raw const BOOT_PT_SV39 as usize));
-        axcpu::asm::flush_tlb(None);
+        cpu::asm::write_kernel_page_table(pa!(&raw const BOOT_PT_SV39 as usize));
+        cpu::asm::flush_tlb(None);
     }
 }
 
@@ -103,7 +103,7 @@ unsafe extern "C" fn _start() -> ! {
         call    {init_boot_page_table}
         call    {init_mmu}              // setup boot page table and enabel MMU
         la      t0, {early_trap_vector}
-        csrw    stvec, t0               // report faults until axcpu installs its trap vector
+        csrw    stvec, t0               // report faults until cpu installs its trap vector
 
         mv      a0, s0
         mv      a1, s1

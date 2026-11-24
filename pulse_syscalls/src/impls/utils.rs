@@ -2,7 +2,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{mem::MaybeUninit, ptr::NonNull, time::Duration};
 
 use axerrno::LinuxError;
-use axhal::mem::phys_to_virt;
+use hal::mem::phys_to_virt;
 use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
 use pulse_core::mm::{
@@ -364,7 +364,7 @@ pub(crate) fn timespec_to_update_time(
 fn pin_user_slice(
     user_addr: usize,
     max_len: usize,
-    required_flags: axhal::paging::MappingFlags,
+    required_flags: hal::paging::MappingFlags,
 ) -> Option<PinnedUserSlice> {
     let process = pulse_core::task::current_process().ok()?;
     if max_len == 0 {
@@ -456,11 +456,11 @@ fn pin_user_slice(
 /// suspend. The returned slice is bounded by the caller and may be shorter
 /// when the next virtual page is not resident or physically adjacent.
 pub(crate) fn pin_user_read_slice(user_addr: usize, max_len: usize) -> Option<PinnedUserSlice> {
-    pin_user_slice(user_addr, max_len, axhal::paging::MappingFlags::READ)
+    pin_user_slice(user_addr, max_len, hal::paging::MappingFlags::READ)
 }
 
 /// Pins a physically contiguous user-writable run for an operation that can
 /// suspend while producing bytes into user memory.
 pub(crate) fn pin_user_write_slice(user_addr: usize, max_len: usize) -> Option<PinnedUserSlice> {
-    pin_user_slice(user_addr, max_len, axhal::paging::MappingFlags::WRITE)
+    pin_user_slice(user_addr, max_len, hal::paging::MappingFlags::WRITE)
 }

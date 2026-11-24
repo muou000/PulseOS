@@ -132,12 +132,12 @@ Linux v6.12 的非 sleepable `bpf_get_stack` 使用 `may_fault=false`，LoongArc
 - [S3] [Linux v6.12 LoongArch stacktrace.c](https://github.com/torvalds/linux/blob/v6.12/arch/loongarch/kernel/stacktrace.c)、[stack_frame](https://github.com/torvalds/linux/blob/v6.12/arch/loongarch/include/asm/stacktrace.h)、[prologue unwinder](https://github.com/torvalds/linux/blob/v6.12/arch/loongarch/kernel/unwind_prologue.c)：用户FP链读取与内核展开是分别实现的能力。
 - [S4] [Linux v6.12 stackmap.c](https://github.com/torvalds/linux/blob/v6.12/kernel/bpf/stackmap.c#L405-L510) 与 [perf-event helper proto](https://github.com/torvalds/linux/blob/v6.12/kernel/bpf/stackmap.c#L579-L640)：非sleepable获取、skip/flags、byte count、清零和verifier参数。
 - [S5] [Linux v6.12 bpf.h](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/bpf.h#L3303-L3344)：`bpf_get_stack` 参数和返回语义；helper ID见同文件mapper。
-- [P1] [RV trap](../../modules/axcpu/src/riscv/trap.rs)、[context](../../modules/axcpu/src/riscv/context.rs)、[assembly](../../modules/axcpu/src/riscv/trap.S)。
-- [P2] [LA trap](../../modules/axcpu/src/loongarch64/trap.rs)、[context](../../modules/axcpu/src/loongarch64/context.rs)、[assembly](../../modules/axcpu/src/loongarch64/trap.S)。
-- [P3] [generic IRQ](../../modules/axcpu/src/trap.rs)、[timer hook](../../modules/axtask/src/api.rs)。
-- [P4] [TaskStack与公开top接口](../../modules/axtask/src/task.rs)。
+- [P1] [RV trap](../../modules/cpu/src/riscv/trap.rs)、[context](../../modules/cpu/src/riscv/context.rs)、[assembly](../../modules/cpu/src/riscv/trap.S)。
+- [P2] [LA trap](../../modules/cpu/src/loongarch64/trap.rs)、[context](../../modules/cpu/src/loongarch64/context.rs)、[assembly](../../modules/cpu/src/loongarch64/trap.S)。
+- [P3] [generic IRQ](../../modules/cpu/src/trap.rs)、[timer hook](../../modules/task/src/api.rs)。
+- [P4] [TaskStack与公开top接口](../../modules/task/src/task.rs)。
 - [P5] [Process memory读取](../../modules/process/src/lifecycle/memory.rs)、[uaccess](../../modules/process/src/uaccess/mod.rs)。
-- [P6] [page fault处理](../../modules/process/src/trap.rs)、[exception table](../../modules/axcpu/src/exception_table.rs)。
+- [P6] [page fault处理](../../modules/process/src/trap.rs)、[exception table](../../modules/cpu/src/exception_table.rs)。
 - [P7] [固定context与队列容量](../../crates/pulse_bpf_schema/src/lib.rs)。
 - [P8] [interpreter](../../modules/bpf/src/interpreter.rs)、[verifier](../../modules/bpf/src/verifier.rs)、[program load license处理](../../pulse_syscalls/src/impls/bpf/prog.rs)。
 - [P9] [Thread](../../modules/process/src/thread.rs)。

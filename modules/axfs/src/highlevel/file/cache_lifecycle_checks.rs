@@ -13,7 +13,7 @@ use core::{
 use axfs_ng_vfs::{
     FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeOps, VfsError, VfsResult,
 };
-use axhal::mem::PhysAddr;
+use hal::mem::PhysAddr;
 use axpoll::{IoEvents, Pollable};
 use spin::Mutex;
 
@@ -177,7 +177,7 @@ impl CacheCase {
         let mut page = PageCache::new(false)?;
         page.data().fill(0x67);
         let paddr = page.paddr();
-        check!(axalloc::frame_table().contains(paddr));
+        check!(kernel_alloc::frame_table().contains(paddr));
         shared.page_cache.lock().put(0, page);
         shared.mark_page_dirty_if_paddr(0, paddr, false)?;
         Ok(Self { shared, backend, file })
@@ -186,11 +186,11 @@ impl CacheCase {
         self.shared.page_cache.lock().peek(&0).map(|page| page.dirty).ok_or(VfsError::BadState)
     }
     fn checkpoint(&self) -> VfsResult<()> {
-        axtask::future::block_on(flush_file_cache_state(self.shared.clone()))
+        task::future::block_on(flush_file_cache_state(self.shared.clone()))
             .ok_or(VfsError::BadState)?.1
     }
     fn sync(&self) -> VfsResult<()> {
-        axtask::future::block_on(async {
+        task::future::block_on(async {
             let _guard = self.shared.io_lock.write().await;
             self.shared.sync_dirty_pages_async(&self.file, false).await
         })
@@ -200,7 +200,7 @@ impl CacheCase {
 struct MappingPin(PhysAddr);
 impl Drop for MappingPin {
     fn drop(&mut self) {
-        let remaining = axalloc::frame_table().dec_ref(self.0);
+        let remaining = kernel_alloc::frame_table().dec_ref(self.0);
         debug_assert_ne!(remaining, 0, "cache frame must still own its reference");
     }
 }
@@ -230,7 +230,7 @@ fn identity_publication() -> VfsResult<()> {
         check!(CachedFileShared::pop_clean_lru_pages(&mut cache, 1).is_empty());
         check!(identity.is_current()); // Atomic check with the cache mutex held.
     }
-    axtask::future::block_on(async {
+    task::future::block_on(async {
         let _guard = case.shared.io_lock.write().await;
         case.shared.discard_direct_write_range_without_writeback_async(&case.file, 0, PAGE_SIZE).await
     })?;
@@ -267,7 +267,7 @@ fn redirty_checkpoint() -> VfsResult<()> {
     };
     case.shared.mark_page_dirty_if_paddr(0, paddr, false)?;
     case.backend.pause_write.store(false, Ordering::Release);
-    axtask::future::block_on(checkpoint).ok_or(VfsError::BadState)?.1?;
+    task::future::block_on(checkpoint).ok_or(VfsError::BadState)?.1?;
     check!(case.backend.data.lock()[0] == 0x67);
     check!(case.dirty()? && case.shared.has_pending_background_writeback());
     check!(case.shared.completed_writeback_generation.load(Ordering::Acquire) == target);
@@ -424,7 +424,7 @@ fn test_dirty_retention_and_writebacks() -> VfsResult<()> {
         check!(cached.page_cache.lock().get(&0).unwrap().dirty);
     }
 
-    let flushed = axtask::future::block_on(flush_pending_file_caches_async())?;
+    let flushed = task::future::block_on(flush_pending_file_caches_async())?;
     check!(flushed);
     check!(backend.writes.load(Ordering::Acquire) > 0);
     check!(backend.data.lock()[0] == 0x42);
@@ -443,7 +443,7 @@ fn test_dirty_retention_and_writebacks() -> VfsResult<()> {
     shared2.mark_page_dirty_if_paddr(0, paddr2, false)?;
     drop(shared2);
 
-    axtask::future::block_on(flush_all_file_caches_async())?;
+    task::future::block_on(flush_all_file_caches_async())?;
     check!(backend2.writes.load(Ordering::Acquire) > 0);
     check!(backend2.data.lock()[0] == 0x77);
     {
@@ -467,7 +467,7 @@ fn test_unlink_discard_and_restore_recovery() -> VfsResult<()> {
     shared.mark_page_dirty_if_paddr(0, paddr, false)?;
 
     // Case 2A: Unlink deletion fails -> cache must be restored to shard with dirty page intact!
-    let op_err = axtask::future::block_on(discard_unlinked_file_cache_after(
+    let op_err = task::future::block_on(discard_unlinked_file_cache_after(
         fs_id,
         inode,
         async { Err::<(), VfsError>(VfsError::Io) },
@@ -494,7 +494,7 @@ fn test_unlink_discard_and_restore_recovery() -> VfsResult<()> {
     }
 
     // Case 2C: Unlink deletion succeeds -> cache discarded!
-    let op_ok = axtask::future::block_on(discard_unlinked_file_cache_after(
+    let op_ok = task::future::block_on(discard_unlinked_file_cache_after(
         fs_id,
         inode,
         async { Ok::<(), VfsError>(()) },
@@ -534,7 +534,7 @@ fn test_unlink_interleaving_with_global_collections() -> VfsResult<()> {
 
     // 2. Global writeback runs while unlink lease is active:
     // It must NOT select or write back the unlinked state
-    let _ = axtask::future::block_on(flush_pending_file_caches_async())?;
+    let _ = task::future::block_on(flush_pending_file_caches_async())?;
     check!(backend.writes.load(Ordering::Acquire) == 0);
 
     // 3. Allocator reclaim runs while unlink lease is active:
@@ -555,7 +555,7 @@ fn test_unlink_interleaving_with_global_collections() -> VfsResult<()> {
     }
 
     // 6. Global writeback now flushes the restored cache!
-    let _ = axtask::future::block_on(flush_pending_file_caches_async())?;
+    let _ = task::future::block_on(flush_pending_file_caches_async())?;
     check!(backend.writes.load(Ordering::Acquire) > 0);
     check!(backend.data.lock()[0] == 0x33);
 
@@ -599,7 +599,7 @@ fn test_reclaim_clean_unmapped_only() -> VfsResult<()> {
         check!(cache.contains(&2));
     }
 
-    let remaining = axalloc::frame_table().dec_ref(paddr2);
+    let remaining = kernel_alloc::frame_table().dec_ref(paddr2);
     check!(remaining > 0);
 
     shared.page_cache.lock().clear();

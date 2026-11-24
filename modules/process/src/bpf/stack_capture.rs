@@ -4,7 +4,7 @@
 //! receives integer registers, bounded IPs, and a termination reason. In
 //! particular a kernel observation never invents an outer userspace frame.
 
-use axhal::{context::TrapFrame, paging::MappingFlags};
+use hal::{context::TrapFrame, paging::MappingFlags};
 use pulse_bpf_schema::{FrozenStack, StackLimits, StackRegisters, StackStatus, walk_frame_pointers};
 
 #[cfg(target_arch = "riscv64")]
@@ -37,23 +37,23 @@ fn aligned_pc(ip: u64) -> bool {
 pub(super) unsafe fn freeze(
     tf: &TrapFrame,
     from_user: bool,
-    task: &axtask::TaskInner,
+    task: &task::TaskInner,
 ) -> FrozenStack {
     let origin = registers(tf);
-    if axhal::asm::irqs_enabled() {
+    if hal::asm::irqs_enabled() {
         return FrozenStack::unavailable(origin, StackStatus::Unavailable);
     }
-    let start = axhal::time::monotonic_time_nanos();
+    let start = hal::time::monotonic_time_nanos();
     let mut stack = if from_user {
         freeze_user(origin, task)
     } else {
         freeze_kernel(origin, task)
     };
-    stack.capture_ns = axhal::time::monotonic_time_nanos().saturating_sub(start);
+    stack.capture_ns = hal::time::monotonic_time_nanos().saturating_sub(start);
     stack
 }
 
-fn freeze_user(origin: StackRegisters, task: &axtask::TaskInner) -> FrozenStack {
+fn freeze_user(origin: StackRegisters, task: &task::TaskInner) -> FrozenStack {
     // This is the interrupted current task, whose process stays registered
     // until its exit path can run. The temporary Arc cannot outlive this IRQ.
     let Ok(thread) = crate::thread_ref_from_task(task) else {
@@ -85,7 +85,7 @@ fn freeze_user(origin: StackRegisters, task: &axtask::TaskInner) -> FrozenStack 
     }).unwrap_or_else(|| FrozenStack::unavailable(origin, StackStatus::Busy))
 }
 
-fn freeze_kernel(origin: StackRegisters, task: &axtask::TaskInner) -> FrozenStack {
+fn freeze_kernel(origin: StackRegisters, task: &task::TaskInner) -> FrozenStack {
     let Some(bounds) = task.kernel_stack_range() else {
         return FrozenStack::unavailable(origin, StackStatus::Unavailable);
     };
@@ -112,6 +112,6 @@ fn freeze_kernel(origin: StackRegisters, task: &axtask::TaskInner) -> FrozenStac
         // from the observer's own frames below it. Dedicated assembly reads
         // opaque machine words and handles data faults before the resolver;
         // no Rust slice/reference to interrupted stack locals is formed.
-        unsafe { axcpu::sampling::read_frame_nofault(address) }.ok_or(StackStatus::ReadFault)
+        unsafe { cpu::sampling::read_frame_nofault(address) }.ok_or(StackStatus::ReadFault)
     }, |ip| aligned_pc(ip) && (text_start..text_end).contains(&ip))
 }

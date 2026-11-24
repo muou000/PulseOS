@@ -10,7 +10,7 @@ use core::{
 
 use axerrno::{LinuxError, LinuxResult};
 use axio::PollState;
-use axtask::future::{CancelHandle, global_executor, sleep_until, yield_now};
+use task::future::{CancelHandle, global_executor, sleep_until, yield_now};
 use linux_raw_sys::{
     general::{
         CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, O_CLOEXEC, O_NONBLOCK, POLLIN, S_IFREG,
@@ -29,7 +29,7 @@ pub const TFD_TIMER_CANCEL_ON_SET: u32 = 2;
 
 #[inline]
 fn monotonic_now_ns() -> u64 {
-    u64::try_from(axhal::time::monotonic_time().as_nanos()).unwrap_or(u64::MAX)
+    u64::try_from(hal::time::monotonic_time().as_nanos()).unwrap_or(u64::MAX)
 }
 
 struct TimerFdInner {
@@ -42,12 +42,12 @@ struct TimerFdInner {
     readable_sequence: u64,
 }
 
-/// Linux-compatible timerfd object backed by `axtask::future` timers.
+/// Linux-compatible timerfd object backed by `task::future` timers.
 pub struct TimerFdObject {
     self_weak: Weak<Self>,
     clock_id: u32,
     nonblocking: AtomicBool,
-    read_wait_queue: axtask::WaitQueue,
+    read_wait_queue: task::WaitQueue,
     inner: Mutex<TimerFdInner>,
 }
 
@@ -57,7 +57,7 @@ impl TimerFdObject {
             self_weak: self_weak.clone(),
             clock_id,
             nonblocking: AtomicBool::new(nonblocking),
-            read_wait_queue: axtask::WaitQueue::new(),
+            read_wait_queue: task::WaitQueue::new(),
             inner: Mutex::new(TimerFdInner {
                 armed: false,
                 next_deadline_ns: 0,
@@ -188,7 +188,7 @@ impl TimerFdObject {
             } else {
                 let deadline_ns = if (flags & TFD_TIMER_ABSTIME) != 0 {
                     if self.clock_id == CLOCK_REALTIME {
-                        let offset = axhal::time::current_epochoffset_nanos();
+                        let offset = hal::time::current_epochoffset_nanos();
                         value_ns.saturating_sub(offset)
                     } else {
                         value_ns
@@ -358,7 +358,7 @@ impl FdObject for TimerFdObject {
         let condition = || self.has_expirations() || Self::current_has_pending_signal();
         match deadline {
             Some(deadline) => {
-                let now = axhal::time::monotonic_time();
+                let now = hal::time::monotonic_time();
                 if now >= deadline {
                     return Ok(self.has_expirations());
                 }
@@ -376,7 +376,7 @@ impl FdObject for TimerFdObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut Vec<&'a axtask::WaitQueue>,
+        wqs: &mut Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         if (events & POLLIN as i16) != 0 {
             wqs.push(&self.read_wait_queue);

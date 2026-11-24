@@ -8,7 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-axconfig.workspace = true
+config.workspace = true
 axmm.workspace = true
 elf_loader.workspace = true
 process.workspace = true

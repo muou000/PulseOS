@@ -1167,7 +1167,7 @@ pub fn execute_accept_request(
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;
             }
-            let res = axtask::future::block_on(run_socket_retry(
+            let res = task::future::block_on(run_socket_retry(
                 &data.entry,
                 &ctx_cloned,
                 IoEvents::IN | IoEvents::ERR | IoEvents::HUP,
@@ -1310,7 +1310,7 @@ pub fn execute_connect_request(
             if !state_cloned.is_request_active(req_id) || state_cloned.is_dying() {
                 return;
             }
-            let res = axtask::future::block_on(finish_connect_async(
+            let res = task::future::block_on(finish_connect_async(
                 &data.entry,
                 &ctx_cloned,
                 &data.addr,
@@ -1413,7 +1413,7 @@ fn spawn_socket_transfer(
             let res = if dontwait {
                 downcast_sock(&entry).and_then(|sock| engine.step(&ctx_cloned, sock, dest))
             } else {
-                axtask::future::block_on(run_socket_retry(&entry, &ctx_cloned, events, || {
+                task::future::block_on(run_socket_retry(&entry, &ctx_cloned, events, || {
                     engine.step(&ctx_cloned, downcast_sock(&entry)?, dest)
                 }))
             };

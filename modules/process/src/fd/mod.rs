@@ -13,7 +13,7 @@ use core::{
 use axerrno::{LinuxError, LinuxResult};
 use axfs::{File, FileFlags as AxFileFlags, OpenResult};
 use axfs_ng_vfs::{Location, Metadata, NodeType};
-use axhal::paging::MappingFlags;
+use hal::paging::MappingFlags;
 use axio::{PollState, Seek, SeekFrom, Write};
 use kspin::{SpinNoIrq, SpinNoPreempt};
 use linux_raw_sys::{
@@ -119,7 +119,7 @@ pub trait FdObject: Send + Sync {
     fn get_wait_queues<'a>(
         &'a self,
         _events: i16,
-        _wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+        _wqs: &mut alloc::vec::Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         Ok(false)
     }
@@ -370,7 +370,7 @@ fn metadata_to_stat(metadata: &Metadata) -> stat {
 }
 
 pub fn location_to_stat(location: &Location) -> LinuxResult<stat> {
-    let mut st = metadata_to_stat(&axtask::future::block_on(location.metadata())?);
+    let mut st = metadata_to_stat(&task::future::block_on(location.metadata())?);
     if let Some(size) = axfs::cached_file_size_if_present(location) {
         st.st_size = size as _;
     }

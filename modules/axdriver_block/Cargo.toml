@@ -41,10 +41,10 @@ repository = "https://github.com/arceos-org/axdriver_crates"
 async = []
 bcm2835-sdhci = ["dep:bcm2835-sdhci"]
 default = []
-ls2k1000-ahci = ["dep:axhal", "dep:simple-ahci"]
+ls2k1000-ahci = ["dep:hal", "dep:simple-ahci"]
 ramdisk = []
 starfive-jh7110-sdmmc = [
-    "dep:axhal",
+    "dep:hal",
     "dep:axpoll",
     "dep:dwmmc-host",
     "dep:rdif-block",
@@ -74,8 +74,8 @@ git = "https://github.com/lhw2002426/bcm2835-sdhci.git"
 rev = "e974f16"
 optional = true
 
-[dependencies.axhal]
-path = "../axhal"
+[dependencies.hal]
+path = "../hal"
 optional = true
 
 [dependencies.axpoll]

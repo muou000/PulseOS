@@ -1,7 +1,7 @@
 use super::*;
 
 pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
-    axlog::trace!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
+    kernel_log::trace!("sys_read: fd={}, buf={:#x}, count={}", fd, buf, count);
     if buf == 0 && count != 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -90,7 +90,7 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
-    axlog::trace!("sys_write: fd={}, buf={:#x}, count={}", fd, buf, count);
+    kernel_log::trace!("sys_write: fd={}, buf={:#x}, count={}", fd, buf, count);
     if buf == 0 && count != 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -163,7 +163,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
     )
 }
 pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    axlog::trace!(
+    kernel_log::trace!(
         "sys_pread64: fd={}, buf={:#x}, count={}, offset={}",
         fd,
         buf,
@@ -247,7 +247,7 @@ pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize 
 }
 
 pub fn sys_pwrite64(fd: usize, buf: usize, count: usize, offset: usize) -> isize {
-    axlog::trace!(
+    kernel_log::trace!(
         "sys_pwrite64: fd={}, buf={:#x}, count={}, offset={}",
         fd,
         buf,

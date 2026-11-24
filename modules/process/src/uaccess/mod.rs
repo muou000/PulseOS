@@ -20,7 +20,7 @@ pub use pulse_user_abi::{
 };
 
 use super::Process;
-use axconfig::user::{USER_SPACE_BASE, USER_SPACE_SIZE};
+use config::user::{USER_SPACE_BASE, USER_SPACE_SIZE};
 
 pub const DEFAULT_USER_CSTRING_MAX: usize = 4096;
 const USER_CSTRING_READ_CHUNK: usize = 256;
@@ -57,9 +57,9 @@ struct UserAccessGuard {
 impl UserAccessGuard {
     #[inline]
     fn new() -> Self {
-        let restore_disabled = !axcpu::asm::user_access_enabled();
+        let restore_disabled = !cpu::asm::user_access_enabled();
         if restore_disabled {
-            axcpu::asm::enable_user_access();
+            cpu::asm::enable_user_access();
         }
         Self { restore_disabled }
     }
@@ -70,7 +70,7 @@ impl Drop for UserAccessGuard {
     #[inline]
     fn drop(&mut self) {
         if self.restore_disabled {
-            axcpu::asm::disable_user_access();
+            cpu::asm::disable_user_access();
         }
     }
 }
@@ -84,7 +84,7 @@ impl Drop for UserAccessGuard {
 /// dedicated no-fault trap continuation must be installed.
 #[cfg(all(feature = "bpf-trace", any(target_arch = "riscv64", target_arch = "loongarch64")))]
 pub(crate) unsafe fn read_sampling_frame(address: usize) -> Option<[u8; 16]> {
-    if address & 7 != 0 || !user_range_is_valid(address, 16) || axhal::asm::irqs_enabled() {
+    if address & 7 != 0 || !user_range_is_valid(address, 16) || hal::asm::irqs_enabled() {
         return None;
     }
     #[cfg(target_arch = "riscv64")]
@@ -92,7 +92,7 @@ pub(crate) unsafe fn read_sampling_frame(address: usize) -> Option<[u8; 16]> {
     // SAFETY: the checked range/alignment above, caller's mapping/lifetime
     // leases and IRQ contract establish the assembly reader's prerequisites.
     // UserAccessGuard restores the entry SUM state on every return.
-    unsafe { axcpu::sampling::read_frame_nofault(address) }
+    unsafe { cpu::sampling::read_frame_nofault(address) }
 }
 
 /// Copies as many bytes as possible and returns the number copied.
@@ -104,7 +104,7 @@ pub fn copy_from_user_partial(dst: &mut [u8], src_user_addr: usize) -> AxResult<
     #[cfg(target_arch = "riscv64")]
     let _guard = UserAccessGuard::new();
     let uncopied =
-        unsafe { axcpu::user_copy(dst.as_mut_ptr(), src_user_addr as *const u8, dst.len()) };
+        unsafe { cpu::user_copy(dst.as_mut_ptr(), src_user_addr as *const u8, dst.len()) };
     Ok(dst.len().saturating_sub(uncopied.min(dst.len())))
 }
 
@@ -116,7 +116,7 @@ pub fn copy_to_user_partial(dst_user_addr: usize, src: &[u8]) -> AxResult<usize>
     validate_user_range(dst_user_addr, src.len())?;
     #[cfg(target_arch = "riscv64")]
     let _guard = UserAccessGuard::new();
-    let uncopied = unsafe { axcpu::user_copy(dst_user_addr as *mut u8, src.as_ptr(), src.len()) };
+    let uncopied = unsafe { cpu::user_copy(dst_user_addr as *mut u8, src.as_ptr(), src.len()) };
     Ok(src.len().saturating_sub(uncopied.min(src.len())))
 }
 

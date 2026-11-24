@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use axerrno::LinuxError;
-use axlog::*;
+use kernel_log::*;
 use pulse_core::net::{Socket, SocketInner};
 use pulse_user_abi::net::MessageHeader as MsgHdr;
 
@@ -694,7 +694,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
         None
     };
 
-    let start_ns = axhal::time::monotonic_time_nanos() as u64;
+    let start_ns = hal::time::monotonic_time_nanos() as u64;
     let timeout_ns = timeout_val.map(|d| d.as_nanos() as u64);
 
     let originally_nonblocking = socket.is_nonblocking();
@@ -744,7 +744,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
                 }
 
                 if let Some(limit_ns) = timeout_ns {
-                    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+                    let now_ns = hal::time::monotonic_time_nanos() as u64;
                     if now_ns >= start_ns.saturating_add(limit_ns) {
                         if received_count > 0 {
                             break;
@@ -762,7 +762,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
                     }
                 }
 
-                axtask::yield_now();
+                task::yield_now();
             }
             Err(e) => {
                 if received_count > 0 {
@@ -776,7 +776,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
 
     if timeout != 0 {
         if let Some(limit_ns) = timeout_ns {
-            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            let now_ns = hal::time::monotonic_time_nanos() as u64;
             let elapsed_ns = now_ns.saturating_sub(start_ns);
             let remaining_ns = limit_ns.saturating_sub(elapsed_ns);
             let remaining_ts = linux_raw_sys::general::timespec {

@@ -215,9 +215,9 @@ impl crate::AsyncBlockDriverOps for Jh7110SdMmc {
 fn initialize_card(card: &mut Card, base: usize) -> Result<CardInfo, Error> {
     let mut scratch = SdioInitScratch::new();
     let mut request = card.submit_init_with_preference(CardInitPreference::SdOnly, &mut scratch)?;
-    let deadline = axhal::time::monotonic_time() + INIT_TIMEOUT;
+    let deadline = hal::time::monotonic_time() + INIT_TIMEOUT;
     loop {
-        if axhal::time::monotonic_time() >= deadline {
+        if hal::time::monotonic_time() >= deadline {
             return Err(Error::Timeout(sdmmc_protocol::error::ErrorContext::new(
                 sdmmc_protocol::error::Phase::Init,
             )));
@@ -230,7 +230,7 @@ fn initialize_card(card: &mut Card, base: usize) -> Result<CardInfo, Error> {
         match progress? {
             OperationPoll::Pending => {
                 if request.take_needs_pace() {
-                    axhal::time::busy_wait(INIT_PACE);
+                    hal::time::busy_wait(INIT_PACE);
                 } else {
                     core::hint::spin_loop();
                 }
@@ -250,9 +250,9 @@ fn read_one_block(card: &mut Card, block_id: u32, buf: &mut [u8]) -> Result<(), 
     pio_transfer_fence();
     let mut request = card.submit_read_blocks_into(block_id, buf)?;
     pio_transfer_fence();
-    let deadline = axhal::time::monotonic_time() + IO_TIMEOUT;
+    let deadline = hal::time::monotonic_time() + IO_TIMEOUT;
     loop {
-        if axhal::time::monotonic_time() >= deadline {
+        if hal::time::monotonic_time() >= deadline {
             return Err(Error::Timeout(
                 sdmmc_protocol::error::ErrorContext::for_cmd(
                     sdmmc_protocol::error::Phase::DataRead,
@@ -274,9 +274,9 @@ fn write_one_block(card: &mut Card, block_id: u32, buf: &[u8]) -> Result<(), Err
     pio_transfer_fence();
     let mut request = card.submit_write_blocks_from(block_id, buf)?;
     pio_transfer_fence();
-    let deadline = axhal::time::monotonic_time() + IO_TIMEOUT;
+    let deadline = hal::time::monotonic_time() + IO_TIMEOUT;
     loop {
-        if axhal::time::monotonic_time() >= deadline {
+        if hal::time::monotonic_time() >= deadline {
             return Err(Error::Timeout(
                 sdmmc_protocol::error::ErrorContext::for_cmd(
                     sdmmc_protocol::error::Phase::DataWrite,

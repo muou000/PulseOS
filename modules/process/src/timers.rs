@@ -13,7 +13,7 @@ static STDIN_POLL_INTERVAL: core::sync::atomic::AtomicU64 = core::sync::atomic::
 
 /// Timer callbacks run with local IRQs disabled. Keep their handoff to this
 /// worker atomic and bounded; all process/queue locks stay in task context.
-static TIMER_WORK_WAIT: axtask::WaitQueue = axtask::WaitQueue::new();
+static TIMER_WORK_WAIT: task::WaitQueue = task::WaitQueue::new();
 static TIMER_WORK_PENDING: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 static TIMER_PROCESS_WORK_PENDING: core::sync::atomic::AtomicBool =
@@ -145,15 +145,15 @@ fn start_timer_worker() {
     {
         return;
     }
-    axtask::spawn_raw(
+    task::spawn_raw(
         timer_work_loop,
         "pulse_timer_work".into(),
-        axconfig::TASK_STACK_SIZE,
+        config::TASK_STACK_SIZE,
     );
 }
 
 fn itimer_tick_hook() {
-    let now_ns = axhal::time::monotonic_time_nanos() as u64;
+    let now_ns = hal::time::monotonic_time_nanos() as u64;
     let last_ns = LAST_TICK_NS.read_current();
     LAST_TICK_NS.write_current(now_ns);
     let elapsed_ns = if last_ns == 0 {
@@ -191,7 +191,7 @@ pub fn schedule_itimer_event(pid: u64, deadline: u64) {
         return;
     };
     let process = Arc::downgrade(&process);
-    axtask::set_generic_timer(
+    task::set_generic_timer(
         deadline,
         alloc::boxed::Box::new(move |_now| {
             if let Some(proc) = process.upgrade()
@@ -208,7 +208,7 @@ pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64, gene
         return;
     };
     let process = Arc::downgrade(&process);
-    axtask::set_generic_timer(
+    task::set_generic_timer(
         deadline,
         alloc::boxed::Box::new(move |_now| {
             if let Some(proc) = process.upgrade()
@@ -222,7 +222,7 @@ pub fn schedule_posix_timer_event(pid: u64, timer_id: usize, deadline: u64, gene
 
 pub fn adjust_absolute_timers() {
     let procs = processes_snapshot();
-    let new_offset = axhal::time::current_epochoffset_nanos();
+    let new_offset = hal::time::current_epochoffset_nanos();
     for proc in procs {
         if proc.is_zombie() {
             continue;
@@ -257,10 +257,10 @@ pub fn adjust_absolute_timers() {
     }
 }
 
-/// Register the itimer tick hook with axtask. Should be called once during
+/// Register the itimer tick hook with task. Should be called once during
 /// process initialization.
 pub fn init_itimer_hook() {
     start_timer_worker();
-    axtask::register_timer_hook(itimer_tick_hook);
+    task::register_timer_hook(itimer_tick_hook);
     axnet::register_have_signals_callback(current_have_signals);
 }

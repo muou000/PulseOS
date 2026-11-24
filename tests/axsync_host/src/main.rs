@@ -1,6 +1,6 @@
-//! Diagnostic only: actual axsync mutex source with a task-ID boundary adapter.
+//! Diagnostic only: actual sync mutex source with a task-ID boundary adapter.
 //! No scheduler or wait-queue behavior is simulated or verified here.
-extern crate self as axtask;
+extern crate self as task;
 
 use std::{
     cell::Cell,
@@ -58,7 +58,7 @@ impl WaitQueue {
     }
 }
 
-#[path = "../../../modules/axsync/src/mutex.rs"]
+#[path = "../../../modules/sync/src/mutex.rs"]
 mod actual_mutex;
 use actual_mutex::{Mutex, RawMutex};
 

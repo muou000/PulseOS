@@ -21,16 +21,16 @@ use core::any::Any;
 use core::future::Future;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use axalloc::global_allocator;
+use kernel_alloc::global_allocator;
 use axerrno::{LinuxError, LinuxResult};
 use axfs::FileFlags as AxFileFlags;
-use axhal::paging::MappingFlags;
+use hal::paging::MappingFlags;
 use axio::PollState;
 use axmm::{PreparedMapping, SharedFrame};
 use axpoll::IoEvents;
-use axsync::Mutex;
-use axtask::WaitQueue;
-use axtask::future::CancelHandle;
+use sync::Mutex;
+use task::WaitQueue;
+use task::future::CancelHandle;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{POLLIN, S_IFREG, stat};
 use linux_raw_sys::io_uring::{
@@ -289,10 +289,10 @@ impl IoUringState {
         #[cfg(feature = "guest-checks")]
         let future = {
             let ring = self.ring_id;
-            axlog::info!(
+            kernel_log::info!(
                 "io_uring native submit ring={ring} req={req_id} cpu={} task={}",
-                axhal::percpu::this_cpu_id(),
-                axtask::current().name()
+                hal::percpu::this_cpu_id(),
+                task::current().name()
             );
             async move {
                 let mut future = core::pin::pin!(future);
@@ -300,12 +300,12 @@ impl IoUringState {
                 core::future::poll_fn(move |cx| {
                     seq += 1;
                     let phase = if seq == 1 { "first" } else { "resume" };
-                    let cpu = axhal::percpu::this_cpu_id();
+                    let cpu = hal::percpu::this_cpu_id();
                     let poll = future.as_mut().poll(cx);
                     let result = if poll.is_pending() { "pending" } else { "ready" };
-                    axlog::info!(
+                    kernel_log::info!(
                         "io_uring poll ring={ring} req={req_id} phase={phase} cpu={cpu} result={result} task={} seq={seq}",
-                        axtask::current().name()
+                        task::current().name()
                     );
                     poll
                 })
@@ -314,7 +314,7 @@ impl IoUringState {
         };
         let handle = match self.service_executor() {
             Some(executor) => executor.spawn(future),
-            None => axtask::future::spawn_and_poll_once(future),
+            None => task::future::spawn_and_poll_once(future),
         };
         if handle.is_done() {
             return;
@@ -989,11 +989,11 @@ impl IoUringState {
         let submitted = sq.submit_batch(&self.shared, to_submit, |sqe| {
             #[cfg(feature = "guest-checks")]
             if self.sqpoll_service_cpu().is_some() {
-                axlog::info!(
+                kernel_log::info!(
                     "SQPOLL consume ring={} user_data={} cpu={}",
                     self.ring_id,
                     sqe.user_data,
-                    axhal::percpu::this_cpu_id()
+                    hal::percpu::this_cpu_id()
                 );
             }
             let has_link = (sqe.flags & (IOSQE_IO_LINK | IOSQE_IO_HARDLINK)) != 0;
@@ -1028,11 +1028,11 @@ impl IoUringState {
             {
                 #[cfg(feature = "guest-checks")]
                 if self.sqpoll_service_cpu().is_some() {
-                    axlog::info!(
+                    kernel_log::info!(
                         "SQPOLL inline ring={} user_data={} cpu={} res={res}",
                         self.ring_id,
                         sqe.user_data,
-                        axhal::percpu::this_cpu_id()
+                        hal::percpu::this_cpu_id()
                     );
                 }
                 batch_cqes[batch_len] = IoUringCqe {
@@ -1150,7 +1150,7 @@ impl IoUringState {
                     #[cfg(feature = "guest-checks")]
                     if self.sqpoll_service_cpu().is_some() {
                         for (id, prep) in ids.iter().zip(&preps) {
-                            axlog::info!(
+                            kernel_log::info!(
                                 "SQPOLL committed ring={} req={id} user_data={}",
                                 self.ring_id,
                                 prep.user_data
@@ -1464,7 +1464,7 @@ impl Drop for IoUringObject {
         // submission. Finish on another stack before joining or taking submit_lock.
         if self.state.is_sqpoll() && crate::current_thread().is_err() {
             let state = self.state.clone();
-            axtask::spawn(move || state.finish_teardown());
+            task::spawn(move || state.finish_teardown());
         } else {
             self.state.finish_teardown();
         }
@@ -1662,7 +1662,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     use memory_addr::VirtAddr;
 
     worker_pool::check_overlapping_worker_finishes();
-    axlog::ax_println!("[IO_URING_RSRC_GUEST] Starting fixed resources & frame refcount checks...");
+    kernel_log::ax_println!("[IO_URING_RSRC_GUEST] Starting fixed resources & frame refcount checks...");
 
     let process = crate::current_process()?;
     let aspace_handle = process.aspace_handle();
@@ -1692,7 +1692,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
                 .pin_user_frame(vaddr, MappingFlags::READ | MappingFlags::WRITE)
                 .map_err(LinuxError::from)?;
             // `pin_user_frame` bumped ref by 1; measure baseline just before releasing this probe pin.
-            let after_probe = axalloc::frame_table()
+            let after_probe = kernel_alloc::frame_table()
                 .try_get_ref(paddr)
                 .expect("test page in frame_table");
             crate::uaccess::release_pinned_user_frame(paddr);
@@ -1708,14 +1708,14 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
         crate::uaccess::PinnedUserBuffers::pin_with_process(&process, &segs, &mut cursor, true)?;
     assert_eq!(write_win.len(), map_size);
     for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
-        let cur = axalloc::frame_table().try_get_ref(*paddr).unwrap();
+        let cur = kernel_alloc::frame_table().try_get_ref(*paddr).unwrap();
         assert_eq!(cur, base + 1, "write window should pin page once");
     }
     let pattern = alloc::vec![0x5Au8; map_size];
     write_win.copy_to_user_exact(&pattern)?;
     drop(write_win);
     for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
-        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base);
+        assert_eq!(kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(), base);
     }
 
     let mut read_cursor = crate::uaccess::UserBufferCursor::default();
@@ -1726,9 +1726,9 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     assert!(read_back.iter().all(|&b| b == 0x5A));
     drop(read_win);
     for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
-        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base);
+        assert_eq!(kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(), base);
     }
-    axlog::ax_println!("[IO_URING_RSRC_GUEST] PinnedUserBuffers balance & direct copy: PASS");
+    kernel_log::ax_println!("[IO_URING_RSRC_GUEST] PinnedUserBuffers balance & direct copy: PASS");
 
     // 2. FixedBufferRegistry registration + inflight keep-alive across unregister_buffers + memlock.
     let mut params: io_uring_params = unsafe { core::mem::zeroed() };
@@ -1749,7 +1749,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
         "memlock pinned_bytes charged"
     );
     for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
-        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base + 1);
+        assert_eq!(kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(), base + 1);
     }
 
     let mut fixed_io = state.resolve_fixed_buffer(1, test_va as u64, map_size as u32, true)?;
@@ -1769,17 +1769,17 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     );
     // Inflight `fixed_io` still keeps frames pinned after unregister.
     for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
-        assert_eq!(axalloc::frame_table().try_get_ref(*paddr).unwrap(), base + 1);
+        assert_eq!(kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(), base + 1);
     }
     drop(fixed_io);
     for (paddr, &base) in page_frames.iter().zip(&baseline_refs) {
         assert_eq!(
-            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(),
             base,
             "frames balanced after last inflight fixed buffer drop"
         );
     }
-    axlog::ax_println!("[IO_URING_RSRC_GUEST] FixedBufferRegistry pin/inflight/memlock accounting: PASS");
+    kernel_log::ax_println!("[IO_URING_RSRC_GUEST] FixedBufferRegistry pin/inflight/memlock accounting: PASS");
 
     // 3. FixedFileRegistry sparse slots, partial update `done`, and ring self-reference rejection.
     let (r_end, w_end) = crate::fd::PipeObject::new_pair();
@@ -1797,7 +1797,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     assert_eq!(done, 1);
     assert!(state.get_fixed_fd_entry(1).is_ok());
     state.unregister_files(0, 0)?;
-    axlog::ax_println!("[IO_URING_RSRC_GUEST] FixedFileRegistry sparse slots & partial update: PASS");
+    kernel_log::ax_println!("[IO_URING_RSRC_GUEST] FixedFileRegistry sparse slots & partial update: PASS");
 
     let _ = process.remove_fd_entry(ring_fd);
     let _ = process.remove_fd_entry(w_fd);
@@ -1828,7 +1828,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
             let paddr = aspace
                 .pin_user_frame(vaddr, MappingFlags::READ | MappingFlags::WRITE)
                 .map_err(LinuxError::from)?;
-            let after_probe = axalloc::frame_table()
+            let after_probe = kernel_alloc::frame_table()
                 .try_get_ref(paddr)
                 .expect("teardown test page in frame_table");
             crate::uaccess::release_pinned_user_frame(paddr);
@@ -1860,7 +1860,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
 
     for (paddr, &base) in td_frames.iter().zip(&td_baseline) {
         assert_eq!(
-            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(),
             base + 2,
             "PTE + FixedBufferSlot + PinnedUserBuffers should hold 3 refs"
         );
@@ -1872,7 +1872,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
         .map_err(LinuxError::from)?;
     for (paddr, &base) in td_frames.iter().zip(&td_baseline) {
         assert_eq!(
-            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(),
             base + 1,
             "unmap drops only PTE ref while inflight buffers remain pinned"
         );
@@ -1893,7 +1893,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     );
     for (paddr, &base) in td_frames.iter().zip(&td_baseline) {
         assert_eq!(
-            axalloc::frame_table().try_get_ref(*paddr).unwrap(),
+            kernel_alloc::frame_table().try_get_ref(*paddr).unwrap(),
             base + 1,
             "inflight FixedBufferIo + PinnedUserBuffers survive ring close"
         );
@@ -1902,7 +1902,7 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     drop(td_pinned);
     for &paddr in &td_frames {
         assert_eq!(
-            axalloc::frame_table().try_get_ref(paddr).unwrap(),
+            kernel_alloc::frame_table().try_get_ref(paddr).unwrap(),
             1,
             "only inflight FixedBufferIo retains the final frame ref"
         );
@@ -1912,16 +1912,16 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
     drop(td_fixed_io);
     for &paddr in &td_frames {
         assert_eq!(
-            axalloc::frame_table().try_get_ref(paddr).unwrap(),
+            kernel_alloc::frame_table().try_get_ref(paddr).unwrap(),
             0,
             "frames 100% balanced to zero after final inflight buffer drops"
         );
     }
-    axlog::ax_println!(
+    kernel_log::ax_println!(
         "[IO_URING_RSRC_GUEST] Inflight munmap + close five-step teardown frame balance: PASS"
     );
 
-    axlog::ax_println!("[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS");
+    kernel_log::ax_println!("[IO_URING_RSRC_GUEST] Fixed resources & frame refcount checks: PASS");
     check_remote_first_poll()?;
     Ok(())
 }
@@ -1932,29 +1932,29 @@ pub fn run_io_uring_resource_guest_checks() -> LinuxResult<()> {
 fn check_remote_first_poll() -> LinuxResult<()> {
     use core::time::Duration;
 
-    let original = axtask::current().cpumask();
-    let Some(target) = (1..axhal::cpu_num()).find(|&cpu| axtask::is_sqpoll_service_cpu(cpu)) else {
+    let original = task::current().cpumask();
+    let Some(target) = (1..hal::cpu_num()).find(|&cpu| task::is_sqpoll_service_cpu(cpu)) else {
         return Ok(());
     };
     if !original.get(0) {
         return Ok(());
     }
-    let executor = axtask::future::CpuExecutor::get(target)?;
-    assert!(axtask::set_current_affinity(axtask::AxCpuMask::one_shot(0)));
-    let submit_cpu = axhal::percpu::this_cpu_id();
+    let executor = task::future::CpuExecutor::get(target)?;
+    assert!(task::set_current_affinity(task::AxCpuMask::one_shot(0)));
+    let submit_cpu = hal::percpu::this_cpu_id();
     let handle = executor.spawn(async move {
-        let poll_cpu = axhal::percpu::this_cpu_id();
-        axlog::ax_println!(
+        let poll_cpu = hal::percpu::this_cpu_id();
+        kernel_log::ax_println!(
             "[IO_URING_CPU_GUEST] first poll submit={} target={} cpu={} task={}",
-            submit_cpu, target, poll_cpu, axtask::current().name()
+            submit_cpu, target, poll_cpu, task::current().name()
         );
         assert_eq!(poll_cpu, target);
     });
-    assert!(axtask::set_current_affinity(original));
-    let deadline = axhal::time::monotonic_time() + Duration::from_secs(5);
+    assert!(task::set_current_affinity(original));
+    let deadline = hal::time::monotonic_time() + Duration::from_secs(5);
     while !handle.is_done() {
-        assert!(axhal::time::monotonic_time() < deadline, "remote first poll timed out");
-        axtask::sleep(Duration::from_millis(1));
+        assert!(hal::time::monotonic_time() < deadline, "remote first poll timed out");
+        task::sleep(Duration::from_millis(1));
     }
     Ok(())
 }

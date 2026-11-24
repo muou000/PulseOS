@@ -23,7 +23,7 @@ impl PowerIf for PowerImpl {
         info!("Powering off...");
         unsafe { PMC_POWEROFF_ADDR.write_volatile(0x3c00) };
         loop {
-            axcpu::asm::halt();
+            cpu::asm::halt();
         }
     }
 
@@ -36,7 +36,7 @@ impl PowerIf for PowerImpl {
         info!("Rebooting...");
         unsafe { PMC_REBOOT_ADDR.write_volatile(1) };
         loop {
-            axcpu::asm::halt();
+            cpu::asm::halt();
         }
     }
 

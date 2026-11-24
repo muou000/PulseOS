@@ -1,7 +1,7 @@
 use super::*;
 
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_sendfile: out_fd={}, in_fd={}, offset={:#x}, count={}",
         out_fd,
         in_fd,
@@ -137,7 +137,7 @@ pub fn sys_copy_file_range(
     len: usize,
     flags: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_copy_file_range: fd_in={}, off_in={:#x}, fd_out={}, off_out={:#x}, len={}, \
          flags={:#x}",
         fd_in,

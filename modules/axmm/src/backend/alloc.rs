@@ -1,13 +1,13 @@
 use alloc::vec::Vec;
-use axalloc::global_allocator;
+use kernel_alloc::global_allocator;
 use axerrno::{AxError, AxResult};
-use axhal::mem::{flush_dcache_range, phys_to_virt, virt_to_phys};
-use axhal::paging::{MappingFlags, PageSize, PageTable};
+use hal::mem::{flush_dcache_range, phys_to_virt, virt_to_phys};
+use hal::paging::{MappingFlags, PageSize, PageTable};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PageIter4K, PhysAddr, VirtAddr};
 use memory_set::MappingMutation;
 
 use super::Backend;
-use axalloc::frame_table;
+use kernel_alloc::frame_table;
 
 const MAX_FAULT_BATCH_PAGES: usize = 4;
 
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn cow_refcount_roundtrip() {
-        let frame = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
+        let frame = PhysAddr::from(config::plat::PHYS_MEMORY_BASE);
         // Note: FRAME_TABLE should be initialized before running this test.
         // In a real test environment, this might need more setup.
 
@@ -694,8 +694,8 @@ mod tests {
 
     #[test]
     fn batch_cow_refcount_filtering() {
-        let frame1 = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE);
-        let frame2 = PhysAddr::from(axconfig::plat::PHYS_MEMORY_BASE + PAGE_SIZE_4K);
+        let frame1 = PhysAddr::from(config::plat::PHYS_MEMORY_BASE);
+        let frame2 = PhysAddr::from(config::plat::PHYS_MEMORY_BASE + PAGE_SIZE_4K);
 
         cow_inc_frame_ref(frame1);
         cow_inc_frame_ref(frame2);

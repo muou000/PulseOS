@@ -87,7 +87,7 @@ pub async fn resolve_unix_path_async(
 
 /// Synchronous wrapper around [`resolve_unix_path_async`].
 pub fn resolve_unix_path_sync(fs: &axfs::FsContext, path: &str) -> LinuxResult<UnixSocketKey> {
-    axtask::future::block_on(resolve_unix_path_async(fs, path))
+    task::future::block_on(resolve_unix_path_async(fs, path))
 }
 
 /// Pre-checks whether binding an `AF_UNIX` socket to `path` within `fs` can succeed
@@ -105,7 +105,7 @@ pub fn check_unix_bind_available(fs: &axfs::FsContext, path: &str) -> LinuxResul
         return Ok(());
     }
 
-    axtask::future::block_on(async {
+    task::future::block_on(async {
         let vfs_path = axfs_ng_vfs::path::Path::new(path);
         fs.resolve_parent(vfs_path)
             .await
@@ -127,7 +127,7 @@ pub fn bind_unix_socket_with_fs(
     let key = if is_abstract_unix_path(path) {
         UnixSocketKey::Abstract(alloc::string::String::from(path))
     } else {
-        axtask::future::block_on(async {
+        task::future::block_on(async {
             let vfs_path = axfs_ng_vfs::path::Path::new(path);
             if fs.resolve(vfs_path).await.is_ok() {
                 return Err(LinuxError::EADDRINUSE);
@@ -337,9 +337,9 @@ impl LocalSocketRingBuffer {
 }
 
 pub struct LocalSocketBuffer {
-    pub buffer: axsync::Mutex<LocalSocketRingBuffer>,
-    pub read_wait_queue: axtask::WaitQueue,
-    pub write_wait_queue: axtask::WaitQueue,
+    pub buffer: sync::Mutex<LocalSocketRingBuffer>,
+    pub read_wait_queue: task::WaitQueue,
+    pub write_wait_queue: task::WaitQueue,
     pub write_closed: AtomicBool,
     pub read_closed: AtomicBool,
 }
@@ -347,9 +347,9 @@ pub struct LocalSocketBuffer {
 impl LocalSocketBuffer {
     pub fn new() -> Self {
         Self {
-            buffer: axsync::Mutex::new(LocalSocketRingBuffer::new()),
-            read_wait_queue: axtask::WaitQueue::new(),
-            write_wait_queue: axtask::WaitQueue::new(),
+            buffer: sync::Mutex::new(LocalSocketRingBuffer::new()),
+            read_wait_queue: task::WaitQueue::new(),
+            write_wait_queue: task::WaitQueue::new(),
             write_closed: AtomicBool::new(false),
             read_closed: AtomicBool::new(false),
         }
@@ -358,7 +358,7 @@ impl LocalSocketBuffer {
     // This sleeping lock must only be acquired from ordinary task context.
     // WaitQueue conditions and poll use `try_lock` instead because they can
     // hold scheduler or epoll bookkeeping locks.
-    fn lock_buffer(&self) -> axsync::MutexGuard<'_, LocalSocketRingBuffer> {
+    fn lock_buffer(&self) -> sync::MutexGuard<'_, LocalSocketRingBuffer> {
         self.buffer.lock()
     }
 }
@@ -1571,9 +1571,9 @@ impl FdObject for Socket {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+        wqs: &mut alloc::vec::Vec<&'a task::WaitQueue>,
     ) -> Result<bool, LinuxError> {
-        let mut push_pair = |read_wq: &'a axtask::WaitQueue, write_wq: &'a axtask::WaitQueue| {
+        let mut push_pair = |read_wq: &'a task::WaitQueue, write_wq: &'a task::WaitQueue| {
             let mut supported = false;
             if (events & (linux_raw_sys::general::POLLIN as i16)) != 0 {
                 wqs.push(read_wq);

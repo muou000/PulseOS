@@ -6,14 +6,14 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use axconfig::TASK_STACK_SIZE;
+use config::TASK_STACK_SIZE;
 use axerrno::{AxError, AxErrorKind, AxResult};
 use axfs::FsContext;
-use axhal::{
+use hal::{
     context::{TrapFrame, UspaceContext},
     paging::MappingFlags,
 };
-use axtask::{AxTaskRef, WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource};
+use task::{AxTaskRef, WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource};
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
@@ -27,7 +27,7 @@ use super::{
     AddressSpaceLock, SignalShared, Thread, current_thread, queue_signal_to_process,
     thread_handle_from_task,
 };
-use axconfig::user::*;
+use config::user::*;
 use crate::fd::{FD_LIMIT, FdTable, SharedFdTable, stdio_entries};
 
 #[derive(Clone)]
@@ -308,7 +308,7 @@ type ShmAttachments = BTreeMap<VirtAddr, Arc<Mutex<ipc::shm::ShmInner>>>;
 /// mapping operation to release the registry completes its IPC cleanup.
 #[derive(Default)]
 struct SharedMemoryRegistry {
-    attachments: axsync::Mutex<ShmAttachments>,
+    attachments: sync::Mutex<ShmAttachments>,
     release_pid: AtomicU64,
 }
 
@@ -319,7 +319,7 @@ impl SharedMemoryRegistry {
             segment.lock().attach_process(pid);
         }
         Arc::new(Self {
-            attachments: axsync::Mutex::new(inherited),
+            attachments: sync::Mutex::new(inherited),
             release_pid: AtomicU64::new(pid),
         })
     }
@@ -724,7 +724,7 @@ impl Process {
                 if let Some(handle) = super::thread_handle_from_task(&task) {
                     handle.request_exec_exit();
                 }
-                axtask::interrupt_task(task, true);
+                task::interrupt_task(task, true);
             }
 
             self.thread_exit_event

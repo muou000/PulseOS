@@ -66,13 +66,13 @@ fn wait_for_signal_or_timeout(
 
     match timeout {
         Some(timeout) if timeout > Duration::ZERO && timeout <= SHORT_TIMEOUT_YIELD_LIMIT => {
-            let deadline = axhal::time::monotonic_time() + timeout;
-            axtask::yield_now();
+            let deadline = hal::time::monotonic_time() + timeout;
+            task::yield_now();
             if thread.has_pending_signal() {
                 return true;
             }
-            if axhal::time::monotonic_time() < deadline {
-                axhal::time::busy_wait_until(deadline);
+            if hal::time::monotonic_time() < deadline {
+                hal::time::busy_wait_until(deadline);
             }
             thread.has_pending_signal()
         }
@@ -139,7 +139,7 @@ pub fn sys_ppoll(
         Err(e) => return -e.code() as isize,
     };
 
-    let deadline = timeout_dur.map(|timeout_dur| axhal::time::monotonic_time() + timeout_dur);
+    let deadline = timeout_dur.map(|timeout_dur| hal::time::monotonic_time() + timeout_dur);
     let write_back = |pollfds: &[pollfd], ready: isize| -> isize {
         write_user_value_array(fds, pollfds)
             .map(|_| ready)
@@ -235,7 +235,7 @@ pub fn sys_pselect6(
     timeout: usize,
     sigmask: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_pselect6 <= nfds: {nfds}, readfds: {readfds:#x}, writefds: {writefds:#x}, exceptfds: \
          {exceptfds:#x}, timeout: {timeout:#x}"
     );
@@ -296,7 +296,7 @@ pub fn sys_pselect6(
         }
     }
 
-    if axlog::log_enabled!(axlog::Level::Debug) {
+    if kernel_log::log_enabled!(kernel_log::Level::Debug) {
         let mut read_fds = alloc::vec::Vec::with_capacity(nfds.min(1024));
         let mut write_fds = alloc::vec::Vec::with_capacity(nfds.min(1024));
         let mut except_fds = alloc::vec::Vec::with_capacity(nfds.min(1024));
@@ -311,7 +311,7 @@ pub fn sys_pselect6(
                 except_fds.push(fd);
             }
         }
-        axlog::debug!(
+        kernel_log::debug!(
             "sys_pselect6 => read_fds: {:?}, write_fds: {:?}, except_fds: {:?}",
             read_fds,
             write_fds,
@@ -353,8 +353,8 @@ pub fn sys_pselect6(
         }
     }
 
-    if axlog::log_enabled!(axlog::Level::Debug) {
-        axlog::debug!(
+    if kernel_log::log_enabled!(kernel_log::Level::Debug) {
+        kernel_log::debug!(
             "sys_pselect6 => pollfds collected: {:?}",
             pollfds
                 .iter()
@@ -367,7 +367,7 @@ pub fn sys_pselect6(
         if wait_for_signal_or_timeout(thread.as_ref(), timeout_dur) {
             return -LinuxError::EINTR.code() as isize;
         }
-        axlog::debug!("sys_pselect6 => empty pollfds, returning 0");
+        kernel_log::debug!("sys_pselect6 => empty pollfds, returning 0");
         return 0;
     }
 
@@ -379,15 +379,15 @@ pub fn sys_pselect6(
         return -LinuxError::EBADF.code() as isize;
     }
 
-    let deadline = timeout_dur.map(|timeout_dur| axhal::time::monotonic_time() + timeout_dur);
+    let deadline = timeout_dur.map(|timeout_dur| hal::time::monotonic_time() + timeout_dur);
     let wait_result = wait_for_readiness(thread.as_ref(), &mut pollfds, &objects, deadline);
     if matches!(wait_result, ReadinessWaitResult::Interrupted) {
-        axlog::debug!("sys_pselect6 => interrupted by signal");
+        kernel_log::debug!("sys_pselect6 => interrupted by signal");
         return -LinuxError::EINTR.code() as isize;
     }
 
-    if axlog::log_enabled!(axlog::Level::Debug) {
-        axlog::debug!(
+    if kernel_log::log_enabled!(kernel_log::Level::Debug) {
+        kernel_log::debug!(
             "sys_pselect6 => ready fds detected: {:?}",
             pollfds
                 .iter()
@@ -446,6 +446,6 @@ pub fn sys_pselect6(
         }
     }
 
-    axlog::debug!("sys_pselect6 => returning ready: {ready_count}");
+    kernel_log::debug!("sys_pselect6 => returning ready: {ready_count}");
     ready_count
 }

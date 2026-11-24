@@ -24,7 +24,7 @@ mod runtime {
         time::Duration,
     };
 
-    use axhal::{
+    use hal::{
         context::TrapFrame,
         trap::{IRQ_OBSERVER, register_trap_handler},
     };
@@ -68,8 +68,8 @@ mod runtime {
         }
     }
 
-    static CPU_STATS: [CpuStats; axconfig::plat::MAX_CPU_NUM] =
-        [const { CpuStats::new() }; axconfig::plat::MAX_CPU_NUM];
+    static CPU_STATS: [CpuStats; config::plat::MAX_CPU_NUM] =
+        [const { CpuStats::new() }; config::plat::MAX_CPU_NUM];
     static SNAPSHOTS: Mutex<SampleQueue> = Mutex::new(SampleQueue::new());
     static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -89,7 +89,7 @@ mod runtime {
         if !is_timer_irq(vector)
             || !WORKER_STARTED.load(Ordering::Acquire)
             || !has_active_perf_events()
-            || axhal::asm::irqs_enabled()
+            || hal::asm::irqs_enabled()
         {
             return;
         }
@@ -101,12 +101,12 @@ mod runtime {
         // bounded no-fault frame reads and nonblocking atomics/try_lock calls
         // occur before all borrows end.
         let generation = observation_generation();
-        let timestamp_ns = axhal::time::monotonic_time_nanos();
-        let cpu = axhal::percpu::this_cpu_id();
+        let timestamp_ns = hal::time::monotonic_time_nanos();
+        let cpu = hal::percpu::this_cpu_id();
         let Some(stats) = CPU_STATS.get(cpu) else {
             return;
         };
-        let Some(task) = axtask::current_may_uninit() else {
+        let Some(task) = task::current_may_uninit() else {
             return;
         };
         let (pid, tid, task_clock_ns) = match crate::thread_ref_from_task(&task) {
@@ -158,11 +158,11 @@ mod runtime {
     }
 
     fn drain_once() {
-        // Copy contexts while axtask holds its short drain guard, then release
+        // Copy contexts while task holds its short drain guard, then release
         // that guard before any interpreter allocation, helper or notification.
         let mut records = [pulse_bpf_schema::EventRecord::empty(); 16];
         for cpu in 0..CPU_STATS.len() {
-            let count = axtask::bpf_trace::drain_cpu_records(cpu, &mut records);
+            let count = task::bpf_trace::drain_cpu_records(cpu, &mut records);
             for record in &records[..count] {
                 bpf::perf_event::dispatch_tracepoint(
                     record.id, record.as_bytes(), record.generation,
@@ -190,7 +190,7 @@ mod runtime {
     fn worker() {
         loop {
             drain_once();
-            axtask::sleep(Duration::from_millis(1));
+            task::sleep(Duration::from_millis(1));
         }
     }
 
@@ -203,7 +203,7 @@ mod runtime {
         {
             return;
         }
-        axtask::spawn_raw(worker, "pulse_bpf_sample".into(), axconfig::TASK_STACK_SIZE);
+        task::spawn_raw(worker, "pulse_bpf_sample".into(), config::TASK_STACK_SIZE);
     }
 
     /// Returns independently sampled monotonic totals. This is not an atomic

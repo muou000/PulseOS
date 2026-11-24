@@ -77,7 +77,7 @@ fn make_user_signal_info(sig: isize, code: i32, pid: u64, uid: u32) -> [u8; 128]
 }
 
 pub fn sys_getpid() -> isize {
-    axlog::debug!("sys_getpid");
+    kernel_log::debug!("sys_getpid");
     match current_process() {
         Ok(process) => process.pid() as isize,
         Err(e) => -e.code() as isize,
@@ -95,7 +95,7 @@ pub fn sys_getuid() -> isize {
     match current_process() {
         Ok(process) => {
             let uid = process.ruid() as isize;
-            axlog::debug!("sys_getuid: {}", uid);
+            kernel_log::debug!("sys_getuid: {}", uid);
             uid
         }
         Err(e) => -e.code() as isize,
@@ -106,7 +106,7 @@ pub fn sys_geteuid() -> isize {
     match current_process() {
         Ok(process) => {
             let euid = process.euid() as isize;
-            axlog::debug!("sys_geteuid: {}", euid);
+            kernel_log::debug!("sys_geteuid: {}", euid);
             euid
         }
         Err(e) => -e.code() as isize,
@@ -117,7 +117,7 @@ pub fn sys_getgid() -> isize {
     match current_process() {
         Ok(process) => {
             let gid = process.rgid() as isize;
-            axlog::debug!("sys_getgid: {}", gid);
+            kernel_log::debug!("sys_getgid: {}", gid);
             gid
         }
         Err(e) => -e.code() as isize,
@@ -128,7 +128,7 @@ pub fn sys_getegid() -> isize {
     match current_process() {
         Ok(process) => {
             let egid = process.egid() as isize;
-            axlog::debug!("sys_getegid: {}", egid);
+            kernel_log::debug!("sys_getegid: {}", egid);
             egid
         }
         Err(e) => -e.code() as isize,
@@ -136,7 +136,7 @@ pub fn sys_getegid() -> isize {
 }
 
 pub fn sys_kill(pid: isize, sig: isize) -> isize {
-    axlog::debug!("sys_kill: pid={}, sig={}", pid, sig);
+    kernel_log::debug!("sys_kill: pid={}, sig={}", pid, sig);
 
     if !is_valid_signal(sig) {
         return -LinuxError::EINVAL.code() as isize;
@@ -467,8 +467,8 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
             Ok(name) => {
                 let name = if name.len() > 15 { &name[..15] } else { &name };
                 #[cfg(feature = "bpf-trace")]
-                let mapping_transition = pulse_core::bpf::mappings::MutationGuard::task(axtask::current().id().as_u64());
-                axtask::current().set_name(name);
+                let mapping_transition = pulse_core::bpf::mappings::MutationGuard::task(task::current().id().as_u64());
+                task::current().set_name(name);
                 #[cfg(feature = "bpf-trace")]
                 pulse_core::task::emit_current_mapping_metadata("rename", mapping_transition.begin_ns());
                 0
@@ -476,7 +476,7 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
             Err(e) => e,
         },
         PR_GET_NAME => {
-            let name = axtask::current().name();
+            let name = task::current().name();
             let mut bytes = [0u8; 16];
             let len = core::cmp::min(name.len(), 15);
             bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
@@ -510,14 +510,14 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
             0
         }
         _ => {
-            axlog::warn!("sys_prctl: unsupported option {}", option);
+            kernel_log::warn!("sys_prctl: unsupported option {}", option);
             -LinuxError::EINVAL.code() as isize
         }
     }
 }
 
 pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
-    axlog::debug!("sys_pidfd_open: pid={}, flags={}", pid, flags);
+    kernel_log::debug!("sys_pidfd_open: pid={}, flags={}", pid, flags);
 
     if (flags & !(O_NONBLOCK as usize)) != 0 {
         return -LinuxError::EINVAL.code() as isize;
@@ -634,7 +634,7 @@ pub fn sys_kcmp(pid1: isize, pid2: isize, comparison_type: i32, idx1: usize, idx
 }
 
 pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_pidfd_send_signal: pidfd={}, sig={}, info_ptr={:#x}, flags={}",
         pidfd,
         sig,

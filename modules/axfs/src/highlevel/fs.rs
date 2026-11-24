@@ -12,7 +12,7 @@ use axfs_ng_vfs::{
     path::{Component, Components, Path, PathBuf},
 };
 use axio::{Read, Write};
-use axsync::Mutex;
+use sync::Mutex;
 use spin::Once;
 
 use super::File;
@@ -491,7 +491,7 @@ impl Iterator for ReadDir {
 
         if self.buf.is_empty() {
             self.buf.clear();
-            let result = axtask::future::block_on(self.dir.read_dir(
+            let result = task::future::block_on(self.dir.read_dir(
                 self.offset,
                 &mut |name: &str, ino: u64, node_type: NodeType, offset: u64| {
                     self.buf.push_back(ReadDirEntry {

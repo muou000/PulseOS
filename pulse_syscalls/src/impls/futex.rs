@@ -80,9 +80,9 @@ fn read_absolute_timeout_ns(
     let target_ns = duration_to_nanos_saturating(target);
 
     let now_ns = if clock_realtime {
-        axhal::time::wall_time().as_nanos() as u64
+        hal::time::wall_time().as_nanos() as u64
     } else {
-        axhal::time::monotonic_time_nanos() as u64
+        hal::time::monotonic_time_nanos() as u64
     };
     futex_deadline_remaining_ns(target_ns, now_ns).map(Some)
 }
@@ -104,7 +104,7 @@ pub fn sys_futex(
     uaddr2: usize,
     val3: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_futex: uaddr={:#x}, op={:#x}, val={}, timeout/val2={:#x}, uaddr2={:#x}, val3={}",
         uaddr,
         op,
@@ -203,7 +203,7 @@ pub fn sys_futex(
             }
         }
         _ => {
-            axlog::warn!("unsupported futex op: {:#x}", op);
+            kernel_log::warn!("unsupported futex op: {:#x}", op);
             -LinuxError::ENOSYS.code() as isize
         }
     }
@@ -216,7 +216,7 @@ pub fn sys_futex_waitv(
     timeout: usize,
     clockid: u32,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_futex_waitv: waiters={:#x}, nr_futexes={}, flags={}, timeout={:#x}, clockid={}",
         waiters,
         nr_futexes,

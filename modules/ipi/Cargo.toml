@@ -1,0 +1,21 @@
+[package]
+name = "ipi"
+version.workspace = true
+edition.workspace = true
+authors = ["Keyang Hu <keyang.hu@qq.com>"]
+description = "ArceOS IPI management module"
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/axipi"
+documentation = "https://arceos-org.github.io/arceos/axipi/index.html"
+
+[features]
+default = []
+
+[dependencies]
+log.workspace = true
+kspin.workspace = true
+percpu.workspace = true
+lazyinit.workspace = true
+config.workspace = true
+hal = { workspace = true, features = ["ipi"] }

@@ -20,14 +20,14 @@ use crate::impls::{
 };
 
 pub fn sys_close(fd: usize) -> isize {
-    axlog::debug!("sys_close: fd={}", fd);
+    kernel_log::debug!("sys_close: fd={}", fd);
     match remove_fd_entry(fd) {
         Ok(_entry) => {
-            axlog::debug!("sys_close: fd={} done", fd);
+            kernel_log::debug!("sys_close: fd={} done", fd);
             0
         }
         Err(e) => {
-            axlog::debug!("sys_close: fd={} err: {:?}", fd, e);
+            kernel_log::debug!("sys_close: fd={} err: {:?}", fd, e);
             -e.code() as isize
         }
     }
@@ -73,7 +73,7 @@ pub fn sys_dup(fd: usize) -> isize {
 }
 
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_dup3: oldfd={}, newfd={}, flags={:#x}",
         oldfd,
         newfd,
@@ -100,7 +100,7 @@ pub fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> isize {
     }
 }
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
-    axlog::debug!("sys_fcntl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
+    kernel_log::debug!("sys_fcntl: fd={}, cmd={:#x}, arg={:#x}", fd, cmd, arg);
     match cmd as u32 {
         F_GETFD => match get_fd_entry(fd) {
             Ok(entry) => {
@@ -183,7 +183,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
             Err(e) => -e.code() as isize,
         },
         _ => {
-            axlog::warn!("unsupported fcntl parameters: cmd {}", cmd);
+            kernel_log::warn!("unsupported fcntl parameters: cmd {}", cmd);
             -LinuxError::EINVAL.code() as isize
         }
     }
@@ -281,7 +281,7 @@ fn sys_fcntl_record_lock(fd: usize, cmd: u32, arg: usize) -> Result<isize, Linux
 }
 
 pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_fadvise64: fd={}, offset={}, len={}, advice={}",
         fd,
         offset as isize,
@@ -353,7 +353,7 @@ pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> isize {
 }
 
 pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
-    axlog::debug!("sys_ftruncate: fd={}, length={:#x}", fd, length);
+    kernel_log::debug!("sys_ftruncate: fd={}, length={:#x}", fd, length);
     let entry = match get_fd_entry(fd) {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
@@ -411,7 +411,7 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> isize
     let offset = offset as isize as i64;
     let len = len as isize as i64;
 
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_fallocate: fd={}, mode={:#x}, offset={}, len={}",
         fd,
         mode,

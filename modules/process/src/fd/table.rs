@@ -1,7 +1,7 @@
 use super::*;
 
 fn is_ns_location(location: &Location) -> Option<(u64, u32)> {
-    let metadata = axtask::future::block_on(location.metadata()).ok()?;
+    let metadata = task::future::block_on(location.metadata()).ok()?;
     let ino = metadata.inode;
     if ino >= axfs::fs::procfs::PID_INODE_START {
         let offset = ino - axfs::fs::procfs::PID_INODE_START;
@@ -133,7 +133,7 @@ impl FdTable {
                 if let Some(entry) = &chunk.entries[bit_idx] {
                     if entry.flags.contains(FdFlags::CLOEXEC) {
                         let fd = chunk_idx * FD_CHUNK_SIZE + bit_idx;
-                        axlog::debug!(
+                        kernel_log::debug!(
                             "take_cloexec_on_exec: removing cloexec fd entry fd={}, flags={:?}, \
                              object={:p}",
                             fd,

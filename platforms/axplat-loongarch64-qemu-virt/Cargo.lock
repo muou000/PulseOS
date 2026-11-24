@@ -90,10 +90,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "axcpu"
+name = "cpu"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e09bc1235e3da45e942b50f47812f8397ad84cb490264bf914c65ac44e6f8b1d"
 dependencies = [
  "aarch64-cpu",
  "cfg-if",
@@ -132,7 +130,7 @@ name = "axplat-loongarch64-qemu-virt"
 version = "0.3.0"
 dependencies = [
  "axconfig-macros",
- "axcpu",
+ "cpu",
  "axplat",
  "chrono",
  "kspin",

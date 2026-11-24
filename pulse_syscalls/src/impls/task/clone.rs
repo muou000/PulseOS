@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::AxError;
-use axhal::context::TrapFrame;
+use hal::context::TrapFrame;
 use bitflags::bitflags;
 use memory_addr::PAGE_SIZE_4K;
 use pulse_core::task::{CloneParams, ForkParams, Process, current_process, current_thread};
@@ -103,7 +103,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     #[cfg(not(target_arch = "loongarch64"))]
     let (tls, child_tid) = (args[3], args[4]);
 
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_clone: flags={:?}, child_stack={:#x}, parent_tid={:#x}, child_tid={:#x}, tls={:#x}",
         flags,
         child_stack,
@@ -141,14 +141,14 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
     }
 
     if !flags.contains(CloneFlags::CLONE_FILES) || !flags.contains(CloneFlags::CLONE_FS) {
-        axlog::debug!("sys_clone: child will use private FS and/or FD tables");
+        kernel_log::debug!("sys_clone: child will use private FS and/or FD tables");
     }
 
     // CLONE_SIGHAND
     if flags.contains(CloneFlags::CLONE_SIGHAND)
         && !CLONE_SIGHAND_WARNED.swap(true, Ordering::AcqRel)
     {
-        axlog::debug!(
+        kernel_log::debug!(
             "sys_clone: CLONE_SIGHAND requested; shared signal handlers are not fully implemented \
              yet."
         );
@@ -170,7 +170,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         Ok(thread) => thread.tid(),
         Err(_) => 0,
     };
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_clone context: parent_pid={}, parent_tid={}",
         parent_proc.pid(),
         current_tid
@@ -224,7 +224,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 (child_pid, is_vfork.then_some(child_proc))
             }
             Err(e) => {
-                axlog::debug!("fork error: {:?}", e);
+                kernel_log::debug!("fork error: {:?}", e);
                 return ax_error_to_linux_ret(e);
             }
         }
@@ -249,7 +249,7 @@ pub fn sys_clone(tf: &TrapFrame, args: [usize; 6]) -> isize {
         ) {
             Ok((tid, child_proc)) => (tid as usize, child_proc),
             Err(e) => {
-                axlog::debug!("clone error: {:?}", e);
+                kernel_log::debug!("clone error: {:?}", e);
                 return ax_error_to_linux_ret(e);
             }
         }
@@ -305,7 +305,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let cl_args_ptr = args[0];
     let size = args[1];
 
-    axlog::debug!("sys_clone3: cl_args_ptr={:#x}, size={}", cl_args_ptr, size);
+    kernel_log::debug!("sys_clone3: cl_args_ptr={:#x}, size={}", cl_args_ptr, size);
 
     if size < 64 {
         return -LinuxError::EINVAL.code() as isize;
@@ -317,7 +317,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let parent_proc = match current_process() {
         Ok(process) => process,
         Err(e) => {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_clone3: failed to get current process: cl_args_ptr={:#x}, size={}, err={:?}",
                 cl_args_ptr,
                 size,
@@ -333,7 +333,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
     let slice = &mut buf[..copy_size];
     if let Err(e) = parent_proc.read_user_bytes(cl_args_ptr, slice) {
         let errno = LinuxError::from(e.canonicalize());
-        axlog::warn!(
+        kernel_log::warn!(
             "sys_clone3: failed to copy clone_args: pid={}, cl_args_ptr={:#x}, size={}, \
              copy_size={}, err={:?}, errno={:?}",
             parent_proc.pid(),
@@ -363,7 +363,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
             let chunk = core::cmp::min(remaining, temp.len());
             if let Err(e) = parent_proc.read_user_bytes(check_ptr, &mut temp[..chunk]) {
                 let errno = LinuxError::from(e.canonicalize());
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_clone3: failed to copy trailing clone_args bytes: pid={}, addr={:#x}, \
                      chunk={}, remaining={}, err={:?}, errno={:?}",
                     parent_proc.pid(),
@@ -506,7 +506,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
     if flags.contains(CloneFlags::CLONE_SIGHAND)
         && !CLONE_SIGHAND_WARNED.swap(true, Ordering::AcqRel)
     {
-        axlog::debug!(
+        kernel_log::debug!(
             "sys_clone3: CLONE_SIGHAND requested; shared signal handlers are not fully \
              implemented yet."
         );
@@ -534,7 +534,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
                 (child_pid, is_vfork.then_some(child_proc))
             }
             Err(e) => {
-                axlog::debug!("fork error: {:?}", e);
+                kernel_log::debug!("fork error: {:?}", e);
                 return ax_error_to_linux_ret(e);
             }
         }
@@ -559,7 +559,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
             Ok((tid, child_proc)) => (tid as usize, child_proc),
             Err(e) => {
                 let ret = ax_error_to_linux_ret(e);
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_clone3: spawn_from_trap_frame failed: pid={}, flags={:?}, \
                      cl_args_ptr={:#x}, size={}, err={:?}, ret={}",
                     parent_proc.pid(),
@@ -590,7 +590,7 @@ pub fn sys_clone3(tf: &TrapFrame, args: [usize; 6]) -> isize {
 
 pub fn sys_unshare(flags: usize) -> isize {
     let clone_flags = CloneFlags::from_bits_truncate(flags);
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_unshare: raw_flags={:#x}, flags={:?}",
         flags,
         clone_flags

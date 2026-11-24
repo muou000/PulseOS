@@ -6,7 +6,7 @@ use core::{
 };
 
 use ::alloc::{sync::Arc, vec::Vec};
-use axhal::paging::{MappingFlags, PageSize};
+use hal::paging::{MappingFlags, PageSize};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use memory_set::{MappingBackend, MappingMutation as MappingMutationTracker};
 
@@ -88,7 +88,7 @@ pub(super) fn effective_pte_flags(flags: MappingFlags) -> MappingFlags {
 pub(super) fn unmap_populated_range<M: MappingMutationTracker<VirtAddr>>(
     start: VirtAddr,
     size: usize,
-    pt: &mut axhal::paging::PageTable,
+    pt: &mut hal::paging::PageTable,
     mutation: &mut M,
 ) -> bool {
     let Some(end) = start.checked_add(size) else {
@@ -120,7 +120,7 @@ pub(crate) fn protect_populated_range<M: MappingMutationTracker<VirtAddr>>(
     start: VirtAddr,
     size: usize,
     new_flags: MappingFlags,
-    pt: &mut axhal::paging::PageTable,
+    pt: &mut hal::paging::PageTable,
     mutation: &mut M,
 ) -> bool {
     let Some(end) = start.checked_add(size) else {
@@ -351,8 +351,8 @@ impl RetirementFrameBuffer {
 // Access to each CPU slot is serialized by its in_use lease.
 unsafe impl Sync for RetirementFrameBuffer {}
 
-static RETIREMENT_RECLAIM_BUFFERS: [RetirementFrameBuffer; axconfig::plat::MAX_CPU_NUM] =
-    [const { RetirementFrameBuffer::new() }; axconfig::plat::MAX_CPU_NUM];
+static RETIREMENT_RECLAIM_BUFFERS: [RetirementFrameBuffer; config::plat::MAX_CPU_NUM] =
+    [const { RetirementFrameBuffer::new() }; config::plat::MAX_CPU_NUM];
 
 enum DeferredFrames {
     Dynamic(Vec<PhysAddr>),
@@ -408,7 +408,7 @@ impl DeferredReclaims {
     }
 
     pub(crate) fn for_retirement() -> Self {
-        let cpu_id = axhal::percpu::this_cpu_id();
+        let cpu_id = hal::percpu::this_cpu_id();
         let buffer = &RETIREMENT_RECLAIM_BUFFERS[cpu_id];
         while buffer
             .in_use
@@ -416,7 +416,7 @@ impl DeferredReclaims {
             .is_err()
         {
             #[cfg(feature = "ipi")]
-            axipi::service_tlb_shootdown();
+            ipi::service_tlb_shootdown();
             core::hint::spin_loop();
         }
         Self {

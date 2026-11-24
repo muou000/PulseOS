@@ -83,7 +83,7 @@ enum DevDeviceKind {
 }
 
 struct RandomDevice {
-    rng: [SpinNoPreempt<Pcg64Mcg>; axconfig::plat::MAX_CPU_NUM],
+    rng: [SpinNoPreempt<Pcg64Mcg>; config::plat::MAX_CPU_NUM],
 }
 
 impl RandomDevice {
@@ -96,7 +96,7 @@ impl RandomDevice {
     }
 
     fn fill_bytes(&self, buf: &mut [u8]) {
-        let cpu_id = axhal::percpu::this_cpu_id() % axconfig::plat::MAX_CPU_NUM;
+        let cpu_id = hal::percpu::this_cpu_id() % config::plat::MAX_CPU_NUM;
         self.rng[cpu_id].lock().fill_bytes(buf);
     }
 }
@@ -108,7 +108,7 @@ pub(crate) fn fill_random_bytes(buf: &mut [u8]) {
 fn random_seed(device_stream: u64, cpu_id: usize) -> u64 {
     let counter = RANDOM_SEED_COUNTER.fetch_add(RANDOM_SEED_STEP, Ordering::Relaxed);
     let stack_addr = &counter as *const u64 as usize as u64;
-    let time = axhal::time::monotonic_time_nanos() ^ axhal::time::wall_time_nanos().rotate_left(29);
+    let time = hal::time::monotonic_time_nanos() ^ hal::time::wall_time_nanos().rotate_left(29);
     let cpu_stream = (cpu_id as u64).wrapping_mul(RANDOM_SEED_STEP);
     splitmix64(
         time ^ counter ^ stack_addr.rotate_left(17) ^ device_stream.rotate_left(41) ^ cpu_stream,
@@ -527,7 +527,7 @@ impl FilesystemOps for DevFilesystem {
 }
 
 fn now() -> Duration {
-    axhal::time::wall_time()
+    hal::time::wall_time()
 }
 
 fn map_dev_err(err: axdriver::prelude::DevError) -> VfsError {
@@ -944,7 +944,7 @@ impl FileNodeOps for DevNode {
                 if let Some(callbacks) = TTY_CALLBACKS.get() {
                     callbacks.read(buf)
                 } else {
-                    let len = axhal::console::read_bytes(buf);
+                    let len = hal::console::read_bytes(buf);
                     Ok(len)
                 }
             }
@@ -990,7 +990,7 @@ impl FileNodeOps for DevNode {
                 if let Some(callbacks) = TTY_CALLBACKS.get() {
                     callbacks.write(buf)
                 } else {
-                    axhal::console::write_bytes(buf);
+                    hal::console::write_bytes(buf);
                     Ok(buf.len())
                 }
             }

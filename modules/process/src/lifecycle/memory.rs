@@ -73,7 +73,7 @@ impl Process {
     /// The observer is the current task with IRQs disabled throughout `capture`.
     #[cfg(feature = "bpf-trace")]
     pub(crate) fn with_sampling_aspace<R>(&self, capture: impl FnOnce(&axmm::AddrSpace) -> R) -> Option<R> {
-        if axhal::asm::irqs_enabled() {
+        if hal::asm::irqs_enabled() {
             return None;
         }
         let slot = self.aspace.try_read()?;

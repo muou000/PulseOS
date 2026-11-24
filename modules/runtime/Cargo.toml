@@ -1,0 +1,49 @@
+[package]
+name = "runtime"
+version.workspace = true
+edition.workspace = true
+authors = ["Yuekai Jia <equation618@gmail.com>"]
+description = "Runtime library of ArceOS"
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/axruntime"
+documentation = "https://arceos-org.github.io/arceos/axruntime/index.html"
+
+[features]
+default = []
+
+smp = ["hal/smp", "task?/smp"]
+irq = ["hal/irq", "task?/irq", "percpu"]
+tls = ["hal/tls", "task?/tls"]
+alloc = ["kernel_alloc"]
+# Opt-in boot validation while initialized secondary CPUs are still parked.
+pcp-boot-checks = ["alloc", "dep:kernel_guard"]
+paging = ["hal/paging", "axmm"]
+ipi = ["dep:ipi", "axmm?/ipi"]
+
+multitask = ["task/multitask"]
+fs = ["axdriver", "axfs"]
+net = ["axdriver", "axnet"]
+display = ["axdriver", "axdisplay"]
+rtc = []
+
+[dependencies]
+hal = { workspace = true }
+kernel_log = { workspace = true }
+config = { workspace = true }
+kernel_alloc = { workspace = true, optional = true }
+axmm = { workspace = true, optional = true }
+axdriver = { workspace = true, optional = true }
+axfs = { workspace = true, optional = true }
+axnet = { workspace = true, optional = true }
+axdisplay = { workspace = true, optional = true }
+task = { workspace = true, optional = true }
+ipi = { workspace = true, optional = true }
+axplat.workspace = true
+
+kernel_guard = { workspace = true, optional = true }
+crate_interface.workspace = true
+percpu = { workspace = true, optional = true }
+ctor_bare.workspace = true
+
+chrono.workspace = true

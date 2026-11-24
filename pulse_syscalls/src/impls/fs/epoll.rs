@@ -54,7 +54,7 @@ fn check_epoll_nesting(
 }
 
 pub fn sys_epoll_create1(flags: usize) -> isize {
-    axlog::debug!("sys_epoll_create1: flags={:#x}", flags);
+    kernel_log::debug!("sys_epoll_create1: flags={:#x}", flags);
     if (flags & !EPOLL_CLOEXEC as usize) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
@@ -77,7 +77,7 @@ pub fn sys_epoll_ctl(
     fd: usize,
     event: usize,
 ) -> isize {
-    axlog::debug!("sys_epoll_ctl: epfd={}, op={}, fd={}, event={:#x}", epfd, op, fd, event);
+    kernel_log::debug!("sys_epoll_ctl: epfd={}, op={}, fd={}, event={:#x}", epfd, op, fd, event);
 
     let epoll_entry = match get_fd_entry(epfd) {
         Ok(entry) => entry,
@@ -323,7 +323,7 @@ impl Future for EpollFuture {
             axpoll::IoEvents::IN,
             &mut this.registrations,
         ) {
-            axlog::warn!("epoll: register_poll failed: {:?}", e);
+            kernel_log::warn!("epoll: register_poll failed: {:?}", e);
             this.registrations.clear();
             return Poll::Ready(Err(e));
         }
@@ -361,7 +361,7 @@ fn sys_epoll_pwait_inner(
     epfd: usize,
     events: usize,
     maxevents: usize,
-    deadline: Option<axhal::time::TimeValue>,
+    deadline: Option<hal::time::TimeValue>,
     sigmask: usize,
     sigsetsize: usize,
 ) -> isize {
@@ -407,7 +407,7 @@ fn sys_epoll_pwait_inner(
         registrations: Vec::new(),
     };
 
-    match axtask::future::block_on(axtask::future::timeout_at(deadline, future)) {
+    match task::future::block_on(task::future::timeout_at(deadline, future)) {
         Ok(Ok(ready_list)) => {
             if ready_list.is_empty() {
                 return 0;
@@ -429,7 +429,7 @@ pub fn sys_epoll_pwait(
     timeout: isize,
     sigmask: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_epoll_pwait: epfd={}, events={:#x}, maxevents={}, timeout={}, sigmask={:#x}",
         epfd,
         events,
@@ -438,7 +438,7 @@ pub fn sys_epoll_pwait(
         sigmask
     );
     let deadline = if timeout >= 0 {
-        Some(axhal::time::monotonic_time() + Duration::from_millis(timeout as u64))
+        Some(hal::time::monotonic_time() + Duration::from_millis(timeout as u64))
     } else {
         None
     };
@@ -453,7 +453,7 @@ pub fn sys_epoll_pwait2(
     sigmask: usize,
     sigsetsize: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_epoll_pwait2: epfd={}, events={:#x}, maxevents={}, timeout_ptr={:#x}, sigmask={:#x}, sigsetsize={}",
         epfd,
         events,
@@ -471,7 +471,7 @@ pub fn sys_epoll_pwait2(
             return -LinuxError::EINVAL.code() as isize;
         }
         let dur = Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
-        Some(axhal::time::monotonic_time() + dur)
+        Some(hal::time::monotonic_time() + dur)
     } else {
         None
     };

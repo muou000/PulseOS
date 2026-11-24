@@ -17,11 +17,11 @@ struct AxAhciHal;
 
 impl Hal for AxAhciHal {
     fn virt_to_phys(vaddr: usize) -> usize {
-        axhal::mem::virt_to_phys(vaddr.into()).as_usize()
+        hal::mem::virt_to_phys(vaddr.into()).as_usize()
     }
 
     fn current_ms() -> u64 {
-        axhal::time::monotonic_time_nanos() / NANOS_PER_MILLIS
+        hal::time::monotonic_time_nanos() / NANOS_PER_MILLIS
     }
 
     fn flush_dcache() {

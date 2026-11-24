@@ -16,5 +16,5 @@ smoke-test = []
 log.workspace = true
 lazyinit.workspace = true
 axdriver = { workspace = true, features = ["display"] }
-axsync.workspace = true
+sync.workspace = true
 axdriver_display.workspace = true

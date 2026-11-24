@@ -208,13 +208,13 @@ impl FileObject {
     pub fn begin_read_io(&self, offset: Option<u64>) -> LinuxResult<FileObjectIo<'_>> {
         let operation = match self.inner.try_begin_read_io(offset) {
             Some(result) => result?,
-            None => axtask::future::block_on(self.inner.begin_read_io(offset))?,
+            None => task::future::block_on(self.inner.begin_read_io(offset))?,
         };
         Ok(FileObjectIo::new(operation))
     }
 
     pub fn begin_write_io(&self, offset: Option<u64>) -> LinuxResult<FileObjectIo<'_>> {
-        Ok(FileObjectIo::new(axtask::future::block_on(
+        Ok(FileObjectIo::new(task::future::block_on(
             self.inner.begin_write_io(offset),
         )?))
     }
@@ -223,7 +223,7 @@ impl FileObject {
     /// returns. Syscall callers use a user-frame pin guard before selecting
     /// this path.
     pub fn write_slice(&self, buf: &[u8]) -> LinuxResult<usize> {
-        Ok(axtask::future::block_on(self.inner.write_slice(buf))?)
+        Ok(task::future::block_on(self.inner.write_slice(buf))?)
     }
 
     /// Positional counterpart of the stable-slice write path.
@@ -231,10 +231,10 @@ impl FileObject {
         let file = &self.inner;
         if file.flags().contains(AxFileFlags::APPEND) {
             let backend = file.backend()?;
-            let (written, _) = axtask::future::block_on(backend.append_slice(buf))?;
+            let (written, _) = task::future::block_on(backend.append_slice(buf))?;
             Ok(written)
         } else {
-            Ok(axtask::future::block_on(file.write_at_slice(buf, offset))?)
+            Ok(task::future::block_on(file.write_at_slice(buf, offset))?)
         }
     }
 
@@ -293,7 +293,7 @@ impl FdObject for NsFdObject {
 
 pub struct PidfdObject {
     pid: AtomicU64,
-    bind_wait_queue: axtask::WaitQueue,
+    bind_wait_queue: task::WaitQueue,
     target_owner: spin::Once<Arc<crate::Process>>,
 }
 
@@ -301,7 +301,7 @@ impl PidfdObject {
     pub fn new(pid: u64) -> Self {
         let object = Self {
             pid: AtomicU64::new(pid),
-            bind_wait_queue: axtask::WaitQueue::new(),
+            bind_wait_queue: task::WaitQueue::new(),
             target_owner: spin::Once::new(),
         };
         if pid != 0 {
@@ -371,7 +371,7 @@ impl FdObject for PidfdObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut Vec<&'a axtask::WaitQueue>,
+        wqs: &mut Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         if (events & POLLIN as i16) == 0 {
             return Ok(events == 0);
@@ -452,7 +452,7 @@ impl FdObject for FileObject {
 
     fn read(&self, buf: &mut [u8]) -> LinuxResult<usize> {
         let file = &self.inner;
-        Ok(axtask::future::block_on(file.read(buf))?)
+        Ok(task::future::block_on(file.read(buf))?)
     }
 
     fn try_read_resident(&self, buf: &mut [u8]) -> Option<LinuxResult<usize>> {
@@ -463,7 +463,7 @@ impl FdObject for FileObject {
 
     fn write(&self, buf: &[u8]) -> LinuxResult<usize> {
         let file = &self.inner;
-        Ok(axtask::future::block_on(file.write(buf))?)
+        Ok(task::future::block_on(file.write(buf))?)
     }
 
     fn is_tty_output(&self) -> bool {
@@ -510,7 +510,7 @@ impl FdObject for FileObject {
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> LinuxResult<usize> {
-        Ok(axtask::future::block_on(self.inner.read_at(buf, offset))?)
+        Ok(task::future::block_on(self.inner.read_at(buf, offset))?)
     }
 
     fn try_read_at_resident(&self, buf: &mut [u8], offset: u64) -> Option<LinuxResult<usize>> {
@@ -523,10 +523,10 @@ impl FdObject for FileObject {
         let file = &self.inner;
         if file.flags().contains(AxFileFlags::APPEND) {
             let backend = file.backend()?;
-            let (written, _) = axtask::future::block_on(backend.append(buf))?;
+            let (written, _) = task::future::block_on(backend.append(buf))?;
             Ok(written)
         } else {
-            Ok(axtask::future::block_on(file.write_at(buf, offset))?)
+            Ok(task::future::block_on(file.write_at(buf, offset))?)
         }
     }
 
@@ -539,16 +539,16 @@ impl FdObject for FileObject {
     }
 
     fn truncate(&self, len: u64) -> LinuxResult {
-        axtask::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(len))?;
+        task::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(len))?;
         Ok(())
     }
 
     fn flush(&self) -> LinuxResult {
-        axtask::future::block_on(self.inner.sync(false)).map_err(Into::into)
+        task::future::block_on(self.inner.sync(false)).map_err(Into::into)
     }
 
     fn sync_data(&self) -> LinuxResult {
-        axtask::future::block_on(self.inner.sync(true)).map_err(Into::into)
+        task::future::block_on(self.inner.sync(true)).map_err(Into::into)
     }
 
     fn allocate(&self, mode: u32, offset: u64, len: u64) -> LinuxResult {
@@ -560,7 +560,7 @@ impl FdObject for FileObject {
         }
         let end = offset.checked_add(len).ok_or(LinuxError::EFBIG)?;
 
-        let metadata = axtask::future::block_on(self.inner.location().metadata())?;
+        let metadata = task::future::block_on(self.inner.location().metadata())?;
         if metadata.node_type != NodeType::RegularFile {
             if metadata.node_type == NodeType::Directory {
                 return Err(LinuxError::EISDIR);
@@ -570,12 +570,12 @@ impl FdObject for FileObject {
         }
 
         if (mode & !(FALLOC_FL_KEEP_SIZE as u32)) != 0 {
-            axlog::warn!("sys_fallocate: unsupported mode flags (mode={:#x})", mode);
+            kernel_log::warn!("sys_fallocate: unsupported mode flags (mode={:#x})", mode);
             return Err(LinuxError::EOPNOTSUPP);
         }
 
         if (mode & (FALLOC_FL_KEEP_SIZE as u32)) != 0 {
-            axlog::warn!(
+            kernel_log::warn!(
                 "sys_fallocate: FALLOC_FL_KEEP_SIZE is stubbed (mode={:#x}, offset={}, len={}) \
                  due to lack of native preallocation support in filesystem stack",
                 mode,
@@ -585,12 +585,12 @@ impl FdObject for FileObject {
         } else {
             let cur_size = axfs::cached_file_size(self.inner.location()).unwrap_or(metadata.size);
             if end > cur_size {
-                axlog::warn!(
+                kernel_log::warn!(
                     "sys_fallocate: physical space preallocation is not supported, falling back \
                      to set_len (new_len={})",
                     end
                 );
-                axtask::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(end))?;
+                task::future::block_on(self.inner.access(AxFileFlags::WRITE)?.set_len(end))?;
             }
         }
 
@@ -623,7 +623,7 @@ fn parse_cpu_dma_latency_value(buf: &[u8]) -> LinuxResult<i32> {
 }
 
 pub(super) fn is_cpu_dma_latency_device(location: &Location) -> bool {
-    let Ok(metadata) = axtask::future::block_on(location.metadata()) else {
+    let Ok(metadata) = task::future::block_on(location.metadata()) else {
         return false;
     };
     metadata.node_type == NodeType::CharacterDevice
@@ -702,7 +702,7 @@ pub struct DirObject {
     // Directory enumeration can suspend while the VFS fetches entries.  A
     // spin lock here can strand the only runnable CPU if a forked task reads
     // the same directory description while that fetch is in progress.
-    offset: axsync::Mutex<u64>,
+    offset: sync::Mutex<u64>,
     nonblocking: AtomicBool,
 }
 
@@ -710,7 +710,7 @@ impl DirObject {
     pub fn new(inner: Location) -> Self {
         Self {
             inner,
-            offset: axsync::Mutex::new(0),
+            offset: sync::Mutex::new(0),
             nonblocking: AtomicBool::new(false),
         }
     }
@@ -758,11 +758,11 @@ impl FdObject for DirObject {
     }
 
     fn flush(&self) -> LinuxResult {
-        axtask::future::block_on(self.inner.sync(false)).map_err(Into::into)
+        task::future::block_on(self.inner.sync(false)).map_err(Into::into)
     }
 
     fn sync_data(&self) -> LinuxResult {
-        axtask::future::block_on(self.inner.sync(true)).map_err(Into::into)
+        task::future::block_on(self.inner.sync(true)).map_err(Into::into)
     }
 
     fn is_read_open(&self) -> bool {
@@ -778,7 +778,7 @@ impl FdObject for DirObject {
         let mut written = 0usize;
         let mut break_out = false;
         let res =
-            axtask::future::block_on(self.inner.read_dir(*offset, &mut |name: &str,
+            task::future::block_on(self.inner.read_dir(*offset, &mut |name: &str,
                                                                         ino: u64,
                                                                         node_type: NodeType,
                                                                         next_off: u64|
@@ -801,7 +801,7 @@ impl FdObject for DirObject {
                     record_len: reclen as u16,
                     file_type: node_type as u8,
                 };
-                axlog::debug!(
+                kernel_log::debug!(
                     "read_dirents64: emit name={}, ino={}, type={:?}, next_off={}, reclen={}",
                     name,
                     ino,

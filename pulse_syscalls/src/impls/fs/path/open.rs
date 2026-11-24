@@ -69,7 +69,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
 
         let options = flags_to_options(flags, mode);
         let (opened, metadata) =
-            match axtask::future::block_on(options.open_with_metadata(&ctx, path)) {
+            match task::future::block_on(options.open_with_metadata(&ctx, path)) {
                 Ok(opened) => opened,
                 Err(e) => {
                     let err = LinuxError::from(e.canonicalize());
@@ -152,7 +152,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
 
 pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
     let res = crate::impls::utils::with_user_path_str(pathname, |path| {
-        axlog::debug!(
+        kernel_log::debug!(
             "sys_mkdirat: dirfd={}, path='{}', mode={:#o}",
             dirfd,
             path,
@@ -171,23 +171,23 @@ pub fn sys_mkdirat(dirfd: i32, pathname: usize, mode: usize) -> isize {
             dirfd
         };
         let ctx = context_for_dirfd(resolved_dirfd)?;
-        let (parent_loc, entry_name) = axtask::future::block_on(
+        let (parent_loc, entry_name) = task::future::block_on(
             ctx.resolve_nonexistent(axfs_ng_vfs::path::Path::new(path)),
         )
         .map_err(|e| LinuxError::from(e.canonicalize()))?;
         if crate::impls::fs::common::is_location_readonly(&parent_loc) {
             return Err(LinuxError::EROFS);
         }
-        axlog::debug!("sys_mkdirat: creating directory '{}'", path);
-        match axtask::future::block_on(
+        kernel_log::debug!("sys_mkdirat: creating directory '{}'", path);
+        match task::future::block_on(
             ctx.create_dir_at(parent_loc, entry_name.as_ref(), mkdir_mode(mode)),
         ) {
             Ok(_) => {
-                axlog::debug!("sys_mkdirat: directory '{}' created successfully", path);
+                kernel_log::debug!("sys_mkdirat: directory '{}' created successfully", path);
                 Ok(0isize)
             }
             Err(e) => {
-                axlog::debug!(
+                kernel_log::debug!(
                     "sys_mkdirat: failed to create directory '{}': {:?}",
                     path,
                     e

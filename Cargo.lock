@@ -9,19 +9,19 @@ dependencies = [
  "axerrno",
  "axfeat",
  "axfs",
- "axhal",
- "axlog",
  "axnet",
  "axplat-loongarch64-ls2k1000",
  "axplat-loongarch64-qemu-virt",
  "axplat-riscv64-qemu-virt",
  "axplat-riscv64-visionfive2",
- "axruntime",
- "axsync",
- "axtask",
+ "hal",
+ "kernel_log",
  "pulse_core",
  "pulse_syscalls",
+ "runtime",
  "starry-vdso",
+ "sync",
+ "task",
 ]
 
 [[package]]
@@ -264,31 +264,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axalloc"
-version = "0.1.0"
-dependencies = [
- "allocator",
- "axerrno",
- "axplat",
- "buddy-slab-allocator",
- "cfg-if",
- "crate_interface",
- "kernel_guard",
- "kspin",
- "lazyinit",
- "log",
- "memory_addr",
- "percpu",
-]
-
-[[package]]
-name = "axconfig"
-version = "0.1.0"
-dependencies = [
- "axconfig-macros",
-]
-
-[[package]]
 name = "axconfig-gen"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -314,21 +289,7 @@ dependencies = [
 name = "axcpu"
 version = "0.2.2"
 dependencies = [
- "aarch64-cpu 10.0.0",
- "cfg-if",
- "lazyinit",
- "linkme",
- "log",
- "loongArch64",
- "memory_addr",
- "page_table_entry",
- "page_table_multiarch",
- "percpu",
- "riscv",
- "static_assertions",
- "tock-registers 0.9.0",
- "x86",
- "x86_64",
+ "cpu",
 ]
 
 [[package]]
@@ -337,31 +298,31 @@ version = "0.1.0"
 dependencies = [
  "axdriver",
  "axdriver_display",
- "axsync",
  "lazyinit",
  "log",
+ "sync",
 ]
 
 [[package]]
 name = "axdriver"
 version = "0.1.0"
 dependencies = [
- "axalloc",
- "axconfig",
  "axdriver_base",
  "axdriver_block",
  "axdriver_display",
  "axdriver_net",
  "axdriver_pci",
  "axdriver_virtio",
- "axhal",
- "axlog",
  "axpoll",
- "axtask",
  "cfg-if",
+ "config",
  "fdt-raw",
+ "hal",
+ "kernel_alloc",
+ "kernel_log",
  "kspin",
  "log",
+ "task",
  "virtio-drivers",
 ]
 
@@ -374,10 +335,10 @@ name = "axdriver_block"
 version = "0.1.2"
 dependencies = [
  "axdriver_base",
- "axhal",
  "axpoll",
  "bcm2835-sdhci",
  "dwmmc-host",
+ "hal",
  "log",
  "rdif-block",
  "sdio-host2",
@@ -437,18 +398,18 @@ dependencies = [
 name = "axfeat"
 version = "0.1.0"
 dependencies = [
- "axalloc",
  "axdisplay",
  "axdriver",
  "axfs",
- "axhal",
- "axipi",
- "axlog",
  "axnet",
- "axruntime",
- "axsync",
- "axtask",
+ "hal",
+ "ipi",
+ "kernel_alloc",
+ "kernel_log",
  "kspin",
+ "runtime",
+ "sync",
+ "task",
 ]
 
 [[package]]
@@ -457,21 +418,16 @@ version = "0.1.0"
 dependencies = [
  "async-lock",
  "async-trait",
- "axalloc",
- "axconfig",
  "axdriver",
  "axerrno",
  "axfs-ng-vfs",
- "axhal",
  "axio",
- "axlog",
  "axmm",
  "axpoll",
- "axsync",
- "axtask",
  "bitflags 2.11.1",
  "cfg-if",
  "chrono",
+ "config",
  "env_logger",
  "ext4plus",
  "futures-util",
@@ -479,8 +435,11 @@ dependencies = [
  "hadris-fs",
  "hadris-io",
  "hadris-storage",
+ "hal",
  "heapless 0.9.3",
  "intrusive-collections",
+ "kernel_alloc",
+ "kernel_log",
  "kspin",
  "log",
  "lru",
@@ -488,6 +447,8 @@ dependencies = [
  "rand_pcg",
  "scope-local",
  "spin 0.10.0",
+ "sync",
+ "task",
 ]
 
 [[package]]
@@ -510,31 +471,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axhal"
-version = "0.1.0"
-dependencies = [
- "aarch64-cpu 10.0.0",
- "axalloc",
- "axconfig",
- "axcpu",
- "axlog",
- "axplat",
- "axplat-aarch64-qemu-virt",
- "axplat-loongarch64-qemu-virt",
- "axplat-riscv64-qemu-virt",
- "axplat-x86-pc",
- "cfg-if",
- "heapless 0.9.3",
- "kernel_guard",
- "lazyinit",
- "linkme",
- "log",
- "memory_addr",
- "page_table_multiarch",
- "percpu",
-]
-
-[[package]]
 name = "axio"
 version = "0.3.0-pre.1"
 dependencies = [
@@ -545,40 +481,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "axipi"
-version = "0.1.0"
-dependencies = [
- "axconfig",
- "axhal",
- "kspin",
- "lazyinit",
- "log",
- "percpu",
-]
-
-[[package]]
-name = "axlog"
-version = "0.1.0"
-dependencies = [
- "axlog",
- "cfg-if",
- "chrono",
- "crate_interface",
- "kspin",
- "log",
-]
-
-[[package]]
 name = "axmm"
 version = "0.1.0"
 dependencies = [
- "axalloc",
- "axconfig",
  "axerrno",
- "axhal",
- "axipi",
  "bitflags 2.11.1",
+ "config",
+ "hal",
  "heapless 0.9.3",
+ "ipi",
+ "kernel_alloc",
  "kspin",
  "lazyinit",
  "log",
@@ -594,16 +506,16 @@ dependencies = [
  "axdriver",
  "axdriver_net",
  "axerrno",
- "axhal",
  "axio",
  "axpoll",
- "axsync",
- "axtask",
  "cfg-if",
+ "hal",
  "lazyinit",
  "log",
  "smoltcp",
  "spin 0.9.8",
+ "sync",
+ "task",
 ]
 
 [[package]]
@@ -660,8 +572,8 @@ name = "axplat-loongarch64-ls2k1000"
 version = "0.3.0"
 dependencies = [
  "axconfig-macros",
- "axcpu",
  "axplat",
+ "cpu",
  "fdt-raw",
  "kspin",
  "lazyinit",
@@ -676,9 +588,9 @@ name = "axplat-loongarch64-qemu-virt"
 version = "0.3.0"
 dependencies = [
  "axconfig-macros",
- "axcpu",
  "axplat",
  "chrono",
+ "cpu",
  "fdt-raw",
  "kspin",
  "lazyinit",
@@ -704,8 +616,8 @@ name = "axplat-riscv64-qemu-virt"
 version = "0.3.0"
 dependencies = [
  "axconfig-macros",
- "axcpu",
  "axplat",
+ "cpu",
  "fdt-raw",
  "kspin",
  "log",
@@ -719,8 +631,8 @@ name = "axplat-riscv64-visionfive2"
 version = "0.3.0"
 dependencies = [
  "axconfig-macros",
- "axcpu",
  "axplat",
+ "cpu",
  "fdt-raw",
  "kspin",
  "log",
@@ -763,80 +675,6 @@ dependencies = [
  "linux-raw-sys",
  "spin 0.10.0",
  "tokio",
-]
-
-[[package]]
-name = "axruntime"
-version = "0.1.0"
-dependencies = [
- "axalloc",
- "axconfig",
- "axdisplay",
- "axdriver",
- "axfs",
- "axhal",
- "axipi",
- "axlog",
- "axmm",
- "axnet",
- "axplat",
- "axtask",
- "chrono",
- "crate_interface",
- "ctor_bare",
- "kernel_guard",
- "percpu",
-]
-
-[[package]]
-name = "axsched"
-version = "0.3.1"
-dependencies = [
- "eevdf-scheduler",
- "intrusive-collections",
- "linked_list_r4l",
-]
-
-[[package]]
-name = "axsync"
-version = "0.1.0"
-dependencies = [
- "axsync",
- "axtask",
- "kspin",
- "lock_api",
- "log",
- "rand 0.9.5",
- "spin 0.10.0",
-]
-
-[[package]]
-name = "axtask"
-version = "0.1.0"
-dependencies = [
- "axalloc",
- "axconfig",
- "axerrno",
- "axhal",
- "axio",
- "axipi",
- "axpoll",
- "axsched",
- "axtask",
- "cfg-if",
- "cpumask",
- "crate_interface",
- "futures-util",
- "kernel_guard",
- "kspin",
- "lazyinit",
- "log",
- "memory_addr",
- "percpu",
- "pulse_bpf_schema",
- "rand 0.9.5",
- "spin 0.10.0",
- "timer_list",
 ]
 
 [[package]]
@@ -913,14 +751,14 @@ dependencies = [
 name = "bpf"
 version = "0.1.0"
 dependencies = [
- "axalloc",
  "axerrno",
- "axhal",
  "axmm",
- "axtask",
+ "hal",
+ "kernel_alloc",
  "memory_addr",
  "pulse_bpf_schema",
  "spin 0.10.0",
+ "task",
 ]
 
 [[package]]
@@ -1103,6 +941,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "config"
+version = "0.1.0"
+dependencies = [
+ "axconfig-macros",
+]
+
+[[package]]
 name = "const-default"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1134,6 +979,27 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "cpu"
+version = "0.2.2"
+dependencies = [
+ "aarch64-cpu 10.0.0",
+ "cfg-if",
+ "lazyinit",
+ "linkme",
+ "log",
+ "loongArch64",
+ "memory_addr",
+ "page_table_entry",
+ "page_table_multiarch",
+ "percpu",
+ "riscv",
+ "static_assertions",
+ "tock-registers 0.9.0",
+ "x86",
+ "x86_64",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -1381,20 +1247,20 @@ dependencies = [
 name = "elf_loader"
 version = "0.1.0"
 dependencies = [
- "axconfig",
- "axcpu",
  "axerrno",
  "axfs",
  "axfs-ng-vfs",
- "axhal",
- "axlog",
  "axmm",
- "axtask",
+ "config",
+ "cpu",
+ "hal",
  "kernel-elf-parser",
+ "kernel_log",
  "linux-raw-sys",
  "memory_addr",
  "spin 0.10.0",
  "starry-vdso",
+ "task",
  "xmas-elf",
 ]
 
@@ -1497,11 +1363,11 @@ dependencies = [
  "anyhow",
  "async-lock",
  "async-trait",
- "axsync",
  "bitflags 2.11.1",
  "crc",
  "log",
  "maybe-async",
+ "sync",
  "tempfile",
  "tokio",
 ]
@@ -1733,6 +1599,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hal"
+version = "0.1.0"
+dependencies = [
+ "aarch64-cpu 10.0.0",
+ "axplat",
+ "axplat-aarch64-qemu-virt",
+ "axplat-loongarch64-qemu-virt",
+ "axplat-riscv64-qemu-virt",
+ "axplat-x86-pc",
+ "cfg-if",
+ "config",
+ "cpu",
+ "heapless 0.9.3",
+ "kernel_alloc",
+ "kernel_guard",
+ "kernel_log",
+ "lazyinit",
+ "linkme",
+ "log",
+ "memory_addr",
+ "page_table_multiarch",
+ "percpu",
+]
+
+[[package]]
 name = "handler_table"
 version = "0.1.2"
 
@@ -1859,13 +1750,25 @@ dependencies = [
 name = "ipc"
 version = "0.1.0"
 dependencies = [
- "axalloc",
  "axerrno",
- "axhal",
- "axtask",
+ "hal",
+ "kernel_alloc",
  "memory_addr",
  "pulse_user_abi",
  "spin 0.10.0",
+ "task",
+]
+
+[[package]]
+name = "ipi"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "hal",
+ "kspin",
+ "lazyinit",
+ "log",
+ "percpu",
 ]
 
 [[package]]
@@ -1940,6 +1843,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel_alloc"
+version = "0.1.0"
+dependencies = [
+ "allocator",
+ "axerrno",
+ "axplat",
+ "buddy-slab-allocator",
+ "cfg-if",
+ "crate_interface",
+ "kernel_guard",
+ "kspin",
+ "lazyinit",
+ "log",
+ "memory_addr",
+ "percpu",
+]
+
+[[package]]
 name = "kernel_guard"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1947,6 +1868,18 @@ checksum = "d10c55bedf6789bc3748e0d8756ee639df1ae25144fd3525ed311044bd9a739f"
 dependencies = [
  "cfg-if",
  "crate_interface",
+]
+
+[[package]]
+name = "kernel_log"
+version = "0.1.0"
+dependencies = [
+ "cfg-if",
+ "chrono",
+ "crate_interface",
+ "kernel_log",
+ "kspin",
+ "log",
 ]
 
 [[package]]
@@ -2243,27 +2176,25 @@ dependencies = [
 name = "process"
 version = "0.1.0"
 dependencies = [
- "axalloc",
- "axconfig",
- "axcpu",
  "axerrno",
  "axfs",
  "axfs-ng-vfs",
- "axhal",
  "axio",
- "axlog",
  "axmm",
  "axnet",
  "axpoll",
- "axsync",
- "axtask",
  "bitflags 2.11.1",
  "bpf",
+ "config",
+ "cpu",
  "elf_loader",
+ "hal",
  "hashbrown 0.16.1",
  "heapless 0.9.3",
  "ipc",
+ "kernel_alloc",
  "kernel_guard",
+ "kernel_log",
  "kspin",
  "linkme",
  "linux-raw-sys",
@@ -2274,6 +2205,8 @@ dependencies = [
  "pulse_user_abi",
  "sha2",
  "spin 0.10.0",
+ "sync",
+ "task",
 ]
 
 [[package]]
@@ -2284,8 +2217,8 @@ version = "0.1.0"
 name = "pulse_core"
 version = "0.1.0"
 dependencies = [
- "axconfig",
  "axmm",
+ "config",
  "elf_loader",
  "process",
 ]
@@ -2304,25 +2237,24 @@ dependencies = [
 name = "pulse_syscalls"
 version = "0.1.0"
 dependencies = [
- "axalloc",
- "axconfig",
- "axcpu",
  "axerrno",
  "axfs",
  "axfs-ng-vfs",
- "axhal",
  "axio",
- "axlog",
  "axmm",
  "axnet",
  "axpoll",
- "axtask",
  "bitflags 2.11.1",
  "bpf",
  "chrono",
+ "config",
+ "cpu",
+ "hal",
  "heapless 0.9.3",
  "ipc",
+ "kernel_alloc",
  "kernel_guard",
+ "kernel_log",
  "linkme",
  "linux-raw-sys",
  "memory_addr",
@@ -2337,6 +2269,7 @@ dependencies = [
  "spin 0.10.0",
  "starry-vdso",
  "syscalls",
+ "task",
 ]
 
 [[package]]
@@ -2533,6 +2466,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "axdisplay",
+ "axdriver",
+ "axfs",
+ "axmm",
+ "axnet",
+ "axplat",
+ "chrono",
+ "config",
+ "crate_interface",
+ "ctor_bare",
+ "hal",
+ "ipi",
+ "kernel_alloc",
+ "kernel_guard",
+ "kernel_log",
+ "percpu",
+ "task",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2574,6 +2530,15 @@ name = "sbi-spec"
 version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e36312fb5ddc10d08ecdc65187402baba4ac34585cb9d1b78522ae2358d890"
+
+[[package]]
+name = "sched"
+version = "0.3.1"
+dependencies = [
+ "eevdf-scheduler",
+ "intrusive-collections",
+ "linked_list_r4l",
+]
 
 [[package]]
 name = "scope-local"
@@ -2847,10 +2812,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "kspin",
+ "lock_api",
+ "log",
+ "spin 0.10.0",
+ "sync",
+ "task",
+]
+
+[[package]]
 name = "syscalls"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81c645a4de0d803ced6ef0388a2646aa1ef8467173b5d59a2c33c88de4ab76e7"
+
+[[package]]
+name = "task"
+version = "0.1.0"
+dependencies = [
+ "axerrno",
+ "axio",
+ "axpoll",
+ "cfg-if",
+ "config",
+ "cpumask",
+ "crate_interface",
+ "futures-util",
+ "hal",
+ "ipi",
+ "kernel_alloc",
+ "kernel_guard",
+ "kspin",
+ "lazyinit",
+ "log",
+ "memory_addr",
+ "percpu",
+ "pulse_bpf_schema",
+ "rand 0.9.5",
+ "sched",
+ "spin 0.10.0",
+ "task",
+ "timer_list",
+]
 
 [[package]]
 name = "tempfile"

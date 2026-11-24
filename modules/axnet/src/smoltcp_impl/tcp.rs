@@ -7,7 +7,7 @@ use core::{
 use axerrno::{AxError, AxResult, ax_err, ax_err_type};
 use axio::{PollState, Read, Write};
 use axpoll::{IoEvents, Pollable};
-use axsync::Mutex;
+use sync::Mutex;
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp::{self, ConnectError, State},
@@ -282,7 +282,7 @@ impl TcpSocket {
         schedule_poll();
 
         // HACK: yield() to let server to listen
-        axtask::yield_now();
+        task::yield_now();
 
         // Here our state must be `CONNECTING`, and only one thread can run here.
         if self.is_nonblocking() {
@@ -534,7 +534,7 @@ impl TcpSocket {
         self.try_recv_inner(buf, true)
     }
 
-    fn wait_connect_if_connecting(&self, deadline: Option<axhal::time::TimeValue>) -> AxResult {
+    fn wait_connect_if_connecting(&self, deadline: Option<hal::time::TimeValue>) -> AxResult {
         if self.is_connecting() {
             if self.is_nonblocking() {
                 if !self.try_connect_poll()? {
@@ -733,7 +733,7 @@ impl TcpSocket {
     }
 
     /// Returns the wait queue for this socket.
-    pub fn get_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn get_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.any
     }
 
@@ -747,12 +747,12 @@ impl TcpSocket {
     }
 
     /// Returns the read readiness wait queue for this socket.
-    pub fn read_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn read_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.read
     }
 
     /// Returns the write readiness wait queue for this socket.
-    pub fn write_wait_queue(&self) -> &axtask::WaitQueue {
+    pub fn write_wait_queue(&self) -> &task::WaitQueue {
         &self.wait_queues.write
     }
 
@@ -925,7 +925,7 @@ impl TcpSocket {
     fn block_on<F, T>(
         &self,
         events: IoEvents,
-        deadline: Option<axhal::time::TimeValue>,
+        deadline: Option<hal::time::TimeValue>,
         mut f: F,
     ) -> AxResult<T>
     where
@@ -1024,7 +1024,7 @@ pub fn run_tcp_endpoint_concurrency_checks() -> Result<(), &'static str> {
         let sock_reader = sock.clone();
         let done_flag = done_shutdown.clone();
         let started_flag = started_shutdown.clone();
-        axtask::spawn(move || {
+        task::spawn(move || {
             started_flag.store(true, Ordering::Release);
             while !done_flag.load(Ordering::Acquire) {
                 if let Ok(peer) = sock_reader.peer_addr() {
@@ -1039,7 +1039,7 @@ pub fn run_tcp_endpoint_concurrency_checks() -> Result<(), &'static str> {
         });
 
         while !started_shutdown.load(Ordering::Acquire) {
-            axtask::yield_now();
+            task::yield_now();
         }
 
         // Perform concurrent shutdown
@@ -1047,7 +1047,7 @@ pub fn run_tcp_endpoint_concurrency_checks() -> Result<(), &'static str> {
 
         done_shutdown.store(true, Ordering::Release);
         for _ in 0..10 {
-            axtask::yield_now();
+            task::yield_now();
         }
 
         assert_eq!(sock.peer_addr(), Err(AxError::NotConnected), "peer_addr must be NotConnected after shutdown");
@@ -1066,7 +1066,7 @@ pub fn run_tcp_endpoint_concurrency_checks() -> Result<(), &'static str> {
         let sock_reader = sock.clone();
         let done_flag = done_fail.clone();
         let started_flag = started_fail.clone();
-        axtask::spawn(move || {
+        task::spawn(move || {
             started_flag.store(true, Ordering::Release);
             while !done_flag.load(Ordering::Acquire) {
                 // During connect failure and timeout cleanup, peer_addr must NEVER succeed
@@ -1084,7 +1084,7 @@ pub fn run_tcp_endpoint_concurrency_checks() -> Result<(), &'static str> {
         });
 
         while !started_fail.load(Ordering::Acquire) {
-            axtask::yield_now();
+            task::yield_now();
         }
 
         // Initiate connection to an unreachable target, exercising the connect failure / timeout branch
@@ -1093,7 +1093,7 @@ pub fn run_tcp_endpoint_concurrency_checks() -> Result<(), &'static str> {
 
         done_fail.store(true, Ordering::Release);
         for _ in 0..10 {
-            axtask::yield_now();
+            task::yield_now();
         }
 
         assert_eq!(sock.peer_addr(), Err(AxError::NotConnected), "peer_addr must be NotConnected after connect failure/timeout");

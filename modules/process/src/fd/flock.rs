@@ -33,7 +33,7 @@ pub enum FlockType {
 struct LockState {
     lock_type: FlockType,
     owners: alloc::vec::Vec<usize>,
-    wait_queue: Arc<axtask::WaitQueue>,
+    wait_queue: Arc<task::WaitQueue>,
 }
 
 pub(crate) const LOCK_TABLE_SHARDS: usize = 32;
@@ -174,7 +174,7 @@ pub fn do_flock(owner: usize, target: LockTarget, operation: i32) -> LinuxResult
             let state = LockState {
                 lock_type,
                 owners: alloc::vec![owner],
-                wait_queue: Arc::new(axtask::WaitQueue::new()),
+                wait_queue: Arc::new(task::WaitQueue::new()),
             };
             map.insert(target, state);
             return Ok(0);

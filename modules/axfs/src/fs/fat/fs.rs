@@ -152,7 +152,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> FilesystemOps for FatFilesystem<D
     fn stat(&self) -> VfsResult<StatFs> {
         // The VFS statfs entry point is synchronous. The underlying block
         // requests can sleep while counting FAT clusters.
-        let stats = axtask::future::block_on(async {
+        let stats = task::future::block_on(async {
             self.lock().await.driver.statfs().await.map_err(vfs_error)
         })?;
         Ok(StatFs {

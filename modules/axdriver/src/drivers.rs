@@ -91,13 +91,13 @@ cfg_if::cfg_if! {
 
         impl DriverProbe for Ls2k1000AhciDriver {
             fn probe_global() -> Option<AxDeviceEnum> {
-                let base: usize = axhal::mem::phys_to_virt(
-                    axconfig::devices::AHCI_PADDR.into(),
+                let base: usize = hal::mem::phys_to_virt(
+                    config::devices::AHCI_PADDR.into(),
                 )
                 .into();
                 debug!(
                     "probing LS2K1000 AHCI at PA {:#x}",
-                    axconfig::devices::AHCI_PADDR
+                    config::devices::AHCI_PADDR
                 );
                 unsafe { axdriver_block::ls2k1000_ahci::Ls2k1000Ahci::try_new(base) }
                     .ok()

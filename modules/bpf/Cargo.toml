@@ -8,7 +8,7 @@ repository.workspace = true
 description = "BPF program execution, object state and sampling queues for PulseOS"
 
 [features]
-bpf-trace = ["axtask/bpf-trace"]
+bpf-trace = ["task/bpf-trace"]
 
 [dependencies]
 axerrno.workspace = true
@@ -16,8 +16,8 @@ pulse_bpf_schema.workspace = true
 spin.workspace = true
 
 [target.'cfg(target_os = "none")'.dependencies]
-axalloc.workspace = true
-axhal.workspace = true
+kernel_alloc.workspace = true
+hal.workspace = true
 axmm.workspace = true
-axtask = { workspace = true, features = ["multitask"] }
+task = { workspace = true, features = ["multitask"] }
 memory_addr.workspace = true

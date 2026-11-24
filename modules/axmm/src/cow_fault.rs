@@ -1,5 +1,5 @@
 use axerrno::{AxError, AxResult};
-use axhal::{mem::{flush_dcache_range, phys_to_virt}, paging::MappingFlags};
+use hal::{mem::{flush_dcache_range, phys_to_virt}, paging::MappingFlags};
 use memory_addr::{PhysAddr, VirtAddr, PAGE_SIZE_4K};
 
 use crate::{backend::{alloc_frame, dealloc_frame}, lifecycle::MappingGeneration};

@@ -15,7 +15,7 @@ use axfs_ng_vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
     path::MAX_NAME_LEN,
 };
-use axsync::Mutex;
+use sync::Mutex;
 use ext4plus::{Ext4, prelude::Ext4Error};
 use lru::LruCache;
 
@@ -151,7 +151,7 @@ impl Ext4Filesystem {
         }
 
         let fs = self.clone();
-        axtask::spawn_async(async move {
+        task::spawn_async(async move {
             fs.run_deletion_worker().await;
         });
     }

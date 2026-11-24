@@ -5,10 +5,10 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use axalloc::global_allocator;
+use kernel_alloc::global_allocator;
 use axdriver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use axdriver_virtio::{BufferDirection, PhysAddr, VirtIoHal};
-use axhal::mem::{phys_to_virt, virt_to_phys};
+use hal::mem::{phys_to_virt, virt_to_phys};
 #[cfg(net_dev = "virtio-net")]
 use axpoll::PollSet;
 use cfg_if::cfg_if;
@@ -80,8 +80,8 @@ impl Drop for VirtioIrqRegistration {
         };
 
         if remove_irq {
-            axhal::irq::set_enable(self.irq, false);
-            let _ = axhal::irq::unregister(self.irq);
+            hal::irq::set_enable(self.irq, false);
+            let _ = hal::irq::unregister(self.irq);
         }
     }
 }
@@ -102,7 +102,7 @@ fn register_virtio_interrupt<T: Send + Sync + 'static>(
 
     let id = NEXT_VIRTIO_INTERRUPT_ID.fetch_add(1, Ordering::Relaxed);
     let mut guard = VIRTIO_INTERRUPTS.lock();
-    if !guard.contains_key(&irq) && !axhal::irq::register(irq, common_virtio_irq_handler) {
+    if !guard.contains_key(&irq) && !hal::irq::register(irq, common_virtio_irq_handler) {
         return Err(DevError::BadState);
     }
     guard.entry(irq).or_default().push(VirtioInterruptInfo {
@@ -113,16 +113,16 @@ fn register_virtio_interrupt<T: Send + Sync + 'static>(
         }),
     });
     drop(guard);
-    axhal::irq::set_enable(irq, true);
+    hal::irq::set_enable(irq, true);
 
     Ok(VirtioIrqRegistration { irq, id })
 }
 
 fn common_virtio_irq_handler(irq: usize) {
-    axlog::debug!("common_virtio_irq_handler: irq={}", irq);
+    kernel_log::debug!("common_virtio_irq_handler: irq={}", irq);
     let infos = VIRTIO_INTERRUPTS.lock().get(&irq).cloned();
     if let Some(infos) = infos {
-        axlog::debug!(
+        kernel_log::debug!(
             "common_virtio_irq_handler: found {} handlers for irq={}",
             infos.len(),
             irq
@@ -131,7 +131,7 @@ fn common_virtio_irq_handler(irq: usize) {
             info.handler.handle();
         }
     } else {
-        axlog::debug!(
+        kernel_log::debug!(
             "common_virtio_irq_handler: no handlers found for irq={}",
             irq
         );
@@ -483,10 +483,10 @@ cfg_if! {
                 fn handler<H: VirtIoHal, T: virtio_drivers::transport::Transport>(
                     w: &VirtIoBlkDevInner<H, T>,
                 ) {
-                    axlog::debug!("virtio-blk interrupt handler: checking interrupt");
+                    kernel_log::debug!("virtio-blk interrupt handler: checking interrupt");
                     let acked = w.inner.lock().device.ack_interrupt();
                     w.completion_irq_count.fetch_add(1, Ordering::Relaxed);
-                    axlog::debug!("virtio-blk interrupt handler: acked={}", acked);
+                    kernel_log::debug!("virtio-blk interrupt handler: acked={}", acked);
                     // Notify unconditionally: for MSI-X mode, the device fires
                     // the interrupt only when I/O completes; `acked` reflects
                     // whether the legacy ISR STATUS bit was set, which is NOT
@@ -999,9 +999,9 @@ cfg_if! {
                 }
 
                 let weak = Arc::downgrade(self);
-                let deadline = axhal::time::monotonic_time_nanos()
+                let deadline = hal::time::monotonic_time_nanos()
                     .saturating_add(COMPLETION_RECHECK_INTERVAL_NS);
-                axtask::set_generic_timer(
+                task::set_generic_timer(
                     deadline,
                     Box::new(move |_| {
                         let Some(inner) = weak.upgrade() else {
@@ -1127,10 +1127,10 @@ cfg_if! {
 
             #[cfg(feature = "multitask")]
             fn record_request_wait(&self, token: u16) {
-                let context = axtask::WaitContext::new_optional(|| {
+                let context = task::WaitContext::new_optional(|| {
                     let reason = match self.buffer {
-                        FutureBuffer::Read(_) => axtask::WaitReason::VirtioBlkRead,
-                        FutureBuffer::Write(_) => axtask::WaitReason::VirtioBlkWrite,
+                        FutureBuffer::Read(_) => task::WaitReason::VirtioBlkRead,
+                        FutureBuffer::Write(_) => task::WaitReason::VirtioBlkWrite,
                         FutureBuffer::Flush(_) => return None,
                     };
                     Some((
@@ -1140,20 +1140,20 @@ cfg_if! {
                     ))
                 });
                 if let Some(context) = context {
-                    axtask::future::set_current_wait_context(context);
+                    task::future::set_current_wait_context(context);
                 }
             }
 
             #[cfg(feature = "multitask")]
             fn record_queue_full_wait(&self) {
-                axtask::future::set_current_wait_context(axtask::WaitContext::new(|| {
+                task::future::set_current_wait_context(task::WaitContext::new(|| {
                     let operation = match self.buffer {
                         FutureBuffer::Read(_) => 1,
                         FutureBuffer::Write(_) => 2,
                         FutureBuffer::Flush(_) => 3,
                     };
                     (
-                        axtask::WaitReason::VirtioBlkQueueFull,
+                        task::WaitReason::VirtioBlkQueueFull,
                         Arc::as_ptr(&self.inner) as usize as u64,
                         operation,
                     )
@@ -1166,7 +1166,7 @@ cfg_if! {
                     // User trap slow paths restore IRQ delivery while running
                     // sleepable work. Other IRQ-disabled callers keep polling
                     // so a completion interrupt cannot strand the task.
-                    axhal::asm::irqs_enabled()
+                    hal::asm::irqs_enabled()
                 }
                 #[cfg(not(all(feature = "multitask", feature = "irq")))]
                 {
@@ -1224,7 +1224,7 @@ cfg_if! {
                                     request_id,
                                     cx.waker(),
                                 ) {
-                                    axlog::error!(
+                                    kernel_log::error!(
                                         "virtio-blk lost request: token={}, request_id={}",
                                         token,
                                         request_id
@@ -1436,7 +1436,7 @@ cfg_if! {
             }
             fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> DevResult {
                 #[cfg(feature = "multitask")]
-                return axtask::future::block_on(
+                return task::future::block_on(
                     <Self as axdriver_block::AsyncBlockDriverOps>::read_block_async(
                         self, block_id, buf,
                     ),
@@ -1449,7 +1449,7 @@ cfg_if! {
 
             fn write_block(&mut self, block_id: u64, buf: &[u8]) -> DevResult {
                 #[cfg(feature = "multitask")]
-                return axtask::future::block_on(
+                return task::future::block_on(
                     <Self as axdriver_block::AsyncBlockDriverOps>::write_block_async(
                         self, block_id, buf,
                     ),
@@ -1462,7 +1462,7 @@ cfg_if! {
 
             fn flush(&mut self) -> DevResult {
                 #[cfg(feature = "multitask")]
-                return axtask::future::block_on(
+                return task::future::block_on(
                     <Self as axdriver_block::AsyncBlockDriverOps>::flush_async(self),
                 );
                 #[cfg(not(feature = "multitask"))]
@@ -1598,7 +1598,7 @@ impl<D: VirtIoDevMeta> DriverProbe for VirtIoDriver<D> {
             axdriver_virtio::probe_pci_device::<VirtIoHalImpl>(root, bdf, dev_info)
         {
             if ty == D::DEVICE_TYPE {
-                let irq = match axhal::msix::configure_virtio_pci_msix(root, bdf, &mut transport) {
+                let irq = match hal::msix::configure_virtio_pci_msix(root, bdf, &mut transport) {
                     Ok(irq) => {
                         debug!(
                             "PCI device at {} configured to use MSI-X (irq {})",
@@ -1688,8 +1688,8 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
 
     #[inline]
     fn busy_wait_yield() {
-        if axhal::asm::irqs_enabled() {
-            axtask::yield_now();
+        if hal::asm::irqs_enabled() {
+            task::yield_now();
         }
     }
 }

@@ -15,16 +15,16 @@ documentation = "https://arceos-org.github.io/arceos/axdriver/index.html"
 [features]
 dyn = []
 bus-mmio = []
-bus-pci = ["dep:axdriver_pci", "dep:axhal", "dep:axconfig"]
+bus-pci = ["dep:axdriver_pci", "dep:hal", "dep:config"]
 net = ["axdriver_net"]
 block = ["axdriver_block"]
 display = ["axdriver_display"]
 
 # Enabled by features `virtio-*`
-virtio = ["axdriver_virtio", "dep:axalloc", "dep:axhal", "dep:axconfig"]
+virtio = ["axdriver_virtio", "dep:kernel_alloc", "dep:hal", "dep:config"]
 
 multitask = []
-irq = ["axtask/irq"]
+irq = ["task/irq"]
 
 # Async block I/O interface (AsyncBlockDriverOps trait implementation).
 # Requires `multitask` + `irq` to be effective at runtime.
@@ -42,23 +42,23 @@ starfive-jh7110-sdmmc = [
     "block",
     "async",
     "axdriver_block/starfive-jh7110-sdmmc",
-    "dep:axalloc",
-    "dep:axhal",
-    "dep:axconfig",
+    "dep:kernel_alloc",
+    "dep:hal",
+    "dep:config",
     "dep:fdt-raw",
 ]
 ls2k1000-ahci = [
     "block",
     "async",
     "axdriver_block/ls2k1000-ahci",
-    "dep:axhal",
-    "dep:axconfig",
+    "dep:hal",
+    "dep:config",
 ]
 starfive-jh7110-dwmac = [
     "net",
     "axdriver_net/starfive-jh7110-dwmac",
-    "dep:axalloc",
-    "dep:axhal",
+    "dep:kernel_alloc",
+    "dep:hal",
     "dep:fdt-raw",
 ]
 # more devices example: e1000 = ["net", "axdriver_net/e1000"]
@@ -77,9 +77,9 @@ axdriver_net = { workspace = true, optional = true }
 axdriver_display = { workspace = true, optional = true }
 axdriver_pci = { workspace = true, optional = true }
 axdriver_virtio = { workspace = true, optional = true }
-axalloc = { workspace = true, optional = true }
-axhal = { workspace = true, optional = true }
-axconfig = { workspace = true, optional = true }
-axtask = { workspace = true }
-axlog = { workspace = true }
+kernel_alloc = { workspace = true, optional = true }
+hal = { workspace = true, optional = true }
+config = { workspace = true, optional = true }
+task = { workspace = true }
+kernel_log = { workspace = true }
 fdt-raw = { version = "0.3", optional = true }

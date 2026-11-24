@@ -1125,11 +1125,11 @@ impl PageCacheFrame {
     }
 
     fn should_dealloc_paddr(paddr: PhysAddr) -> bool {
-        if let Some(ref_count) = axalloc::frame_table().try_get_ref(paddr) {
+        if let Some(ref_count) = kernel_alloc::frame_table().try_get_ref(paddr) {
             if ref_count == 0 {
                 true
             } else {
-                axalloc::frame_table().dec_ref(paddr) == 0
+                kernel_alloc::frame_table().dec_ref(paddr) == 0
             }
         } else {
             true
@@ -1245,7 +1245,7 @@ impl PageCache {
     }
 
     fn has_user_mapping(&self) -> bool {
-        axalloc::frame_table()
+        kernel_alloc::frame_table()
             .try_get_ref(self.paddr())
             .is_some_and(|ref_count| ref_count > 1)
     }
@@ -1256,7 +1256,7 @@ impl PageCache {
 
     fn pin_for_mapping(&mut self, may_write: bool) -> VfsResult<PhysAddr> {
         let paddr = self.paddr();
-        let ref_count = axalloc::frame_table()
+        let ref_count = kernel_alloc::frame_table()
             .try_get_ref(paddr)
             .ok_or(VfsError::BadState)?;
         if ref_count <= 1 {
@@ -1267,9 +1267,9 @@ impl PageCache {
         }
         self.may_write_mapping |= may_write;
         if ref_count == 0 {
-            axalloc::frame_table().mark_used(paddr);
+            kernel_alloc::frame_table().mark_used(paddr);
         }
-        axalloc::frame_table().inc_ref(paddr);
+        kernel_alloc::frame_table().inc_ref(paddr);
         Ok(paddr)
     }
 
@@ -1704,7 +1704,7 @@ impl CachedFileShared {
                 }
 
                 write_all_at(
-                    |data, offset| axtask::future::block_on(file.write_at(data, offset)),
+                    |data, offset| task::future::block_on(file.write_at(data, offset)),
                     &merged_buf,
                     page_start,
                 )?;
@@ -2490,7 +2490,7 @@ pub fn page_cache_reclaim(num_pages: usize) -> usize {
         return 0;
     }
 
-    let cpu_id = axhal::percpu::this_cpu_id();
+    let cpu_id = hal::percpu::this_cpu_id();
     let slot = cpu_id % usize::BITS as usize;
     let slot_mask = 1usize << slot;
     if PAGE_CACHE_RECLAIM_ACTIVE_CPUS.fetch_or(slot_mask, Ordering::AcqRel) & slot_mask != 0 {
@@ -2596,7 +2596,7 @@ pub fn cached_file_size(location: &Location) -> VfsResult<u64> {
     if let Some(size) = cached_file_size_if_present(location) {
         Ok(size)
     } else {
-        axtask::future::block_on(location.len())
+        task::future::block_on(location.len())
     }
 }
 
@@ -2713,7 +2713,7 @@ impl CachedFile {
     }
 
     pub fn get_or_create(location: Location) -> VfsResult<Self> {
-        axtask::future::block_on(Self::get_or_create_async(location))
+        task::future::block_on(Self::get_or_create_async(location))
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
@@ -2762,7 +2762,7 @@ impl CachedFile {
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let len = (cached_size.saturating_sub(page_start)).min(PAGE_SIZE as u64) as usize;
             if len > 0 {
-                axtask::future::block_on(file.write_at(&page.data()[..len], page_start))?;
+                task::future::block_on(file.write_at(&page.data()[..len], page_start))?;
             }
             page.dirty = false;
         }
@@ -2820,7 +2820,7 @@ impl CachedFile {
         } else if !skip_read {
             let registration = page.register_direct_read(PAGE_SIZE)?;
             let read_result =
-                axtask::future::block_on(file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64));
+                task::future::block_on(file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64));
             drop(registration);
             let read_len = read_result?;
             if read_len < PAGE_SIZE {
@@ -2857,10 +2857,10 @@ impl CachedFile {
             match result {
                 Ok(paddr) => {
                     if let Err((_, paddr)) = pinned.push((page_num, paddr)) {
-                        let refs = axalloc::frame_table().dec_ref(paddr);
+                        let refs = kernel_alloc::frame_table().dec_ref(paddr);
                         debug_assert_ne!(refs, 0);
                         while let Some((_, paddr)) = pinned.pop() {
-                            let refs = axalloc::frame_table().dec_ref(paddr);
+                            let refs = kernel_alloc::frame_table().dec_ref(paddr);
                             debug_assert_ne!(refs, 0);
                         }
                         return Err(VfsError::StorageFull);
@@ -2868,7 +2868,7 @@ impl CachedFile {
                 }
                 Err(err) => {
                     while let Some((_, paddr)) = pinned.pop() {
-                        let refs = axalloc::frame_table().dec_ref(paddr);
+                        let refs = kernel_alloc::frame_table().dec_ref(paddr);
                         debug_assert_ne!(refs, 0);
                     }
                     return Err(err);
@@ -3301,8 +3301,8 @@ impl CachedFile {
     }
 
     pub fn with_page<R>(&self, pn: u32, f: impl FnOnce(Option<&mut PageCache>) -> R) -> R {
-        let _page_guard = axtask::future::block_on(self.shared.page_access.acquire_for_page(pn));
-        let _guard = axtask::future::block_on(self.shared.io_lock.read());
+        let _page_guard = task::future::block_on(self.shared.page_access.acquire_for_page(pn));
+        let _guard = task::future::block_on(self.shared.io_lock.read());
         let mut cache = self.shared.page_cache.lock();
         let page = cache.get_mut(&pn);
         f(page)
@@ -3313,7 +3313,7 @@ impl CachedFile {
         pn: u32,
         f: impl FnOnce(&mut PageCache, Option<(u32, PageCache)>) -> VfsResult<R>,
     ) -> VfsResult<R> {
-        let io_guard = axtask::future::block_on(self.shared.io_lock.write());
+        let io_guard = task::future::block_on(self.shared.io_lock.write());
         let file_len = self.shared.size();
         let mut guard = self.shared.page_cache.lock();
         let evicted = self.page_or_insert(
@@ -3449,7 +3449,7 @@ impl CachedFile {
     }
 
     pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
-        axtask::future::block_on(self.read_at_async(dst, offset))
+        task::future::block_on(self.read_at_async(dst, offset))
     }
 
     async fn write_slice_at_locked_async(
@@ -3768,19 +3768,19 @@ impl CachedFile {
     }
 
     pub fn write_at(&self, buf: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        axtask::future::block_on(self.write_at_async(buf, offset))
+        task::future::block_on(self.write_at_async(buf, offset))
     }
 
     pub fn append(&self, buf: impl Read + IoBuf) -> VfsResult<(usize, u64)> {
-        axtask::future::block_on(self.append_async(buf))
+        task::future::block_on(self.append_async(buf))
     }
 
     pub fn set_len(&self, len: u64) -> VfsResult<()> {
-        axtask::future::block_on(self.set_len_async(len))
+        task::future::block_on(self.set_len_async(len))
     }
 
     pub fn sync(&self, data_only: bool) -> VfsResult<()> {
-        axtask::future::block_on(self.sync_async(data_only))
+        task::future::block_on(self.sync_async(data_only))
     }
 
     /// Returns whether two handles refer to the same shared page cache.
@@ -3796,7 +3796,7 @@ impl CachedFile {
     /// while the backing I/O future is pending.
     pub fn ensure_page_resident(&self, pn: u32) -> VfsResult<()> {
         let file = self.inner.entry().as_file()?;
-        axtask::future::block_on(self.ensure_pages_async(file, pn, 1))
+        task::future::block_on(self.ensure_pages_async(file, pn, 1))
     }
 
     /// Starts a bounded, best-effort fill for pages after a confirmed
@@ -3824,7 +3824,7 @@ impl CachedFile {
 
         let cached = self.clone();
         let shared = self.shared.clone();
-        axtask::spawn_async(async move {
+        task::spawn_async(async move {
             let _guard = MmapPrefetchTaskGuard {
                 shared,
                 _slot: slot,
@@ -3879,7 +3879,7 @@ impl CachedFile {
     pub fn get_shared_page_paddr(&self, pn: u32, may_write: bool) -> VfsResult<PhysAddr> {
         let file = self.inner.entry().as_file()?;
         let result =
-            axtask::future::block_on(self.ensure_pages_inner_async(file, pn, 1, Some(may_write)))?
+            task::future::block_on(self.ensure_pages_inner_async(file, pn, 1, Some(may_write)))?
                 .ok_or(VfsError::BadState);
         if may_write && result.is_ok() {
             self.shared.watch_writable_mapping();
@@ -3896,7 +3896,7 @@ impl CachedFile {
     ) -> VfsResult<SharedPagePaddrs> {
         let file = self.inner.entry().as_file()?;
         let result =
-            axtask::future::block_on(self.pin_pages_inner_async(file, pn, page_count, may_write));
+            task::future::block_on(self.pin_pages_inner_async(file, pn, page_count, may_write));
         if may_write && result.is_ok() {
             self.shared.watch_writable_mapping();
         }
@@ -3914,7 +3914,7 @@ impl CachedFile {
         page_count: usize,
         may_write: bool,
     ) -> VfsResult<(SharedPagePaddrs, axmm::FilePageIo)> {
-        axtask::future::block_on(self.get_shared_page_paddrs_with_io_async(pn, page_count, may_write))
+        task::future::block_on(self.get_shared_page_paddrs_with_io_async(pn, page_count, may_write))
     }
 
     /// Async form of [`Self::get_shared_page_paddrs_with_io`].
@@ -3963,7 +3963,7 @@ impl CachedFile {
         pn: u32,
         paddr: PhysAddr,
     ) -> VfsResult<MappedPageIdentity> {
-        let _guard = axtask::future::block_on(self.shared.io_lock.read());
+        let _guard = task::future::block_on(self.shared.io_lock.read());
         self.shared.retain_shared_page_if_paddr(pn, paddr)
     }
 
@@ -3998,8 +3998,8 @@ impl CachedFile {
     /// alone never proves cache ownership. Success publishes dirtiness, not
     /// storage durability (use `sync` for that).
     pub fn mark_page_dirty_if_paddr(&self, pn: u32, paddr: PhysAddr) -> VfsResult<()> {
-        let _page_guard = axtask::future::block_on(self.shared.page_access.acquire_for_page(pn));
-        let _guard = axtask::future::block_on(self.shared.io_lock.read());
+        let _page_guard = task::future::block_on(self.shared.page_access.acquire_for_page(pn));
+        let _guard = task::future::block_on(self.shared.io_lock.read());
         self.shared
             .mark_page_dirty_if_paddr(pn, paddr, self.in_memory)
     }
@@ -4196,13 +4196,13 @@ mod tests {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
             // Native tests use std for heap ownership and a separate region for
-            // the real cache page allocator. axhal's dummy maps these frames to
+            // the real cache page allocator. hal's dummy maps these frames to
             // physical zero; these tests do not claim hardware mapping coverage.
             let layout = std::alloc::Layout::from_size_align(8 * 1024 * 1024, PAGE_SIZE).unwrap();
             let memory = unsafe { std::alloc::alloc_zeroed(layout) };
             assert!(!memory.is_null());
-            axalloc::global_init(memory as usize, layout.size());
-            axalloc::init_frame_table(0.into(), PAGE_SIZE);
+            kernel_alloc::global_init(memory as usize, layout.size());
+            kernel_alloc::init_frame_table(0.into(), PAGE_SIZE);
         });
         PageCache::new(false).unwrap()
     }

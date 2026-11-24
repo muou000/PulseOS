@@ -22,11 +22,11 @@ Linux v6.12 的 `VM_FAULT_MAJOR` 指示存储读取，fault accounting 接收 re
 
 ## 时间与结果
 
-`start_ns` 在调用 `proc.handle_page_fault` 紧前取得；completion timestamp 在该调用返回后、信号和 fixup 后处理前取得。`elapsed_ns = completion_ns - start_ns` 包含等待、I/O、被调度出去的时间与观察点之间的小量仪器化开销，单位为 guest monotonic nanoseconds，不是 CPU time，也不是整个 trap 到 user-return 的时长。completion CPU 是返回时 CPU；origin task/PID/TID 在进入时冻结，因此跨 CPU 恢复不会被 worker 身份替代。[实现观察点](../../modules/process/src/trap.rs)、[有界发布器](../../modules/axtask/src/bpf_trace.rs)。
+`start_ns` 在调用 `proc.handle_page_fault` 紧前取得；completion timestamp 在该调用返回后、信号和 fixup 后处理前取得。`elapsed_ns = completion_ns - start_ns` 包含等待、I/O、被调度出去的时间与观察点之间的小量仪器化开销，单位为 guest monotonic nanoseconds，不是 CPU time，也不是整个 trap 到 user-return 的时长。completion CPU 是返回时 CPU；origin task/PID/TID 在进入时冻结，因此跨 CPU 恢复不会被 worker 身份替代。[实现观察点](../../modules/process/src/trap.rs)、[有界发布器](../../modules/task/src/bpf_trace.rs)。
 
 结果只描述 resolver 返回值：`Resolved=1` 对应 `Ok(true)`，`NotHandled=2` 对应 `Ok(false)`，`NoMemory=3` 对应 `Err(AxError::NoMemory)`，其余错误为 `ResolverError=4`。观察路径不改变这个原始结果；既有信号、内核 fixup、进程终止和返回分支继续消费它。完成事件不能表示“进程已成功恢复用户态”。先于 resolver 的 kernel fixup、没有 Thread 的 fault、提前进程退出或未返回的 panic 不产生虚假的 completion。[trap 分支](../../modules/process/src/trap.rs)。
 
-时钟回退以 checked subtraction 检出；增加 `clock_errors`，不输出一个伪造的零时长。相同 clock tick 的起止可合法得到零。`started`、`completed` 是系统范围的、曾在订阅存在时进入观察的 resolver 数；即使订阅停止，已开始 token 返回时仍增加 completed。它们不是每 source/event 的 VM 次数，不能与 source `delivered` 硬相等；观察区间之间可能有在途 resolver，差值也不能直接命名为 aborted。捕获层继续报告缺失、unknown 和 partial。[计数与 token 生命周期](../../modules/axtask/src/bpf_trace.rs)。
+时钟回退以 checked subtraction 检出；增加 `clock_errors`，不输出一个伪造的零时长。相同 clock tick 的起止可合法得到零。`started`、`completed` 是系统范围的、曾在订阅存在时进入观察的 resolver 数；即使订阅停止，已开始 token 返回时仍增加 completed。它们不是每 source/event 的 VM 次数，不能与 source `delivered` 硬相等；观察区间之间可能有在途 resolver，差值也不能直接命名为 aborted。捕获层继续报告缺失、unknown 和 partial。[计数与 token 生命周期](../../modules/task/src/bpf_trace.rs)。
 
 ## 固定 wire schema
 
@@ -43,7 +43,7 @@ Linux v6.12 的 `VM_FAULT_MAJOR` 指示存储读取，fault accounting 接收 re
 | 72 | outcome | u32，Resolved=1、NotHandled=2、NoMemory=3、ResolverError=4 |
 | 76 | classification | u32，Unknown=0；Minor=1/Major=2 预留，当前 producer 不产生它们 |
 
-observer 在 entry 保留 observation generation。resolver 可能睡眠；不能在 completion 重新取新 generation，把旧 fault 送入随后开启的新采集。完成时只复制标量进 queue，队列满/递归的既有 trace counters 继续负责，source dispatch 再按 activation epoch 判断。`fault_started`、`fault_completed`、`fault_clock_errors` 作为系统 scoped diagnostics 向 capture 传播，不与 trace queue drops 或各 FD 计数求和。[queue/generation](../../modules/axtask/src/bpf_trace.rs)、[activation dispatch](../../modules/bpf/src/perf_event.rs)。
+observer 在 entry 保留 observation generation。resolver 可能睡眠；不能在 completion 重新取新 generation，把旧 fault 送入随后开启的新采集。完成时只复制标量进 queue，队列满/递归的既有 trace counters 继续负责，source dispatch 再按 activation epoch 判断。`fault_started`、`fault_completed`、`fault_clock_errors` 作为系统 scoped diagnostics 向 capture 传播，不与 trace queue drops 或各 FD 计数求和。[queue/generation](../../modules/task/src/bpf_trace.rs)、[activation dispatch](../../modules/bpf/src/perf_event.rs)。
 
 地址空间、Page Cache 和 TLB completion 的处理仍在原 coordinator 中；发布发生在 resolver 返回以后。不会为观察更改映射 ownership、重试、锁顺序或文件系统依赖方向，继续遵守 [ADR-0001](../adr/0001-mapped-page-lifecycle-protocol.md) 和 [ADR-0004](../adr/0004-axmm-file-mapping-source-boundary.md)。ADR-0004 的历史 qperf 描述不表示本事件恢复 qperf 依赖。
 

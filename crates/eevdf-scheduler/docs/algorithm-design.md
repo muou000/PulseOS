@@ -170,7 +170,7 @@ deadline_i = vruntime_i + virtual_slice_i
 权重较大的任务具有更短的虚拟 request；在其他条件相同时，它的虚拟截止期更早。
 但是把虚拟 request 换算回实际执行时间，仍约等于统一的 `BASE_SLICE_NS`。
 
-PulseOS 的 `axtask` 适配当前选择：
+PulseOS 的 `task` 适配当前选择：
 
 ```text
 BASE_SLICE_NS = 4_000_000 ns = 4 ms
@@ -569,14 +569,14 @@ enqueue(task, EnqueueReason::Migration, now_ns)
 `detach_normal_task(predicate)` 为了应用宿主谓词，最坏需要扫描普通任务树。它只
 迁移排队普通任务，不会迁移当前正在运行的任务或 RT 任务。
 
-## 12. crate、`axsched` 与 `axtask` 的分层
+## 12. crate、`sched` 与 `task` 的分层
 
 PulseOS 中的调用关系如下：
 
 ```mermaid
 flowchart TB
-    A[axtask<br/>任务状态、每 CPU 运行队列、锁、定时器、迁移]
-    B[axsched EEVDF adapter<br/>BaseScheduler 生命周期映射]
+    A[task<br/>任务状态、每 CPU 运行队列、锁、定时器、迁移]
+    B[sched EEVDF adapter<br/>BaseScheduler 生命周期映射]
     C[eevdf-scheduler<br/>算法状态、队列、选择、记账]
     D[SMP load balance<br/>放置、idle pull、affinity]
     E[HAL timer<br/>周期 tick、睡眠事件、一次性截止期]
@@ -595,17 +595,17 @@ flowchart TB
 - 定义 `EEVDFTask<T>`、`EEVDFScheduler`、`EnqueueReason` 和 `RtPolicy`；
 - 实现普通 EEVDF 与 RT FIFO/RR 算法；
 - 只依赖 `alloc`、侵入式树和侵入式链表；
-- 不依赖 `axsched::BaseScheduler`；
+- 不依赖 `sched::BaseScheduler`；
 - 不负责锁、中断、CPU 选择和硬件定时器。
 
-### `axsched`
+### `sched`
 
 - 将 `SchedEnqueueReason` 一一映射到 crate 的 `EnqueueReason`；
 - 为 `EEVDFScheduler` 实现 `BaseScheduler`；
 - 转发 start、stop、tick、抢占、deadline 和优先级更新；
 - 不复制 EEVDF 算法细节。
 
-### `axtask`
+### `task`
 
 - 在任务状态转换时确定 Spawn/Wake/Yield/Preempt/Migration；
 - 在调度器锁内调用算法；

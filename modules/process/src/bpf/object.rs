@@ -117,7 +117,7 @@ impl FdObject for BpfMapObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+        wqs: &mut alloc::vec::Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         if let Some(rb) = &self.ringbuf {
             #[cfg(target_os = "none")]
@@ -149,7 +149,7 @@ impl FdObject for BpfMapObject {
     fn mmap_prepared(
         &self,
         size: usize,
-        flags: axhal::paging::MappingFlags,
+        flags: hal::paging::MappingFlags,
         offset: usize,
         is_shared: bool,
     ) -> Option<LinuxResult<axmm::PreparedMapping>> {
@@ -257,7 +257,7 @@ impl PerfEventObject {
         if let Some(thread) = &clock_thread {
             event.bind_task_identity(thread.sampling_task_id())?;
             if event.spec().clock == super::PerfEventClock::TaskClock {
-                let clock = thread.sampling_clock_ns(axhal::time::monotonic_time_nanos())
+                let clock = thread.sampling_clock_ns(hal::time::monotonic_time_nanos())
                     .ok_or(LinuxError::EAGAIN)?;
                 event.reset_at(clock);
             }
@@ -278,7 +278,7 @@ impl PerfEventObject {
     }
 
     pub fn current_time_ns_for_spec(spec: &super::PerfEventSpec) -> LinuxResult<u64> {
-        let now_ns = axhal::time::monotonic_time_nanos() as u64;
+        let now_ns = hal::time::monotonic_time_nanos() as u64;
         match (spec.clock, spec.scope) {
             (super::PerfEventClock::TaskClock, super::PerfEventScope::Task { pid }) => {
                 let thread = crate::thread_by_tid_global(pid).ok_or(LinuxError::ESRCH)?;
@@ -291,7 +291,7 @@ impl PerfEventObject {
     pub fn current_time_ns(&self) -> LinuxResult<u64> {
         if self.event.spec().clock == super::PerfEventClock::TaskClock
             && let Some(thread) = &self.clock_thread {
-            return thread.sampling_clock_ns(axhal::time::monotonic_time_nanos())
+            return thread.sampling_clock_ns(hal::time::monotonic_time_nanos())
                 .ok_or(LinuxError::EAGAIN);
         }
         Self::current_time_ns_for_spec(self.event.spec())
@@ -376,7 +376,7 @@ impl FdObject for PerfEventObject {
     fn get_wait_queues<'a>(
         &'a self,
         events: i16,
-        wqs: &mut alloc::vec::Vec<&'a axtask::WaitQueue>,
+        wqs: &mut alloc::vec::Vec<&'a task::WaitQueue>,
     ) -> LinuxResult<bool> {
         #[cfg(target_os = "none")]
         {
@@ -400,7 +400,7 @@ impl FdObject for PerfEventObject {
     fn mmap_prepared(
         &self,
         size: usize,
-        flags: axhal::paging::MappingFlags,
+        flags: hal::paging::MappingFlags,
         offset: usize,
         is_shared: bool,
     ) -> Option<LinuxResult<axmm::PreparedMapping>> {

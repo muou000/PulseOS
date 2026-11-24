@@ -19,11 +19,11 @@ const SCHED_ATTR_SIZE: u32 = core::mem::size_of::<SchedAttr>() as u32;
 
 fn apply_rt_policy(policy: u32) {
     let policy = match policy {
-        SCHED_FIFO => axtask::RtPolicy::Fifo,
-        SCHED_RR => axtask::RtPolicy::RoundRobin,
+        SCHED_FIFO => task::RtPolicy::Fifo,
+        SCHED_RR => task::RtPolicy::RoundRobin,
         _ => return,
     };
-    axtask::set_current_rt_policy(policy);
+    task::set_current_rt_policy(policy);
 }
 
 #[repr(C)]
@@ -54,7 +54,7 @@ pulse_user_abi::impl_user_abi_struct! {
 
 fn kernel_cpumask_bytes() -> usize {
     let usize_bits = core::mem::size_of::<usize>() * 8;
-    axhal::cpu_num().div_ceil(usize_bits) * core::mem::size_of::<usize>()
+    hal::cpu_num().div_ceil(usize_bits) * core::mem::size_of::<usize>()
 }
 
 fn current_tid() -> Result<usize, LinuxError> {
@@ -162,7 +162,7 @@ fn apply_thread_nice(thread: &Thread, nice: i32) {
         .map(|current| current.tid() == thread.tid())
         .unwrap_or(false);
     if is_current {
-        let _ = axtask::set_priority(priority);
+        let _ = task::set_priority(priority);
     } else if let Some(task) = thread.process().task_ref_by_tid(thread.tid()) {
         // A blocked task is not owned by a run queue, so the EEVDF priority
         // can be updated directly before the next wakeup enqueues it.
@@ -240,7 +240,7 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
         return -e.code() as isize;
     }
 
-    let cpumask = axtask::current().cpumask();
+    let cpumask = task::current().cpumask();
     let mut mask_bytes = match alloc_zeroed_bytes(kernel_mask_bytes, "sys_sched_getaffinity.mask") {
         Ok(v) => v,
         Err(e) => return -e.code() as isize,
@@ -265,7 +265,7 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
         return -e.code() as isize;
     }
 
-    let size = cpusetsize.min(axhal::cpu_num().div_ceil(8));
+    let size = cpusetsize.min(hal::cpu_num().div_ceil(8));
     let mut user_mask = match alloc_zeroed_bytes(size, "sys_sched_setaffinity.user_mask") {
         Ok(v) => v,
         Err(e) => return -e.code() as isize,
@@ -274,8 +274,8 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let mut cpumask = axtask::AxCpuMask::new();
-    for cpu_id in 0..axhal::cpu_num() {
+    let mut cpumask = task::AxCpuMask::new();
+    for cpu_id in 0..hal::cpu_num() {
         let byte_idx = cpu_id / 8;
         if byte_idx >= user_mask.len() {
             break;
@@ -286,7 +286,7 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
         }
     }
 
-    if axtask::set_current_affinity(cpumask) {
+    if task::set_current_affinity(cpumask) {
         0
     } else {
         -LinuxError::EINVAL.code() as isize
@@ -294,7 +294,7 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
 }
 
 pub fn sys_sched_getscheduler(pid: usize) -> isize {
-    axlog::debug!("sys_sched_getscheduler: pid={}", pid);
+    kernel_log::debug!("sys_sched_getscheduler: pid={}", pid);
     if let Err(e) = check_pid(pid) {
         return -e.code() as isize;
     }
@@ -325,15 +325,15 @@ pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
     }
 
     if sched_priority > 0 {
-        axtask::set_priority(sched_priority as isize);
+        task::set_priority(sched_priority as isize);
     } else {
-        axtask::set_priority(-100);
+        task::set_priority(-100);
     }
     0
 }
 
 pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_sched_setscheduler: pid={}, policy={}, param_ptr={:#x}",
         pid,
         policy,
@@ -356,12 +356,12 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
             return -LinuxError::EINVAL.code() as isize;
         }
         apply_rt_policy(policy as u32);
-        axtask::set_priority(sched_priority as isize);
+        task::set_priority(sched_priority as isize);
     } else {
         if sched_priority != 0 {
             return -LinuxError::EINVAL.code() as isize;
         }
-        axtask::set_priority(-100);
+        task::set_priority(-100);
     }
 
     let thread = match current_thread() {
@@ -381,7 +381,7 @@ pub fn sys_sched_getparam(pid: usize, param_ptr: usize) -> isize {
     if param_ptr == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
-    let prio = axtask::current().as_task_ref().priority();
+    let prio = task::current().as_task_ref().priority();
     let rt_prio = if (1..=99).contains(&prio) {
         prio as i32
     } else {
@@ -413,8 +413,8 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
         return -e.code() as isize;
     }
     let ts = timespec {
-        tv_sec: (axtask::rt_time_slice_ns() / 1_000_000_000) as _,
-        tv_nsec: (axtask::rt_time_slice_ns() % 1_000_000_000) as _,
+        tv_sec: (task::rt_time_slice_ns() / 1_000_000_000) as _,
+        tv_nsec: (task::rt_time_slice_ns() % 1_000_000_000) as _,
     };
     write_user_value(interval, &ts)
         .map(|_| 0)
@@ -422,7 +422,7 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
 }
 
 pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_sched_setattr: pid={}, attr={:#x}, flags={:#x}",
         pid,
         attr,
@@ -471,13 +471,13 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
             }
             // PulseOS records SCHED_DEADLINE metadata but does not implement
             // CBS/EDF scheduling; keep it in the ordinary EEVDF class.
-            axtask::set_priority(-100);
+            task::set_priority(-100);
         } else {
             if priority < 1 || priority > 99 {
                 return -LinuxError::EINVAL.code() as isize;
             }
             apply_rt_policy(policy);
-            axtask::set_priority(priority as isize);
+            task::set_priority(priority as isize);
         }
     } else {
         if priority != 0 {
@@ -486,7 +486,7 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
         if user_attr.sched_nice < -20 || user_attr.sched_nice > 19 {
             return -LinuxError::EINVAL.code() as isize;
         }
-        axtask::set_priority(user_attr.sched_nice as isize - 100);
+        task::set_priority(user_attr.sched_nice as isize - 100);
     }
 
     let thread = match current_thread() {
@@ -519,7 +519,7 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
 }
 
 pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_sched_getattr: pid={}, attr={:#x}, size={}, flags={:#x}",
         pid,
         attr,
@@ -538,7 +538,7 @@ pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> 
         Err(e) => return -e.code() as isize,
     };
 
-    let prio = axtask::current().as_task_ref().priority();
+    let prio = task::current().as_task_ref().priority();
     let rt_prio = if (1..=99).contains(&prio) {
         prio as u32
     } else {
@@ -580,7 +580,7 @@ fn is_supported_policy(policy: usize) -> bool {
 }
 
 pub fn sys_getcpu(cpu_ptr: usize, node_ptr: usize, _tcache: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_getcpu: cpu_ptr={:#x}, node_ptr={:#x}, tcache={:#x}",
         cpu_ptr,
         node_ptr,
@@ -588,7 +588,7 @@ pub fn sys_getcpu(cpu_ptr: usize, node_ptr: usize, _tcache: usize) -> isize {
     );
 
     if cpu_ptr != 0 {
-        let cpu_id = axhal::percpu::this_cpu_id() as u32;
+        let cpu_id = hal::percpu::this_cpu_id() as u32;
         if let Err(e) = write_user_value(cpu_ptr, &cpu_id) {
             return -e.code() as isize;
         }

@@ -158,7 +158,7 @@ pub fn thread_by_tid_global(tid: u64) -> Option<Arc<Thread>> {
 // resolved via the `task_ext` pointer on the current task. Processes
 // are tracked in `PROCESS_REGISTRY` for pid-based queries.
 
-fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&ThreadHandle> {
+fn thread_handle_from_task(task: &task::TaskInner) -> Option<&ThreadHandle> {
     let task_ext_ptr = unsafe { task.task_ext_ptr() };
     if task_ext_ptr.is_null() {
         return None;
@@ -167,14 +167,14 @@ fn thread_handle_from_task(task: &axtask::TaskInner) -> Option<&ThreadHandle> {
     Some(unsafe { &*(task_ext_ptr as *const ThreadHandle) })
 }
 
-pub fn thread_ref_from_task(task: &axtask::TaskInner) -> LinuxResult<&Thread> {
+pub fn thread_ref_from_task(task: &task::TaskInner) -> LinuxResult<&Thread> {
     thread_handle_from_task(task)
         .map(|handle| &**handle)
         .ok_or(LinuxError::ESRCH)
 }
 
 pub fn current_thread() -> LinuxResult<Arc<Thread>> {
-    let task = axtask::current();
+    let task = task::current();
     if let Some(handle) = thread_handle_from_task(&task) {
         let thread = handle.thread_arc();
         return Ok(thread);
@@ -184,15 +184,15 @@ pub fn current_thread() -> LinuxResult<Arc<Thread>> {
 }
 
 #[cfg(feature = "bpf-trace")]
-pub fn emit_bpf_task_metadata(task: &axtask::TaskInner, pid: u64, tid: u64) {
+pub fn emit_bpf_task_metadata(task: &task::TaskInner, pid: u64, tid: u64) {
     task.set_bpf_identity(pid, tid);
     let name = task.name();
-    axtask::bpf_trace::task_metadata(task.id().as_u64(), pid, tid, name.as_bytes());
+    task::bpf_trace::task_metadata(task.id().as_u64(), pid, tid, name.as_bytes());
 }
 
 #[cfg(feature = "bpf-trace")]
 pub fn emit_current_bpf_task_metadata() {
-    let task = axtask::current();
+    let task = task::current();
     if let Ok(thread) = current_thread() {
         emit_bpf_task_metadata(&task, thread.process().pid(), thread.tid());
     }
@@ -200,7 +200,7 @@ pub fn emit_current_bpf_task_metadata() {
 
 #[cfg(feature = "bpf-trace")]
 pub fn emit_current_mapping_metadata(kind: &str, begin_ns: u64) {
-    let task = axtask::current();
+    let task = task::current();
     if let Ok(thread) = current_thread() {
         let process = thread.process();
         let space = process.aspace_handle().read().observation_identity().0;
@@ -215,12 +215,12 @@ pub fn try_new_user_task(
     entry: impl FnOnce() + Send + 'static,
     name: String,
     stack_size: usize,
-) -> axerrno::AxResult<axtask::TaskInner> {
-    let inner = axtask::TaskInner::try_new(entry, name, stack_size)?;
+) -> axerrno::AxResult<task::TaskInner> {
+    let inner = task::TaskInner::try_new(entry, name, stack_size)?;
     #[cfg(target_arch = "riscv64")]
     let inner = {
         let mut inner = inner;
-        let vectors = axcpu::riscv_vector::VectorState::capture()
+        let vectors = cpu::riscv_vector::VectorState::capture()
             .map_err(|_| axerrno::AxError::NoMemory)?;
         inner.ctx_mut().set_user_vectors(vectors);
         inner
@@ -231,10 +231,10 @@ pub fn try_new_user_task(
 /// Binds hardware/software context (`page_table_root`, `TaskExt`, `PROCESS_REGISTRY`)
 /// to a `TaskInner` before publishing it to the scheduler queue.
 pub fn spawn_task_with_thread(
-    mut inner: axtask::TaskInner,
+    mut inner: task::TaskInner,
     thread: Arc<Thread>,
     register_proc: bool,
-) -> axtask::AxTaskRef {
+) -> task::AxTaskRef {
     inner.init_user_affinity();
     let proc = thread.process();
     let pt_root = proc.page_table_root();
@@ -249,18 +249,18 @@ pub fn spawn_task_with_thread(
     emit_bpf_task_metadata(&inner, proc.pid(), thread.tid());
     #[cfg(feature = "bpf-trace")]
     {
-        let parent = if proc.parent_pid() != 0 { axtask::current().id().as_u64() } else { 0 };
+        let parent = if proc.parent_pid() != 0 { task::current().id().as_u64() } else { 0 };
         let space = proc.aspace_handle().read().observation_identity().0;
         crate::bpf::mappings::task(inner.id().as_u64(), proc.pid(), thread.tid(), space,
             proc.exec_generation.load(Ordering::Acquire), if parent == 0 { "bind" } else { "fork" },
-            parent, &inner.name(), axhal::time::monotonic_time_nanos());
+            parent, &inner.name(), hal::time::monotonic_time_nanos());
     }
 
     inner.init_task_ext(ThreadHandle::new(thread));
 
     let task = inner.into_arc();
     proc.register_task_ref(task.clone());
-    axtask::spawn_task_ref(task.clone());
+    task::spawn_task_ref(task.clone());
     task
 }
 

@@ -12,16 +12,16 @@ use core::{
     task::Context,
 };
 
-use axalloc::global_allocator;
+use kernel_alloc::global_allocator;
 use axerrno::LinuxError;
 use axfs_ng_vfs::{
     FileNode, Location, Metadata, NodeFlags, NodePermission, NodeType, VfsError, VfsResult,
     path::Path,
 };
-use axhal::mem::{PhysAddr, VirtAddr, virt_to_phys};
+use hal::mem::{PhysAddr, VirtAddr, virt_to_phys};
 use axio::{SeekFrom, prelude::*};
 use axpoll::{IoEvents, Pollable};
-use axsync::Mutex;
+use sync::Mutex;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use kspin::SpinNoPreempt;
 use lru::LruCache;

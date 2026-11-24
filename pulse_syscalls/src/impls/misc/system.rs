@@ -42,11 +42,11 @@ fn validate_restart2_arg(arg: usize) -> Result<(), LinuxError> {
 }
 
 fn reset_system() -> isize {
-    match axhal::power::system_reset() {
+    match hal::power::system_reset() {
         Ok(never) => match never {},
-        Err(axhal::power::SystemResetError::NotSupported) => -LinuxError::ENOSYS.code() as isize,
-        Err(axhal::power::SystemResetError::Firmware(error)) => {
-            axlog::error!("sys_reboot: platform reset failed with firmware error {error}");
+        Err(hal::power::SystemResetError::NotSupported) => -LinuxError::ENOSYS.code() as isize,
+        Err(hal::power::SystemResetError::Firmware(error)) => {
+            kernel_log::error!("sys_reboot: platform reset failed with firmware error {error}");
             -LinuxError::EIO.code() as isize
         }
     }
@@ -58,7 +58,7 @@ fn flush_before_power_transition() -> Result<(), isize> {
 
 /// Implements Linux `reboot(2)` for the shared RISC-V64/LoongArch64 syscall ABI.
 pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_reboot: magic1={:#x}, magic2={:#x}, cmd={:#x}, arg={:#x}",
         magic1,
         magic2,
@@ -96,13 +96,13 @@ pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> isize
 pub(crate) fn perform_reboot_action(action: RebootAction) -> isize {
     if reboot_action_requires_filesystem_flush(action) {
         if let Err(error) = flush_before_power_transition() {
-            axlog::error!(
+            kernel_log::error!(
                 "refusing power transition because filesystem writeback failed: {}",
                 error
             );
             return error;
         }
-        axlog::info!(
+        kernel_log::info!(
             "filesystem writeback complete; system power transition: {:?}",
             action
         );
@@ -111,7 +111,7 @@ pub(crate) fn perform_reboot_action(action: RebootAction) -> isize {
     match action {
         RebootAction::Restart => reset_system(),
         RebootAction::Restart2 => reset_system(),
-        RebootAction::Halt | RebootAction::PowerOff => axhal::power::system_off(),
+        RebootAction::Halt | RebootAction::PowerOff => hal::power::system_off(),
         RebootAction::SetCad(enabled) => {
             CAD_ENABLED.store(enabled, Ordering::Release);
             0
@@ -144,7 +144,7 @@ pub fn sys_get_mempolicy(
     addr: usize,
     flags: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_get_mempolicy: mode={:#x}, nodemask={:#x}, maxnode={}, addr={:#x}, flags={:#x}",
         mode,
         nodemask,
@@ -246,7 +246,7 @@ fn write_cstr_field(dst: &mut [u8], s: &str) {
 
 /// sys_uname - 获取系统信息
 pub fn sys_uname(buf: usize) -> isize {
-    axlog::debug!("sys_uname: buf={:#x}", buf);
+    kernel_log::debug!("sys_uname: buf={:#x}", buf);
     if buf == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -288,7 +288,7 @@ pub fn sys_uname(buf: usize) -> isize {
 
 /// sys_sethostname - 设置系统主机名
 pub fn sys_sethostname(name_addr: usize, len: usize) -> isize {
-    axlog::debug!("sys_sethostname: name_addr={:#x}, len={}", name_addr, len);
+    kernel_log::debug!("sys_sethostname: name_addr={:#x}, len={}", name_addr, len);
 
     let process = match pulse_core::task::current_process() {
         Ok(p) => p,
@@ -363,7 +363,7 @@ pulse_user_abi::impl_user_abi_struct! {
 }
 
 pub fn sys_getrusage(who: i32, addr: usize) -> isize {
-    axlog::debug!("sys_getrusage: who={}, addr={:#x}", who, addr);
+    kernel_log::debug!("sys_getrusage: who={}, addr={:#x}", who, addr);
     if who != (linux_raw_sys::general::RUSAGE_SELF as i32)
         && who != linux_raw_sys::general::RUSAGE_CHILDREN
         && who != (linux_raw_sys::general::RUSAGE_THREAD as i32)
@@ -380,7 +380,7 @@ pub fn sys_getrusage(who: i32, addr: usize) -> isize {
         who if who == (linux_raw_sys::general::RUSAGE_SELF as i32)
             || who == (linux_raw_sys::general::RUSAGE_THREAD as i32) =>
         {
-            let now_ns = axhal::time::monotonic_time_nanos() as u64;
+            let now_ns = hal::time::monotonic_time_nanos() as u64;
             process.snapshot_cpu_time_ns(now_ns)
         }
         who if who == linux_raw_sys::general::RUSAGE_CHILDREN => {
@@ -484,7 +484,7 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
         Ok(fs) => fs,
         Err(e) => return -e.code() as isize,
     };
-    let tmp = match axtask::future::block_on(fs.read_prefix(path, buflen)) {
+    let tmp = match task::future::block_on(fs.read_prefix(path, buflen)) {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
@@ -495,7 +495,7 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
     }
 }
 pub fn sys_sysinfo(info: usize) -> isize {
-    axlog::debug!("sys_sysinfo: info={:#x}", info);
+    kernel_log::debug!("sys_sysinfo: info={:#x}", info);
     if info == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
@@ -507,7 +507,7 @@ pub fn sys_sysinfo(info: usize) -> isize {
         .saturating_add(allocator.available_pages()) as u64;
     let free_pages = allocator.available_pages() as u64;
     let sysinfo: linux_raw_sys::system::sysinfo = linux_raw_sys::system::sysinfo {
-        uptime: axhal::time::monotonic_time().as_secs() as _,
+        uptime: hal::time::monotonic_time().as_secs() as _,
         loads: [0; 3],
         totalram: total_pages.saturating_mul(page_size) as _,
         freeram: free_pages.saturating_mul(page_size) as _,
@@ -532,14 +532,14 @@ pub fn sys_sysinfo(info: usize) -> isize {
 }
 
 pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_syslog: action={}, bufp={:#x}, len={}",
         action,
         bufp,
         len
     );
     if !SYSLOG_PLACEHOLDER_WARNED.swap(true, Ordering::AcqRel) {
-        axlog::warn!(
+        kernel_log::warn!(
             "sys_syslog: compatibility placeholder active; kernel log buffer is not persisted"
         );
     }
@@ -600,7 +600,7 @@ pub fn sys_riscv_hwprobe(
     cpus_addr: usize,
     flags: usize,
 ) -> isize {
-    axlog::debug!(
+    kernel_log::debug!(
         "sys_riscv_hwprobe: pairs_addr={:#x}, pair_count={}, cpusetsize={}, cpus_addr={:#x}, \
          flags={:#x}",
         pairs_addr,
@@ -619,7 +619,7 @@ pub fn sys_riscv_hwprobe(
     }
 
     let res = pulse_core::task::with_current_process(|process| {
-        let mut selected_cpus = axhal::online_cpu_mask();
+        let mut selected_cpus = hal::online_cpu_mask();
         if cpus_addr != 0 && cpusetsize != 0 {
             let mut mask = [0u8; size_of::<usize>()];
             let len = mask.len().min(cpusetsize);
@@ -689,7 +689,7 @@ pub fn sys_riscv_hwprobe(
                 }
                 RISCV_HWPROBE_KEY_IMA_EXT_0 => {
                     pair.value = RISCV_HWPROBE_IMA_FD | RISCV_HWPROBE_IMA_C;
-                    if axcpu::riscv_vector::vlenb() != 0 {
+                    if cpu::riscv_vector::vlenb() != 0 {
                         pair.value |= RISCV_HWPROBE_IMA_V;
                     }
                 }
@@ -725,7 +725,7 @@ static REGISTERED_GLOBAL_EXPEDITED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_id: i32) -> isize {
-    axlog::debug!("sys_membarrier: cmd={}, flags={}", cmd, flags);
+    kernel_log::debug!("sys_membarrier: cmd={}, flags={}", cmd, flags);
     let cmd_enum = match parse_membarrier_command(cmd, flags) {
         Ok(command) => command,
         Err(e) => return -e.code() as isize,

@@ -10,16 +10,16 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axmm"
 documentation = "https://arceos-org.github.io/arceos/axmm/index.html"
 
 [features]
-ipi = ["dep:axipi"]
+ipi = ["dep:ipi"]
 mapping-observer = []
 
 [dependencies]
-axhal = { workspace = true, features = ["paging"] }
-axalloc = { workspace = true }
-axconfig = { workspace = true }
+hal = { workspace = true, features = ["paging"] }
+kernel_alloc = { workspace = true }
+config = { workspace = true }
 bitflags.workspace = true
 heapless.workspace = true
-axipi = { workspace = true, optional = true }
+ipi = { workspace = true, optional = true }
 
 log.workspace = true
 axerrno.workspace = true

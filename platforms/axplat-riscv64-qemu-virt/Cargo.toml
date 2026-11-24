@@ -52,7 +52,7 @@ resolver = "2"
 targets = ["riscv64gc-unknown-none-elf"]
 
 [features]
-fp-simd = ["axcpu/fp-simd"]
+fp-simd = ["cpu/fp-simd"]
 irq = ["axplat/irq"]
 rtc = ["riscv_goldfish"]
 smp = ["axplat/smp"]
@@ -64,8 +64,8 @@ path = "src/lib.rs"
 [dependencies.axconfig-macros]
 version = "0.2"
 
-[dependencies.axcpu]
-version = "0.2"
+[dependencies.cpu]
+path = "../../modules/cpu"
 
 [dependencies.axplat]
 version = "0.3.0"

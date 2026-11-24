@@ -44,8 +44,8 @@ endef
 clippy_args := -A clippy::new_without_default -A unsafe_op_in_unsafe_fn
 
 define cargo_clippy
-  $(call run_cmd,cargo clippy,--all-features --workspace --exclude axlog --exclude axfeat $(1) $(verbose) -- $(clippy_args))
-  $(call run_cmd,cargo clippy,-p axlog $(1) $(verbose) -- $(clippy_args))
+  $(call run_cmd,cargo clippy,--all-features --workspace --exclude kernel_log --exclude axfeat $(1) $(verbose) -- $(clippy_args))
+  $(call run_cmd,cargo clippy,-p kernel_log $(1) $(verbose) -- $(clippy_args))
 endef
 
 all_packages := \
@@ -53,12 +53,12 @@ all_packages := \
   axfeat
 
 define cargo_doc
-  $(call run_cmd,cargo doc,--no-deps --all-features --workspace --exclude "arceos-*" --exclude axfeat --exclude axlog $(verbose))
+  $(call run_cmd,cargo doc,--no-deps --all-features --workspace --exclude "arceos-*" --exclude axfeat --exclude kernel_log $(verbose))
   $(call run_cmd,cargo rustdoc,-p axfeat $(verbose))
-  $(call run_cmd,cargo rustdoc,-p axlog $(verbose))
+  $(call run_cmd,cargo rustdoc,-p kernel_log $(verbose))
   @# run twice to fix broken hyperlinks
   $(foreach p,$(all_packages), \
-    $(if $(filter axfeat axlog,$(p)),,$(call run_cmd,cargo rustdoc,--all-features -p $(p) $(verbose)))
+    $(if $(filter axfeat kernel_log,$(p)),,$(call run_cmd,cargo rustdoc,--all-features -p $(p) $(verbose)))
   )
 endef
 

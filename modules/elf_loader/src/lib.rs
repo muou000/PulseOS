@@ -13,12 +13,12 @@ use alloc::{
 };
 use core::mem::size_of;
 
-use axconfig::user::{
+use config::user::{
     USER_HEAP_BASE, USER_SPACE_BASE, USER_SPACE_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
 };
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
-use axhal::{mem::MemRegionFlags, paging::MappingFlags};
+use hal::{mem::MemRegionFlags, paging::MappingFlags};
 use axmm::{AddrSpace, FileMappingSource};
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser};
 use linux_raw_sys::elf_uapi::{EM_LOONGARCH, PT_GNU_STACK};
@@ -207,7 +207,7 @@ fn validate_machine(elf: &ElfFile<'_>, path: &str) -> AxResult {
     if ok {
         Ok(())
     } else {
-        axlog::warn!(
+        kernel_log::warn!(
             "ELF machine {:?} of {} does not match current arch",
             machine,
             path
@@ -323,14 +323,14 @@ fn vdso_segment_flags(flags: MemRegionFlags) -> MappingFlags {
 fn resolve_page_fault(
     aspace: &mut AddrSpace,
     page: VirtAddr,
-    flags: axhal::trap::PageFaultFlags,
+    flags: hal::trap::PageFaultFlags,
 ) -> AxResult<bool> {
     let initial = aspace.handle_page_fault(page, flags);
     axmm::drive_page_fault(initial, |work| match work {
         axmm::PageFaultWork::Retry => aspace.handle_page_fault(page, flags),
         axmm::PageFaultWork::Completion(wait) => {
             while wait.is_pending() {
-                axtask::yield_now();
+                task::yield_now();
             }
             if wait.result().is_err() {
                 axmm::PageFaultResult::Handled(false)
@@ -364,15 +364,15 @@ pub fn prefault_range(
     let pages = memory_addr::PageIter4K::new(start_vaddr.align_down_4k(), end_vaddr.align_up_4k())
         .ok_or(AxError::BadAddress)?;
     for (_page_idx, page) in pages.enumerate() {
-        let mut access_flags = axhal::trap::PageFaultFlags::USER;
+        let mut access_flags = hal::trap::PageFaultFlags::USER;
         if flags.contains(MappingFlags::READ) {
-            access_flags |= axhal::trap::PageFaultFlags::READ;
+            access_flags |= hal::trap::PageFaultFlags::READ;
         }
         if flags.contains(MappingFlags::WRITE) {
-            access_flags |= axhal::trap::PageFaultFlags::WRITE;
+            access_flags |= hal::trap::PageFaultFlags::WRITE;
         }
         if flags.contains(MappingFlags::EXECUTE) {
-            access_flags |= axhal::trap::PageFaultFlags::EXECUTE;
+            access_flags |= hal::trap::PageFaultFlags::EXECUTE;
         }
 
         if !resolve_page_fault(aspace, page, access_flags)? {
@@ -551,7 +551,7 @@ fn write_user_region(aspace: &mut AddrSpace, start: VirtAddr, bytes: &[u8]) -> A
     let pages = memory_addr::PageIter4K::new(start.align_down_4k(), end.align_up_4k())
         .ok_or(AxError::BadAddress)?;
     for page in pages {
-        let pf_flags = axhal::trap::PageFaultFlags::WRITE | axhal::trap::PageFaultFlags::USER;
+        let pf_flags = hal::trap::PageFaultFlags::WRITE | hal::trap::PageFaultFlags::USER;
         if !resolve_page_fault(aspace, page, pf_flags)? {
             return Err(AxError::BadAddress);
         }
@@ -617,12 +617,12 @@ fn build_auxv(
     let mut auxv: Vec<AuxEntry> = parser.aux_vector(PAGE_SIZE_4K, interp_base).collect();
     #[cfg(target_arch = "loongarch64")]
     {
-        let cpucfg1 = axcpu::asm::read_cpucfg(1);
+        let cpucfg1 = cpu::asm::read_cpucfg(1);
         auxv.push(AuxEntry::new(AuxType::HWCAP, loongarch_hwcap(cpucfg1)));
     }
     #[cfg(target_arch = "riscv64")]
     {
-        let vector = axcpu::riscv_vector::vlenb() != 0;
+        let vector = cpu::riscv_vector::vlenb() != 0;
         auxv.push(AuxEntry::new(AuxType::HWCAP, riscv_hwcap(vector)));
     }
     append_process_auxv(&mut auxv, credentials);
@@ -843,7 +843,7 @@ fn validate_cached_image(path: &str, image: &CachedElfImage) -> bool {
     match compute_needed_prefix_len(image.bytes()) {
         Ok(needed) if needed <= image.bytes().len() => true,
         _ => {
-            axlog::warn!("invalidating ELF cache entry: {}", path);
+            kernel_log::warn!("invalidating ELF cache entry: {}", path);
             false
         }
     }
@@ -906,12 +906,12 @@ fn read_elf_file(path: &str) -> AxResult<Arc<CachedElfImage>> {
         let guard = axfs::FS_CONTEXT.lock();
         guard.clone()
     };
-    let location = axtask::future::block_on(fs_ctx.resolve(path)).map_err(|_| AxError::NotFound)?;
+    let location = task::future::block_on(fs_ctx.resolve(path)).map_err(|_| AxError::NotFound)?;
     read_elf_file_at(path, location)
 }
 
 pub fn check_elf_header(path: &str) -> AxResult<()> {
-    axlog::debug!("check_elf_header: path={:?}", path);
+    kernel_log::debug!("check_elf_header: path={:?}", path);
     let main_image = read_elf_file(path)?;
     let main_data = main_image.bytes();
     if main_data.is_empty() {
@@ -1010,7 +1010,7 @@ pub fn load_user_app(
     let mut dispatch_entry = main_entry;
 
     if let Some(interp_path) = interp_path {
-        let interp_location = axtask::future::block_on(fs.resolve(&interp_path))?;
+        let interp_location = task::future::block_on(fs.resolve(&interp_path))?;
         let interp_exec_access = axfs::acquire_exec_access(&interp_location)?;
         let interp_image = read_elf_file_at(&interp_path, interp_location)?;
         exec_access.push(interp_exec_access);
@@ -1046,7 +1046,7 @@ pub fn load_user_app(
         let mapping_end = mapping_start
             .checked_add(interp_requirements.span)
             .ok_or(AxError::OutOfRange)?;
-        axlog::debug!(
+        kernel_log::debug!(
             "Loaded interpreter {} in [{:#x}, {:#x}), bias={:#x}, align={:#x}, entry={:#x}",
             interp_path,
             mapping_start,

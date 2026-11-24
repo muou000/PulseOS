@@ -1,10 +1,10 @@
 use alloc::boxed::Box;
-use axhal::paging::MappingFlags;
+use hal::paging::MappingFlags;
 use memory_addr::{VirtAddr, PAGE_SIZE_4K, MemoryAddr};
-use axhal::mem::{flush_dcache_range, phys_to_virt};
+use hal::mem::{flush_dcache_range, phys_to_virt};
 use super::Backend;
 use super::alloc::{alloc_frame, dealloc_frame};
-use axalloc::frame_table;
+use kernel_alloc::frame_table;
 
 #[derive(Clone)]
 pub struct CowMapping {

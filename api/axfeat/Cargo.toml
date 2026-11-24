@@ -13,45 +13,45 @@ documentation = "https://arceos-org.github.io/arceos/axfeat/index.html"
 default = []
 
 # Multicore
-smp = ["axhal/smp", "axruntime/smp", "axtask?/smp", "axalloc?/smp", "kspin/smp"]
+smp = ["hal/smp", "runtime/smp", "task?/smp", "kernel_alloc?/smp", "kspin/smp"]
 
 # Floating point/SIMD
-fp-simd = ["axhal/fp-simd"]
+fp-simd = ["hal/fp-simd"]
 
 # Interrupts
-irq = ["axhal/irq", "axruntime/irq", "axtask?/irq", "axdriver?/irq"]
-ipi = ["irq", "dep:axipi", "axhal/ipi", "axruntime/ipi", "axtask?/ipi"]
+irq = ["hal/irq", "runtime/irq", "task?/irq", "axdriver?/irq"]
+ipi = ["irq", "dep:ipi", "hal/ipi", "runtime/ipi", "task?/ipi"]
 
 # Custom or default platforms
-myplat = ["axhal/myplat"]
-defplat = ["axhal/defplat"]
+myplat = ["hal/myplat"]
+defplat = ["hal/defplat"]
 
 # Memory
-alloc = ["axalloc", "axruntime/alloc"]
-alloc-tlsf = ["axalloc/tlsf"]
-alloc-slab = ["axalloc/slab"]
-alloc-buddy = ["axalloc/buddy"]
-page-alloc-64g = ["axalloc/page-alloc-64g"]                  # up to 64G memory capacity
-page-alloc-4g = ["axalloc/page-alloc-4g"]                    # up to 4G memory capacity
-paging = ["alloc", "axhal/paging", "axruntime/paging"]
-tls = ["alloc", "axhal/tls", "axruntime/tls", "axtask?/tls"]
-dma = ["alloc", "paging", "axhal/dma"]
+alloc = ["kernel_alloc", "runtime/alloc"]
+alloc-tlsf = ["kernel_alloc/tlsf"]
+alloc-slab = ["kernel_alloc/slab"]
+alloc-buddy = ["kernel_alloc/buddy"]
+page-alloc-64g = ["kernel_alloc/page-alloc-64g"]                  # up to 64G memory capacity
+page-alloc-4g = ["kernel_alloc/page-alloc-4g"]                    # up to 4G memory capacity
+paging = ["alloc", "hal/paging", "runtime/paging"]
+tls = ["alloc", "hal/tls", "runtime/tls", "task?/tls"]
+dma = ["alloc", "paging", "hal/dma"]
 
 # Multi-threading and scheduler
 multitask = [
     "alloc",
-    "axtask/multitask",
-    "axsync/multitask",
-    "axruntime/multitask",
+    "task/multitask",
+    "sync/multitask",
+    "runtime/multitask",
     "axnet?/multitask",
     "axdriver?/multitask",
 ]
-sched-fifo = ["axtask/sched-fifo"]
-sched-rr = ["axtask/sched-rr", "irq"]
-sched-cfs = ["axtask/sched-cfs", "irq"]
-sched-eevdf = ["axtask/sched-eevdf", "irq"]
-sched-load-balance = ["axtask/sched-load-balance"]
-bpf-trace = ["axtask?/bpf-trace"]
+sched-fifo = ["task/sched-fifo"]
+sched-rr = ["task/sched-rr", "irq"]
+sched-cfs = ["task/sched-cfs", "irq"]
+sched-eevdf = ["task/sched-eevdf", "irq"]
+sched-load-balance = ["task/sched-load-balance"]
+bpf-trace = ["task?/bpf-trace"]
 
 # File system
 fs = [
@@ -60,11 +60,11 @@ fs = [
     "axdriver/virtio-blk",
     "axdriver/dyn",
     "dep:axfs",
-    "axruntime/fs",
+    "runtime/fs",
 ]
 
 # Networking
-net = ["alloc", "paging", "axdriver/net", "dep:axnet", "axruntime/net"]
+net = ["alloc", "paging", "axdriver/net", "dep:axnet", "runtime/net"]
 
 # Display
 display = [
@@ -72,12 +72,12 @@ display = [
     "paging",
     "axdriver/virtio-gpu",
     "dep:axdisplay",
-    "axruntime/display",
+    "runtime/display",
     "axdisplay/smoke-test",
 ]
 
 # Real Time Clock (RTC) Driver.
-rtc = ["axhal/rtc", "axruntime/rtc"]
+rtc = ["hal/rtc", "runtime/rtc"]
 
 # Device drivers
 bus-mmio = ["axdriver?/bus-mmio"]
@@ -90,23 +90,23 @@ driver-starfive-jh7110-sdmmc = ["axdriver?/starfive-jh7110-sdmmc"]
 driver-ls2k1000-ahci = ["axdriver?/ls2k1000-ahci"]
 
 # Logging
-log-level-off = ["axlog/log-level-off"]
-log-level-error = ["axlog/log-level-error"]
-log-level-warn = ["axlog/log-level-warn"]
-log-level-info = ["axlog/log-level-info"]
-log-level-debug = ["axlog/log-level-debug"]
-log-level-trace = ["axlog/log-level-trace"]
+log-level-off = ["kernel_log/log-level-off"]
+log-level-error = ["kernel_log/log-level-error"]
+log-level-warn = ["kernel_log/log-level-warn"]
+log-level-info = ["kernel_log/log-level-info"]
+log-level-debug = ["kernel_log/log-level-debug"]
+log-level-trace = ["kernel_log/log-level-trace"]
 
 [dependencies]
-axruntime = { workspace = true }
-axhal = { workspace = true }
-axlog = { workspace = true }
-axalloc = { workspace = true, optional = true }
+runtime = { workspace = true }
+hal = { workspace = true }
+kernel_log = { workspace = true }
+kernel_alloc = { workspace = true, optional = true }
 axdriver = { workspace = true, optional = true }
 axfs = { workspace = true, optional = true }
 axnet = { workspace = true, optional = true }
 axdisplay = { workspace = true, optional = true }
-axsync = { workspace = true, optional = true }
-axtask = { workspace = true, optional = true }
-axipi = { workspace = true, optional = true }
+sync = { workspace = true, optional = true }
+task = { workspace = true, optional = true }
+ipi = { workspace = true, optional = true }
 kspin = { version = "0.1", optional = true }

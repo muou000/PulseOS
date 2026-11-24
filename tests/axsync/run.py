@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the boot-time axsync checks with the repository's prescribed QEMU setup."""
+"""Run the boot-time sync checks with the repository's prescribed QEMU setup."""
 
 import argparse
 import hashlib

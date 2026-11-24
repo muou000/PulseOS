@@ -4,9 +4,9 @@ pub(super) use crate::validation::io::iov_len_to_usize;
 pub(super) const MAX_IO_CHUNK: usize = 64 * 1024;
 pub(super) fn fault_in_user_io_range(user_addr: usize, len: usize, write: bool) -> bool {
     let access = if write {
-        axhal::paging::MappingFlags::WRITE
+        hal::paging::MappingFlags::WRITE
     } else {
-        axhal::paging::MappingFlags::READ
+        hal::paging::MappingFlags::READ
     };
     with_process(|process| process.try_fault_in_user_range(user_addr, len, access))
         .is_ok_and(|result| result.is_ok())

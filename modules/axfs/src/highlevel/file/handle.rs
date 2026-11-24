@@ -556,7 +556,7 @@ impl FileBackend {
                     return Ok(());
                 }
                 let cached =
-                    axtask::future::block_on(CachedFile::get_or_create_async(loc.clone()))?;
+                    task::future::block_on(CachedFile::get_or_create_async(loc.clone()))?;
                 cached.prefetch_range(offset, len)
             }
         }
@@ -1085,7 +1085,7 @@ impl File {
     }
 
     pub fn block_size(&self) -> u64 {
-        axtask::future::block_on(self.block_size_async())
+        task::future::block_on(self.block_size_async())
     }
 
     pub async fn block_size_async(&self) -> u64 {
@@ -1299,7 +1299,7 @@ impl File {
         self.position.as_ref().map(|pos| {
             let pos = pos
                 .try_lock()
-                .unwrap_or_else(|| axtask::future::block_on(pos.lock()));
+                .unwrap_or_else(|| task::future::block_on(pos.lock()));
             *pos
         })
     }
@@ -1311,7 +1311,7 @@ impl File {
             return Ok(0);
         }
 
-        let now = axhal::time::wall_time();
+        let now = hal::time::wall_time();
         let mut update = axfs_ng_vfs::MetadataUpdate::default();
         if flags & ACCESS_FLAG_ATIME != 0 {
             update.atime = Some(now);
@@ -1334,7 +1334,7 @@ impl Drop for File {
         if has_pending_timestamp_updates(self.access_flags.load(Ordering::Acquire)) {
             // Closing a file publishes every deferred timestamp, including atime
             // set by a successful read.
-            let _ = axtask::future::block_on(self.take_timestamp_updates());
+            let _ = task::future::block_on(self.take_timestamp_updates());
         }
     }
 }
@@ -1356,17 +1356,17 @@ mod timestamp_tests {
 
 impl Read for &File {
     fn read(&mut self, buf: &mut [u8]) -> axio::Result<usize> {
-        axtask::future::block_on((*self).read(buf))
+        task::future::block_on((*self).read(buf))
     }
 }
 
 impl Write for &File {
     fn write(&mut self, buf: &[u8]) -> axio::Result<usize> {
-        axtask::future::block_on((*self).write(buf))
+        task::future::block_on((*self).write(buf))
     }
 
     fn flush(&mut self) -> axio::Result {
-        axtask::future::block_on((*self).flush())
+        task::future::block_on((*self).flush())
     }
 }
 
@@ -1377,7 +1377,7 @@ impl Seek for &File {
         if let Some(guard) = self.position.as_ref() {
             let mut guard = guard
                 .try_lock()
-                .unwrap_or_else(|| axtask::future::block_on(guard.lock()));
+                .unwrap_or_else(|| task::future::block_on(guard.lock()));
             let new_pos = match pos {
                 SeekFrom::Start(pos) => pos,
                 SeekFrom::End(off) => {

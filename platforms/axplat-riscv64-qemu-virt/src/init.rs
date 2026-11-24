@@ -9,20 +9,20 @@ impl InitIf for InitIfImpl {
     /// early console, clocking).
     fn init_early(_cpu_id: usize, mbi: usize) {
         crate::topology::init_platform_from_dtb(mbi);
-        axcpu::init::init_trap();
+        cpu::init::init_trap();
         crate::time::init_early();
     }
 
     /// Initializes the platform at the early stage for secondary cores.
     #[cfg(feature = "smp")]
     fn init_early_secondary(_cpu_id: usize) {
-        axcpu::init::init_trap();
-        let bytes = axcpu::riscv_vector::vlenb();
+        cpu::init::init_trap();
+        let bytes = cpu::riscv_vector::vlenb();
         if bytes != 0 {
             // SAFETY: primary boot publishes a width only after this hart's DT
             // node advertised V. This hart has not entered the scheduler yet.
             assert_eq!(
-                unsafe { axcpu::riscv_vector::hardware_vlenb() },
+                unsafe { cpu::riscv_vector::hardware_vlenb() },
                 bytes,
                 "incompatible VLEN on secondary hart"
             );

@@ -25,7 +25,7 @@ use core::{
 
 use async_trait::async_trait;
 use axdriver::prelude::{AsyncBlockDriverOps, BlockDriverOps, DevError};
-use axsync::Mutex;
+use sync::Mutex;
 pub use fs::*;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 pub use inode::*;
@@ -469,7 +469,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         let flush_result = {
             let _device_flush = self.device_flush_lock.lock().await;
             let dev = self.dev.lock().clone();
-            match axtask::future::timeout(Some(DEVICE_IO_TIMEOUT), dev.flush_async()).await {
+            match task::future::timeout(Some(DEVICE_IO_TIMEOUT), dev.flush_async()).await {
                 Ok(result) => result,
                 Err(_) => {
                     log::error!("ext4 device flush timed out after {:?}", DEVICE_IO_TIMEOUT);
@@ -548,7 +548,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
     }
 
     fn enter_write_scope(&self, scope_id: u64) {
-        let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
+        let Some(task_id) = task::current_may_uninit().map(|task| task.id().as_u64()) else {
             return;
         };
         debug_assert!(self.write_scopes.scope(scope_id).is_some());
@@ -580,7 +580,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
     }
 
     fn leave_write_scope(&self, scope_id: u64) {
-        let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
+        let Some(task_id) = task::current_may_uninit().map(|task| task.id().as_u64()) else {
             return;
         };
         let mut active_by_task =
@@ -707,7 +707,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     }
 
     fn current_write_owners(&self) -> Vec<u64> {
-        let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
+        let Some(task_id) = task::current_may_uninit().map(|task| task.id().as_u64()) else {
             return Vec::new();
         };
         let active_scope_ids = self.write_scopes.active_scopes(task_id);
@@ -735,7 +735,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             state.owners.extend(owners.iter().copied());
         }
 
-        let Some(task_id) = axtask::current_may_uninit().map(|task| task.id().as_u64()) else {
+        let Some(task_id) = task::current_may_uninit().map(|task| task.id().as_u64()) else {
             return;
         };
         let active_scope_ids = self.write_scopes.active_scopes(task_id);
@@ -905,7 +905,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     {
         let (first_block, ..) = self.byte_range(block_offset, data.len())?;
         let dev = self.dev.lock().clone();
-        match axtask::future::timeout(
+        match task::future::timeout(
             Some(DEVICE_IO_TIMEOUT),
             dev.write_block_async(first_block, data),
         )
@@ -990,7 +990,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         D: AsyncBlockDriverOps,
     {
         for attempt in 1..=DEVICE_READ_MAX_ATTEMPTS {
-            let read_result = match axtask::future::timeout(
+            let read_result = match task::future::timeout(
                 Some(DEVICE_IO_TIMEOUT),
                 dev.read_block_async(first_block, dest),
             )

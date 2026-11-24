@@ -994,7 +994,7 @@ impl NodeOps for Inode {
                         inode.set_mtime(mtime);
                     }
                     if cfg!(feature = "times") {
-                        inode.set_ctime(axhal::time::wall_time());
+                        inode.set_ctime(hal::time::wall_time());
                     }
                     inode.write(fs).await.map_err(into_vfs_err)
                 };
@@ -1297,7 +1297,7 @@ impl DirNodeOps for Inode {
             mode,
             uid: 0,
             gid: 0,
-            time: axhal::time::wall_time(),
+            time: hal::time::wall_time(),
             flags: ext4plus::inode::InodeFlags::empty(),
         };
 

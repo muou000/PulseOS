@@ -15,7 +15,7 @@ pub(super) struct WallClock;
 
 impl Clock for WallClock {
     fn now(&self) -> DateTime {
-        to_fat_time(axhal::time::wall_time()).unwrap_or(NoClock::TIME)
+        to_fat_time(hal::time::wall_time()).unwrap_or(NoClock::TIME)
     }
 }
 

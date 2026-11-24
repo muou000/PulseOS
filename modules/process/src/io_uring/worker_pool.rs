@@ -11,7 +11,7 @@ use core::{
 };
 
 use axfs::FilePositionTicket;
-use axtask::{AxCpuMask, WaitQueue, spawn_raw};
+use task::{AxCpuMask, WaitQueue, spawn_raw};
 use kspin::SpinNoIrq;
 
 use super::IoUringState;
@@ -248,7 +248,7 @@ impl BoundedWorkerPool {
 
     #[inline]
     fn limits() -> (usize, usize) {
-        let max_workers = axhal::cpu_num().saturating_mul(2).clamp(4, 16);
+        let max_workers = hal::cpu_num().saturating_mul(2).clamp(4, 16);
         let per_ring_limit = (max_workers / 2).max(2);
         (max_workers, per_ring_limit)
     }
@@ -320,7 +320,7 @@ impl BoundedWorkerPool {
             spawn_raw(
                 || self.worker_loop(),
                 format!("io-uring-wk-{id}"),
-                axconfig::TASK_STACK_SIZE,
+                config::TASK_STACK_SIZE,
             );
         }
     }
@@ -395,7 +395,7 @@ impl BoundedWorkerPool {
     }
 
     fn worker_loop(&'static self) {
-        let default_mask = axtask::current().cpumask();
+        let default_mask = task::current().cpumask();
         loop {
             let (_, per_ring_limit) = Self::limits();
             let next = {
@@ -408,19 +408,19 @@ impl BoundedWorkerPool {
                 if let Some(cpu) = job.service_cpu {
                     // The ring validated this online CPU at setup. Migration
                     // completes before the closure runs; wakes use the same mask.
-                    assert!(axtask::set_current_affinity(AxCpuMask::one_shot(cpu)));
+                    assert!(task::set_current_affinity(AxCpuMask::one_shot(cpu)));
                 }
                 #[cfg(feature = "guest-checks")]
                 {
                     let expected = job.service_cpu.map_or(default_mask, AxCpuMask::one_shot);
-                    assert_eq!(axtask::current().cpumask(), expected);
+                    assert_eq!(task::current().cpumask(), expected);
                     trace_job(ring_id, job.req_id, "start", serial_key);
                 }
                 (job.task)(job.position_ticket);
                 #[cfg(feature = "guest-checks")]
                 trace_job(ring_id, job.req_id, "finish", serial_key);
                 if job.service_cpu.is_some() {
-                    assert!(axtask::set_current_affinity(default_mask));
+                    assert!(task::set_current_affinity(default_mask));
                 }
                 self.finish_ring_job(ring_id, serial_key);
                 continue;
@@ -439,9 +439,9 @@ impl BoundedWorkerPool {
                     {
                         let active = inner.active_workers;
                         drop(inner);
-                        axlog::info!(
+                        kernel_log::info!(
                             "io_uring worker exit task={} active={}",
-                            axtask::current().id().as_u64(),
+                            task::current().id().as_u64(),
                             active
                         );
                     }
@@ -505,18 +505,18 @@ pub(super) fn check_overlapping_worker_finishes() {
     }
     assert_eq!(claimed, BTreeSet::from(waiting));
     assert_eq!(pool.available_workers, 0);
-    axlog::ax_println!("WORKER_OVERLAPPING_FINISH_PASS");
+    kernel_log::ax_println!("WORKER_OVERLAPPING_FINISH_PASS");
 }
 
 #[cfg(feature = "guest-checks")]
 fn trace_job(ring_id: u64, req_id: u64, phase: &str, serial_key: Option<u64>) {
-    axlog::info!(
+    kernel_log::info!(
         "io_uring worker ring={} req={} phase={} cpu={} task={} key={:?}",
         ring_id,
         req_id,
         phase,
-        axhal::percpu::this_cpu_id(),
-        axtask::current().id().as_u64(),
+        hal::percpu::this_cpu_id(),
+        task::current().id().as_u64(),
         serial_key
     );
 }

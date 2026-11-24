@@ -1139,7 +1139,7 @@ pub const fn should_stop_submit_batch(submit_all: bool, had_prep_error: bool, in
     !submit_all && had_prep_error && !in_link
 }
 
-/// Host-testable executor slot state machine mirror matching `axtask::future::executor::TaskSlot`.
+/// Host-testable executor slot state machine mirror matching `task::future::executor::TaskSlot`.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotState {

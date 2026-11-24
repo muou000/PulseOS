@@ -58,7 +58,7 @@ mod async_inner {
 mod sync_inner {
     /// A mutual exclusion primitive useful for protecting shared data.
     pub struct Mutex<T> {
-        inner: axsync::Mutex<T>,
+        inner: ::sync::Mutex<T>,
     }
 
     /// Alias for MutexGuard under sync.
@@ -68,7 +68,7 @@ mod sync_inner {
         /// Create a new mutex in an unlocked state ready for use.
         pub fn new(t: T) -> Self {
             Self {
-                inner: axsync::Mutex::new(t),
+                inner: ::sync::Mutex::new(t),
             }
         }
 
@@ -87,7 +87,7 @@ mod sync_inner {
 
     /// A guard that provides mutable data access for [`Mutex`].
     pub struct MutexGuard<'a, T> {
-        inner: axsync::MutexGuard<'a, T>,
+        inner: ::sync::MutexGuard<'a, T>,
     }
 
     impl<'a, T> core::ops::Deref for MutexGuard<'a, T> {
@@ -107,14 +107,14 @@ mod sync_inner {
 
     /// A reader-writer lock.
     pub struct RwLock<T> {
-        inner: axsync::RwLock<T>,
+        inner: ::sync::RwLock<T>,
     }
 
     impl<T> RwLock<T> {
         /// Create a new RwLock in an unlocked state ready for use.
         pub fn new(t: T) -> Self {
             Self {
-                inner: axsync::RwLock::new(t),
+                inner: ::sync::RwLock::new(t),
             }
         }
 
@@ -135,7 +135,7 @@ mod sync_inner {
 
     /// A guard that provides read access for [`RwLock`].
     pub struct RwLockReadGuard<'a, T> {
-        inner: axsync::RwLockReadGuard<'a, T>,
+        inner: ::sync::RwLockReadGuard<'a, T>,
     }
 
     impl<'a, T> core::ops::Deref for RwLockReadGuard<'a, T> {
@@ -148,7 +148,7 @@ mod sync_inner {
 
     /// A guard that provides write access for [`RwLock`].
     pub struct RwLockWriteGuard<'a, T> {
-        inner: axsync::RwLockWriteGuard<'a, T>,
+        inner: ::sync::RwLockWriteGuard<'a, T>,
     }
 
     impl<'a, T> core::ops::Deref for RwLockWriteGuard<'a, T> {

@@ -36,7 +36,7 @@ struct RecordLock {
 
 struct RecordLockState {
     entries: Vec<RecordLock>,
-    wait_queue: Arc<axtask::WaitQueue>,
+    wait_queue: Arc<task::WaitQueue>,
     waiters: usize,
 }
 
@@ -44,7 +44,7 @@ impl Default for RecordLockState {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            wait_queue: Arc::new(axtask::WaitQueue::new()),
+            wait_queue: Arc::new(task::WaitQueue::new()),
             waiters: 0,
         }
     }

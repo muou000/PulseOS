@@ -115,11 +115,11 @@ fn resolve_exec_target_and_args(
     // interpreter. Linux exposes the former through AT_EXECFN.
     let execfn_path = path.to_string();
     let normalize_path = |candidate: &str| -> AxResult<(Location, String)> {
-        let loc = axtask::future::block_on(fs.resolve(candidate))?;
+        let loc = task::future::block_on(fs.resolve(candidate))?;
         let path = loc.absolute_path()?;
 
         // Check if the file is a regular file
-        let meta = axtask::future::block_on(loc.metadata())?;
+        let meta = task::future::block_on(loc.metadata())?;
         if meta.node_type != NodeType::RegularFile {
             return Err(AxError::PermissionDenied);
         }
@@ -162,10 +162,10 @@ fn resolve_exec_target_and_args(
 
     for _ in 0..SHEBANG_MAX_DEPTH {
         let exec_access = axfs::acquire_exec_access(&current_location)?;
-        axlog::debug!("resolve_exec_path_and_args: probing {}", current_path);
+        kernel_log::debug!("resolve_exec_path_and_args: probing {}", current_path);
         let file_data = read_exec_prefix(&current_location).map_err(|_| AxError::NotFound)?;
         let Some((interp, interp_arg)) = parse_shebang_line(&file_data)? else {
-            axlog::debug!("resolve_exec_path_and_args: final {}", current_path);
+            kernel_log::debug!("resolve_exec_path_and_args: final {}", current_path);
             return Ok(ResolvedExec {
                 location: current_location,
                 exec_access,
@@ -252,9 +252,9 @@ impl Process {
         let new_pt_root = new_aspace_handle.read().page_table_root();
         let new_asid = new_aspace_handle.read().asid();
         #[cfg(feature = "bpf-trace")]
-        let mapping_transition = crate::bpf::mappings::MutationGuard::task(axtask::current().id().as_u64());
+        let mapping_transition = crate::bpf::mappings::MutationGuard::task(task::current().id().as_u64());
         let old_aspace = self.replace_aspace_handle(new_aspace_handle);
-        axtask::set_current_page_table_root(new_pt_root, new_asid);
+        task::set_current_page_table_root(new_pt_root, new_asid);
         self.reset_brk_state(
             load_info.start_brk,
             load_info.start_brk,
@@ -272,7 +272,7 @@ impl Process {
         *self.args.write() = argv;
         self.set_dumpable(1);
         self.mark_execed();
-        axtask::current().set_name(&self.name());
+        task::current().set_name(&self.name());
         #[cfg(feature = "bpf-trace")]
         super::emit_current_bpf_task_metadata();
         #[cfg(feature = "bpf-trace")]
@@ -287,12 +287,12 @@ impl Process {
     pub fn enter_user_mode(&self) -> ! {
         let entry = self.entry.load(Ordering::Acquire);
         let stack_top = self.stack_top.load(Ordering::Acquire);
-        let uctx = axhal::context::UspaceContext::new(entry, va!(stack_top), 0);
+        let uctx = hal::context::UspaceContext::new(entry, va!(stack_top), 0);
         self.mark_user_resume();
         if let Ok(thread) = super::current_thread() {
             thread.mark_user_resume();
         }
-        let kstack_top = axtask::current()
+        let kstack_top = task::current()
             .kernel_stack_top()
             .expect("current task has no kernel stack")
             .as_usize();
@@ -310,8 +310,8 @@ impl Process {
         drop(thread);
         drop(self);
 
-        let uctx = axhal::context::UspaceContext::new(entry, va!(stack_top), 0);
-        let kstack_top = axtask::current()
+        let uctx = hal::context::UspaceContext::new(entry, va!(stack_top), 0);
+        let kstack_top = task::current()
             .kernel_stack_top()
             .expect("current task has no kernel stack")
             .as_usize();
@@ -338,7 +338,7 @@ impl Process {
             if let Some(guard) = self.try_lock_exec() {
                 break guard;
             }
-            axtask::yield_now();
+            task::yield_now();
         };
 
         // Prepare the entire replacement while the old image and its threads are live.
@@ -376,7 +376,7 @@ impl Process {
         crate::io_uring::cancel_requests_for_process(self.pid());
         let old_aspace = self.replace_aspace_handle(new_aspace_handle);
 
-        axtask::set_current_page_table_root(new_pt_root, new_asid);
+        task::set_current_page_table_root(new_pt_root, new_asid);
         self.activate();
         unsafe {
             #[cfg(target_arch = "riscv64")]
@@ -416,7 +416,7 @@ impl Process {
         self.set_exec_path(path.clone());
         *self.args.write() = argv;
         self.mark_execed();
-        axtask::current().set_name(&self.name());
+        task::current().set_name(&self.name());
         #[cfg(feature = "bpf-trace")]
         super::emit_current_bpf_task_metadata();
         #[cfg(feature = "bpf-trace")]

@@ -13,7 +13,7 @@ build = "build.rs"
 
 [features]
 default = []
-fp-simd = ["axcpu/fp-simd"]
+fp-simd = ["cpu/fp-simd"]
 irq = ["axplat/irq"]
 smp = ["axplat/smp", "kspin/smp"]
 
@@ -23,7 +23,7 @@ path = "src/lib.rs"
 
 [dependencies]
 axconfig-macros = "0.2"
-axcpu = "0.2"
+cpu = { path = "../../modules/cpu" }
 axplat = "0.3.0"
 fdt-raw = "0.3"
 kspin = "0.1"

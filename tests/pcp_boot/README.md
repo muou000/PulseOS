@@ -18,12 +18,12 @@ published `init OK` before the PCP check starts, and the check must report eight
 initialized CPU caches. Running first in application `main()` is insufficient:
 that is already after secondary CPUs can enter their scheduler/GC loops.
 
-Pulse opts into axruntime's `pcp-boot-checks` feature. After constructors return,
+Pulse opts into runtime's `pcp-boot-checks` feature. After constructors return,
 the primary disables local IRQs/preemption, waits for the other initialized CPUs,
 and runs the unchanged allocator assertions before publishing its own INITED
 count. Secondary CPUs assert their IRQ-off state before publishing readiness and
 remain in the existing initialization spin. The primary guard is dropped only
-after release. Other axruntime users do not enable this feature by default.
+after release. Other runtime users do not enable this feature by default.
 
 The runner waits briefly after a panic to retain complete assertion operands;
 classifying an initial partial `panicked at` chunk is not sufficient. Kernel
