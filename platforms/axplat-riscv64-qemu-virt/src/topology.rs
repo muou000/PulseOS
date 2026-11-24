@@ -44,12 +44,10 @@ pub(super) fn init_platform_from_dtb(dtb_paddr: usize) {
     crate::mem::init_from_fdt(&fdt, dtb_paddr);
     if all_harts_have_vector(&fdt) {
         // SAFETY: the QEMU CPU model describes every schedulable hart as V-capable.
-        // This is primary boot, before any user or secondary task can run.
+        // Firmware enters primary boot in S-mode with interrupts masked, before
+        // secondary startup and user task creation.
         // Each secondary verifies its hardware width before joining the scheduler.
-        unsafe {
-            let bytes = axcpu::riscv_vector::hardware_vlenb();
-            axcpu::riscv_vector::initialize(bytes);
-        }
+        unsafe { axcpu::riscv_vector::initialize() };
     }
     if !parse_plic_topology(&fdt) {
         warn!("incomplete PLIC topology in DTB; using legacy QEMU virt context mapping");

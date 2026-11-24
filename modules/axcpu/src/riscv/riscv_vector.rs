@@ -37,14 +37,18 @@ pub unsafe fn hardware_vlenb() -> usize {
     width
 }
 
-/// Enables user V with the width established by the platform.
+/// Enables user V with the register width of the boot hart.
 ///
 /// # Safety
 ///
 /// The platform must guarantee that every hart admitted to scheduling user
 /// tasks implements V 1.0 with the same register width and compatible vector
-/// configuration. Publish once on the boot hart before creating user tasks.
-pub unsafe fn initialize(width: usize) {
+/// configuration. Call once in S-mode on the boot hart with interrupts masked,
+/// before task creation or secondary startup.
+pub unsafe fn initialize() {
+    // SAFETY: primary platform initialization established V 1.0, owns this hart
+    // before tasks can run and has not enabled interrupts.
+    let width = unsafe { hardware_vlenb() };
     // V mandates a power-of-two VLEN from 128 to 65536 bits.
     assert!(width.is_power_of_two() && (16..=8192).contains(&width));
     VLENB
@@ -103,6 +107,8 @@ mod task_state {
     /// An owned snapshot of 32 full-width registers and their vector controls.
     #[derive(Debug)]
     pub struct VectorState {
+        // Safety invariant: owns exactly 32 * vlenb() bytes of u64-aligned storage.
+        // capture constructs it at the published width; no operation resizes it.
         registers: Vec<u64>,
         control: Control,
     }

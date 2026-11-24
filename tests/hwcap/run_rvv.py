@@ -12,7 +12,8 @@ import run as hwcap
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["on", "off"])
-    parser.add_argument("--kernel", type=Path, default=hwcap.REPO / "kernel-rv")
+    kernel = hwcap.REPO / f"{hwcap.REPO.name}_riscv64-qemu-virt.bin"
+    parser.add_argument("--kernel", type=Path, default=kernel)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--vlen", type=int, help="override QEMU's VLEN in bits")
     args = parser.parse_args()

@@ -29,6 +29,7 @@ sed -i "s/^rv_ubuntu_sha=.*/rv_ubuntu_sha=${base_sha}/; s/^rv_tests_sha=.*/rv_te
     scripts/rootfs-riscv64.sh
 old=rootfs/base/rootfs-tests-riscv64.tar.xz
 echo 'stale 20261116 cache' > "${old}"
+echo 'truncated 20261120 download' > rootfs/base/rootfs-tests-20261120-riscv64.tar.xz
 if scripts/build_img.sh riscv64 > build.log 2>&1; then
     echo 'QEMU accepted a cached test bundle with the wrong digest' >&2
     exit 1
