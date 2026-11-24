@@ -4,6 +4,8 @@ platform = "vf2" # str
 package = "axplat-riscv64-visionfive2" # str
 
 [plat]
+# JH7110 U74 harts have no vector extension.
+user-rvv = false # bool
 # U74 application harts are hardware harts 1 through 4. The runtime topology
 # parser explicitly excludes the S7 at hart 0 because U-Boot's control DTB can
 # mark that management hart as available.

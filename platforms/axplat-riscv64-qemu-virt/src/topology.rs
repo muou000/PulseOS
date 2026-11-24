@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use fdt_raw::{Fdt, Header, Node};
 
 use crate::{
-    config::plat::{MAX_CPU_NUM, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE},
+    config::plat::{MAX_CPU_NUM, PHYS_MEMORY_BASE, PHYS_MEMORY_SIZE, USER_RVV},
     cpu_topology::CpuTopology,
 };
 
@@ -42,7 +42,7 @@ pub(super) fn init_platform_from_dtb(dtb_paddr: usize) {
     };
 
     crate::mem::init_from_fdt(&fdt, dtb_paddr);
-    if all_harts_have_vector(&fdt) {
+    if USER_RVV && all_harts_have_vector(&fdt) {
         // SAFETY: the QEMU CPU model describes every schedulable hart as V-capable.
         // Firmware enters primary boot in S-mode with interrupts masked, before
         // secondary startup and user task creation.

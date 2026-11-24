@@ -159,9 +159,11 @@ echo 7 > /etc/pulse-sqpoll-cpus
 
 | 目标 | 制盘命令 | 产物 | 用户态 |
 | --- | --- | --- | --- |
-| RISC-V QEMU virt | `make img ARCH=riscv64` | `disk.img` | Ubuntu Base 26.10，使用 `-cpu max` 提供 RVV |
-| VisionFive 2 | `make img ARCH=riscv64 RISCV_PLATFORM=visionfive2` | `disk-vf2.img` | **VisionFive 2 使用（RV64GC，无 RVV）**，Ubuntu 24.04.5 LTS |
+| RISC-V QEMU virt | `make img ARCH=riscv64` | `disk.img` | Ubuntu Base 26.10，平台默认启用 RVV（`plat.user-rvv = true`） |
+| VisionFive 2 | `make img ARCH=riscv64 RISCV_PLATFORM=visionfive2` | `disk-vf2.img` | **VisionFive 2 使用（RV64GC，无 RVV）**，Ubuntu 24.04.5 LTS（`plat.user-rvv = false`） |
 | LoongArch64 QEMU virt | `make img ARCH=loongarch64` | `disk-la.img` | Loongnix-Server 8 |
+
+QEMU virt 的默认启动参数为 `-cpu max`。内核确认所有可调度 hart 均提供 V 后，才向用户态报告并启用 RVV。VisionFive 2 的 U74 核使用 RV64GC。
 
 RISC-V QEMU 测试镜像使用 Ubuntu 官方的 `ubuntu-base-26.10-base-riscv64.tar.gz`。lmbench、LTP、sysbench、UnixBench、fio 和 liburing 测试程序取自 PulseOS 发布的 `rootfs-tests-riscv64.tar.xz`。VisionFive 2 直接使用这份完整的测试包。两份归档均可缓存在 `rootfs/base/`，分别用 `./scripts/fetch-rootfs.sh --arch riscv64` 和 `RISCV_PLATFORM=visionfive2 ./scripts/fetch-rootfs.sh --arch riscv64` 下载并校验。[Ubuntu Base 26.10](https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release/) · [PulseOS 测试制品及校验和](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261120)
 
