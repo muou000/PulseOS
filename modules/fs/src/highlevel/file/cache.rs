@@ -876,7 +876,7 @@ impl ContiguousPageGroup {
     fn register_direct_read(
         self: &Arc<Self>,
         len: usize,
-    ) -> VfsResult<axdriver::prelude::OwnedReadBufferRegistration> {
+    ) -> VfsResult<driver::prelude::OwnedReadBufferRegistration> {
         if len == 0 || len > self.len()? {
             return Err(VfsError::InvalidInput);
         }
@@ -884,21 +884,21 @@ impl ContiguousPageGroup {
         // SAFETY: the group is one contiguous allocation and remains private
         // until the direct read completes. The cloned owner also survives a
         // cancelled read until the block driver's lease is released.
-        unsafe { axdriver::prelude::register_owned_read_buffer(ptr, len, self.clone()) }
+        unsafe { driver::prelude::register_owned_read_buffer(ptr, len, self.clone()) }
             .map_err(|_| VfsError::BadState)
     }
 
     fn register_direct_write(
         self: &Arc<Self>,
         len: usize,
-    ) -> VfsResult<axdriver::prelude::OwnedWriteBufferRegistration> {
+    ) -> VfsResult<driver::prelude::OwnedWriteBufferRegistration> {
         if len == 0 || len > self.len()? {
             return Err(VfsError::InvalidInput);
         }
         let ptr = NonNull::new(self.addr.as_mut_ptr()).ok_or(VfsError::BadState)?;
         // SAFETY: the group is physically contiguous, immutable after the
         // snapshot is built, and its cloned owner outlives a detached request.
-        unsafe { axdriver::prelude::register_owned_write_buffer(ptr, len, self.clone()) }
+        unsafe { driver::prelude::register_owned_write_buffer(ptr, len, self.clone()) }
             .map_err(|_| VfsError::BadState)
     }
 }
@@ -1020,7 +1020,7 @@ enum WritebackData {
     Direct {
         group: Arc<ContiguousPageGroup>,
         len: usize,
-        _registration: Option<axdriver::prelude::OwnedWriteBufferRegistration>,
+        _registration: Option<driver::prelude::OwnedWriteBufferRegistration>,
     },
     Bounce(Vec<u8>),
 }
@@ -1280,7 +1280,7 @@ impl PageCache {
     fn register_direct_read(
         &self,
         len: usize,
-    ) -> VfsResult<axdriver::prelude::OwnedReadBufferRegistration> {
+    ) -> VfsResult<driver::prelude::OwnedReadBufferRegistration> {
         if len == 0 || len > PAGE_SIZE {
             return Err(VfsError::InvalidInput);
         }
@@ -1288,7 +1288,7 @@ impl PageCache {
         // SAFETY: A page-cache frame is a dedicated, physically contiguous
         // page. The page is not published while it is being filled, and the
         // cloned frame owner keeps it allocated if the read future is dropped.
-        unsafe { axdriver::prelude::register_owned_read_buffer(ptr, len, self.frame.clone()) }
+        unsafe { driver::prelude::register_owned_read_buffer(ptr, len, self.frame.clone()) }
             .map_err(|_| VfsError::BadState)
     }
 
@@ -4102,7 +4102,7 @@ pub fn collect_zero_copy_sg_entries(pages: &[WritebackPage]) -> Option<Writeback
 /// and SG writeback structures.
 pub fn run_dma_and_writeback_guest_checks() -> Result<(), &'static str> {
     // 1. Sharded DMA buffer registry checks
-    axdriver::prelude::run_owned_dma_guest_checks()?;
+    driver::prelude::run_owned_dma_guest_checks()?;
 
     // 2. Writeback buffer pool & SG descriptor checks
     log::info!("[WB_POOL_GUEST] Starting writeback buffer pool & SG descriptor checks...");

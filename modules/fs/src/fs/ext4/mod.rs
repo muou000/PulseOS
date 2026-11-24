@@ -24,7 +24,7 @@ use core::{
 };
 
 use async_trait::async_trait;
-use axdriver::prelude::{AsyncBlockDriverOps, BlockDriverOps, DevError};
+use driver::prelude::{AsyncBlockDriverOps, BlockDriverOps, DevError};
 use sync::Mutex;
 pub use fs::*;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -236,7 +236,7 @@ impl IoRangeLocks {
         offset: usize,
         len: usize,
         block_size: usize,
-    ) -> axdriver::prelude::DevResult<IoReadRangeGuards<'_>> {
+    ) -> driver::prelude::DevResult<IoReadRangeGuards<'_>> {
         let indices = io_range_lock_indices(offset, len, block_size)?;
 
         if indices.len() == 1 {
@@ -267,7 +267,7 @@ impl IoRangeLocks {
         offset: usize,
         len: usize,
         block_size: usize,
-    ) -> axdriver::prelude::DevResult<IoWriteRangeGuards<'_>> {
+    ) -> driver::prelude::DevResult<IoWriteRangeGuards<'_>> {
         let indices = io_range_lock_indices(offset, len, block_size)?;
 
         if indices.len() == 1 {
@@ -306,7 +306,7 @@ fn io_range_lock_indices(
     offset: usize,
     len: usize,
     block_size: usize,
-) -> axdriver::prelude::DevResult<IoRangeLockIndices> {
+) -> driver::prelude::DevResult<IoRangeLockIndices> {
     let (first_block, end_block) = checked_io_block_range(offset, len, block_size)?;
     let first_bucket = first_block / IO_RANGE_LOCK_BUCKET_BLOCKS;
     let last_bucket = (end_block - 1) / IO_RANGE_LOCK_BUCKET_BLOCKS;
@@ -351,13 +351,13 @@ fn checked_io_block_range(
     offset: usize,
     len: usize,
     block_size: usize,
-) -> axdriver::prelude::DevResult<(usize, usize)> {
+) -> driver::prelude::DevResult<(usize, usize)> {
     if len == 0 || block_size == 0 {
-        return Err(axdriver::prelude::DevError::InvalidParam);
+        return Err(driver::prelude::DevError::InvalidParam);
     }
     let end = offset
         .checked_add(len)
-        .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+        .ok_or(driver::prelude::DevError::InvalidParam)?;
     Ok((offset / block_size, end.div_ceil(block_size)))
 }
 
@@ -365,10 +365,10 @@ fn bypass_block_cache(offset: usize, len: usize, block_size: usize) -> bool {
     len > block_size && offset % block_size == 0 && len % block_size == 0
 }
 
-fn retryable_device_read_error(error: &axdriver::prelude::DevError) -> bool {
+fn retryable_device_read_error(error: &driver::prelude::DevError) -> bool {
     matches!(
         error,
-        axdriver::prelude::DevError::Again | axdriver::prelude::DevError::Io
+        driver::prelude::DevError::Again | driver::prelude::DevError::Io
     )
 }
 
@@ -448,7 +448,7 @@ impl<'a, D: BlockDriverOps> Drop for FlushingGuard<'a, D> {
 
 #[async_trait]
 impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ext4Disk<D> {
-    async fn flush_disk(&self) -> axdriver::prelude::DevResult<()> {
+    async fn flush_disk(&self) -> driver::prelude::DevResult<()> {
         let (target_generation, batches) = {
             // Wait only for writes which started before this checkpoint. New
             // writes may continue while the selected ranges are written back.
@@ -489,7 +489,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> crate::disk::DiskFlushable for Ex
         first_error.map_or(flush_result, Err)
     }
 
-    async fn flush_owner(&self, owner: u64) -> axdriver::prelude::DevResult<()> {
+    async fn flush_owner(&self, owner: u64) -> driver::prelude::DevResult<()> {
         let (owner_snapshot, batches) = {
             let _checkpoint = self.checkpoint_lock.write().await;
             let owner_snapshot = self.owner_snapshot(owner);
@@ -642,23 +642,23 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         &self,
         offset: usize,
         len: usize,
-    ) -> axdriver::prelude::DevResult<(u64, usize, usize)> {
+    ) -> driver::prelude::DevResult<(u64, usize, usize)> {
         let first_block = (offset / self.sector_size) as u64;
         let inner_offset = offset % self.sector_size;
         let touched = inner_offset
             .checked_add(len)
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
         let blocks = touched.div_ceil(self.sector_size);
         Ok((first_block, inner_offset, blocks))
     }
 
-    fn zeroed_io_buffer(len: usize) -> axdriver::prelude::DevResult<Vec<u8>> {
+    fn zeroed_io_buffer(len: usize) -> driver::prelude::DevResult<Vec<u8>> {
         let mut data = Vec::new();
         // `vec![0; len]` is an infallible allocation path and would panic on
         // allocation failure. Propagate that failure as a device NoMemory
         // error instead; all callers already return DevResult.
         data.try_reserve_exact(len)
-            .map_err(|_| axdriver::prelude::DevError::NoMemory)?;
+            .map_err(|_| driver::prelude::DevError::NoMemory)?;
         data.resize(len, 0);
         Ok(data)
     }
@@ -667,7 +667,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         &self,
         offset: usize,
         len: usize,
-    ) -> axdriver::prelude::DevResult<IoReadRangeGuards<'_>> {
+    ) -> driver::prelude::DevResult<IoReadRangeGuards<'_>> {
         let guards = self.io_ranges.read(offset, len, self.block_size()).await?;
         debug_assert!(guards.len() > 0);
         Ok(guards)
@@ -677,7 +677,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         &self,
         offset: usize,
         len: usize,
-    ) -> axdriver::prelude::DevResult<IoWriteRangeGuards<'_>> {
+    ) -> driver::prelude::DevResult<IoWriteRangeGuards<'_>> {
         let guards = self.io_ranges.write(offset, len, self.block_size()).await?;
         debug_assert!(guards.len() > 0);
         Ok(guards)
@@ -771,7 +771,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         snapshot
     }
 
-    async fn flush_batches(&self, batches: Vec<Vec<usize>>) -> Option<axdriver::prelude::DevError> {
+    async fn flush_batches(&self, batches: Vec<Vec<usize>>) -> Option<driver::prelude::DevError> {
         let mut batches = batches.into_iter();
         let mut pending = FuturesUnordered::new();
         let mut first_error = None;
@@ -794,7 +794,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         first_error
     }
 
-    async fn flush_offset_batch(&self, offsets: Vec<usize>) -> axdriver::prelude::DevResult<()> {
+    async fn flush_offset_batch(&self, offsets: Vec<usize>) -> driver::prelude::DevResult<()> {
         let Some((&first_offset, &last_offset)) = offsets.first().zip(offsets.last()) else {
             return Ok(());
         };
@@ -802,7 +802,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let span = last_offset
             .checked_sub(first_offset)
             .and_then(|span| span.checked_add(block_size))
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
         let _io_guard = self.lock_write_range(first_offset, span).await?;
 
         let (blocks, flushing_offsets) = {
@@ -869,7 +869,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
     async fn flush_evicted_blocks(
         &self,
         blocks: Vec<(usize, Vec<u8>)>,
-    ) -> axdriver::prelude::DevResult<()>
+    ) -> driver::prelude::DevResult<()>
     where
         D: AsyncBlockDriverOps + Clone,
     {
@@ -899,7 +899,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         &self,
         block_offset: usize,
         data: &[u8],
-    ) -> axdriver::prelude::DevResult<()>
+    ) -> driver::prelude::DevResult<()>
     where
         D: AsyncBlockDriverOps + Clone,
     {
@@ -939,21 +939,21 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         block_offset: usize,
         num_blocks: usize,
         dest: &mut [u8],
-    ) -> axdriver::prelude::DevResult<()>
+    ) -> driver::prelude::DevResult<()>
     where
         D: AsyncBlockDriverOps + Clone,
     {
         let block_size = self.block_size();
         let requested_len = num_blocks
             .checked_mul(block_size)
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
         if dest.len() != requested_len {
-            return Err(axdriver::prelude::DevError::InvalidParam);
+            return Err(driver::prelude::DevError::InvalidParam);
         }
         let (first_block, inner_offset, blocks) = self.byte_range(block_offset, requested_len)?;
         let raw_len = blocks
             .checked_mul(self.sector_size)
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
         let dev = self.dev.lock().clone();
         let total_blocks = dev.num_blocks();
         if first_block + blocks as u64 > total_blocks {
@@ -966,7 +966,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 blocks,
                 total_blocks
             );
-            return Err(axdriver::prelude::DevError::InvalidParam);
+            return Err(driver::prelude::DevError::InvalidParam);
         }
         if inner_offset == 0 && dest.len() == raw_len {
             Self::read_device_blocks(&dev, first_block, dest).await
@@ -975,7 +975,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             Self::read_device_blocks(&dev, first_block, &mut raw).await?;
             let end = inner_offset
                 .checked_add(requested_len)
-                .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                .ok_or(driver::prelude::DevError::InvalidParam)?;
             dest.copy_from_slice(&raw[inner_offset..end]);
             Ok(())
         }
@@ -985,7 +985,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         dev: &D,
         first_block: u64,
         dest: &mut [u8],
-    ) -> axdriver::prelude::DevResult<()>
+    ) -> driver::prelude::DevResult<()>
     where
         D: AsyncBlockDriverOps,
     {
@@ -1047,7 +1047,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         &self,
         offset: usize,
         buf: &mut [u8],
-    ) -> axdriver::prelude::DevResult<()>
+    ) -> driver::prelude::DevResult<()>
     where
         D: AsyncBlockDriverOps + Clone,
     {
@@ -1059,7 +1059,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         offset: usize,
         buf: &mut [u8],
         observed: core::ops::Range<usize>,
-    ) -> axdriver::prelude::DevResult<bool>
+    ) -> driver::prelude::DevResult<bool>
     where
         D: AsyncBlockDriverOps + Clone,
     {
@@ -1067,12 +1067,12 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
             return Ok(false);
         }
         if observed.start > observed.end || observed.end > buf.len() {
-            return Err(axdriver::prelude::DevError::InvalidParam);
+            return Err(driver::prelude::DevError::InvalidParam);
         }
         let observed_start = offset.checked_add(observed.start)
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
         let observed_end = offset.checked_add(observed.end)
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
         let overlaps = |start: usize, len: usize| {
             observed_start < observed_end && start < observed_end
                 && observed_start.saturating_sub(start) < len
@@ -1084,11 +1084,11 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let block_size = self.block_size();
 
         if block_size == 0 {
-            return Err(axdriver::prelude::DevError::InvalidParam);
+            return Err(driver::prelude::DevError::InvalidParam);
         }
         let request_end = offset
             .checked_add(buf.len())
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
 
         let start_block_offset = (offset / block_size) * block_size;
         let end_block_offset = ((request_end - 1) / block_size) * block_size;
@@ -1158,10 +1158,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // Cache miss. Find consecutive cache misses.
                 let remaining_blocks = end_block_offset
                     .checked_sub(current_block_offset)
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?
+                    .ok_or(driver::prelude::DevError::InvalidParam)?
                     .checked_div(block_size)
                     .and_then(|blocks| blocks.checked_add(1))
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                    .ok_or(driver::prelude::DevError::InvalidParam)?;
                 let batch_limit = bounded_cached_miss_blocks(remaining_blocks);
                 let mut consecutive_misses = 1;
                 {
@@ -1170,9 +1170,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                             .checked_add(
                                 consecutive_misses
                                     .checked_mul(block_size)
-                                    .ok_or(axdriver::prelude::DevError::InvalidParam)?,
+                                    .ok_or(driver::prelude::DevError::InvalidParam)?,
                             )
-                            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                            .ok_or(driver::prelude::DevError::InvalidParam)?;
                         if next_block_offset > end_block_offset {
                             break;
                         }
@@ -1194,7 +1194,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                     let buf_start = current_block_offset - offset;
                     let run_len = consecutive_misses
                         .checked_mul(block_size)
-                        .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                        .ok_or(driver::prelude::DevError::InvalidParam)?;
                     self.read_blocks_from_disk_async(
                         current_block_offset,
                         consecutive_misses,
@@ -1209,7 +1209,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // Read all consecutive misses from disk in one go
                 let run_len = consecutive_misses
                     .checked_mul(block_size)
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                    .ok_or(driver::prelude::DevError::InvalidParam)?;
                 let mut run_data = Self::zeroed_io_buffer(run_len)?;
                 self.read_blocks_from_disk_async(
                     current_block_offset,
@@ -1295,7 +1295,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
                 current_block_offset = current_block_offset
                     .checked_add(run_len)
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                    .ok_or(driver::prelude::DevError::InvalidParam)?;
             }
         }
         drop(io_guard);
@@ -1304,7 +1304,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         Ok(storage_read)
     }
 
-    pub async fn write_offset(&self, offset: usize, data: &[u8]) -> axdriver::prelude::DevResult<()>
+    pub async fn write_offset(&self, offset: usize, data: &[u8]) -> driver::prelude::DevResult<()>
     where
         D: AsyncBlockDriverOps + Clone,
     {
@@ -1327,11 +1327,11 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
         let block_size = self.block_size();
 
         if block_size == 0 {
-            return Err(axdriver::prelude::DevError::InvalidParam);
+            return Err(driver::prelude::DevError::InvalidParam);
         }
         let request_end = offset
             .checked_add(data.len())
-            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+            .ok_or(driver::prelude::DevError::InvalidParam)?;
 
         let start_block_offset = (offset / block_size) * block_size;
         let end_block_offset = ((request_end - 1) / block_size) * block_size;
@@ -1408,10 +1408,10 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // Partial block write with cache miss. Find consecutive cache misses that need partial write.
                 let remaining_blocks = end_block_offset
                     .checked_sub(current_block_offset)
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?
+                    .ok_or(driver::prelude::DevError::InvalidParam)?
                     .checked_div(block_size)
                     .and_then(|blocks| blocks.checked_add(1))
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                    .ok_or(driver::prelude::DevError::InvalidParam)?;
                 let batch_limit = bounded_cached_miss_blocks(remaining_blocks);
                 let mut consecutive_misses = 1;
                 {
@@ -1420,9 +1420,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                             .checked_add(
                                 consecutive_misses
                                     .checked_mul(block_size)
-                                    .ok_or(axdriver::prelude::DevError::InvalidParam)?,
+                                    .ok_or(driver::prelude::DevError::InvalidParam)?,
                             )
-                            .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                            .ok_or(driver::prelude::DevError::InvalidParam)?;
                         if next_block_offset > end_block_offset {
                             break;
                         }
@@ -1446,7 +1446,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
                 // Pre-read consecutive partial miss blocks from disk in one go
                 let run_len = consecutive_misses
                     .checked_mul(block_size)
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                    .ok_or(driver::prelude::DevError::InvalidParam)?;
                 let mut run_data = Self::zeroed_io_buffer(run_len)?;
                 self.read_blocks_from_disk_async(
                     current_block_offset,
@@ -1511,7 +1511,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
 
                 current_block_offset = current_block_offset
                     .checked_add(run_len)
-                    .ok_or(axdriver::prelude::DevError::InvalidParam)?;
+                    .ok_or(driver::prelude::DevError::InvalidParam)?;
             }
         }
         drop(io_guard);
@@ -1555,11 +1555,11 @@ impl<D: BlockDriverOps> Clone for Ext4DiskWrapper<D> {
 }
 
 #[derive(Debug)]
-struct Ext4DevError(axdriver::prelude::DevError);
+struct Ext4DevError(driver::prelude::DevError);
 
 impl Ext4DevError {
     fn to_vfs_error(&self) -> vfs::VfsError {
-        use axdriver::prelude::DevError;
+        use driver::prelude::DevError;
         use vfs::VfsError;
 
         match &self.0 {
@@ -1627,7 +1627,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> ext4plus::Ext4Write for Ext4DiskW
 
 #[cfg(test)]
 mod tests {
-    use axdriver::prelude::DevError;
+    use driver::prelude::DevError;
 
     use super::{
         CACHE_MISS_BATCH_BLOCKS, FLUSH_BATCH_BLOCKS, IO_RANGE_LOCK_BUCKET_BLOCKS,

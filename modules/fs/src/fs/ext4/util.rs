@@ -56,7 +56,7 @@ pub fn into_ext4_file_type(ty: NodeType) -> Result<FileType, VfsError> {
 mod tests {
     use alloc::boxed::Box;
 
-    use axdriver::prelude::DevError;
+    use driver::prelude::DevError;
     use vfs::VfsError;
     use ext4plus::error::Ext4Error;
 

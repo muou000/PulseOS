@@ -22,9 +22,9 @@ paging = ["hal/paging", "mm"]
 ipi = ["dep:ipi", "mm?/ipi"]
 
 multitask = ["task/multitask"]
-fs = ["axdriver", "dep:fs"]
-net = ["axdriver", "dep:net"]
-display = ["axdriver", "axdisplay"]
+fs = ["driver", "dep:fs"]
+net = ["driver", "dep:net"]
+display = ["driver", "dep:display"]
 rtc = []
 
 [dependencies]
@@ -33,10 +33,10 @@ kernel_log = { workspace = true }
 config = { workspace = true }
 kernel_alloc = { workspace = true, optional = true }
 mm = { workspace = true, optional = true }
-axdriver = { workspace = true, optional = true }
+driver = { workspace = true, optional = true }
 fs = { workspace = true, optional = true }
 net = { workspace = true, optional = true }
-axdisplay = { workspace = true, optional = true }
+display = { workspace = true, optional = true }
 task = { workspace = true, optional = true }
 ipi = { workspace = true, optional = true }
 axplat.workspace = true

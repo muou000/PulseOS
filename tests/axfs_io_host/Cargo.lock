@@ -62,19 +62,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axdriver_base"
-version = "0.1.2"
-
-[[package]]
-name = "axdriver_block"
-version = "0.1.2"
-dependencies = [
- "axdriver_base",
- "log",
- "spin",
-]
-
-[[package]]
 name = "axerrno"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -88,7 +75,7 @@ dependencies = [
 name = "axfs-io-host"
 version = "0.0.0"
 dependencies = [
- "axdriver_block",
+ "driver_block",
  "futures-lite",
  "hadris-io",
  "hadris-storage",
@@ -152,6 +139,19 @@ dependencies = [
  "darling_core",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "driver_base"
+version = "0.1.2"
+
+[[package]]
+name = "driver_block"
+version = "0.1.2"
+dependencies = [
+ "driver_base",
+ "log",
+ "spin",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@ use alloc::{
 use core::mem;
 
 use async_trait::async_trait;
-use axdriver::{AxBlockDevice, prelude::*};
+use driver::{AxBlockDevice, prelude::*};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use spin::Mutex;
 

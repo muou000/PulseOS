@@ -1,9 +1,9 @@
 //! Run the FAT adapter against the kernel block traits without linking platform drivers.
 extern crate alloc;
-extern crate self as axdriver;
+extern crate self as driver;
 
 pub mod prelude {
-    pub use axdriver_block::{
+    pub use driver_block::{
         AsyncBlockDriverOps, BaseDriverOps, BlockDriverOps, DevError, DevResult, DeviceType,
     };
 }
@@ -19,7 +19,7 @@ use core::{
 };
 use std::sync::Arc;
 
-use axdriver::prelude::*;
+use driver::prelude::*;
 use disk::{FatDisk, FatDiskError};
 use hadris_storage::{BlockIndex, async_::BlockDevice};
 

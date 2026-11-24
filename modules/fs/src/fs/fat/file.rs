@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 use core::task::Context;
 
 use async_trait::async_trait;
-use axdriver::prelude::AsyncBlockDriverOps;
+use driver::prelude::AsyncBlockDriverOps;
 use vfs::{FileNodeOps, VfsError, VfsResult};
 use poll::{IoEvents, Pollable};
 

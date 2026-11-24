@@ -10,7 +10,7 @@ use core::{
 };
 
 use async_trait::async_trait;
-use axdriver::prelude::AsyncBlockDriverOps;
+use driver::prelude::AsyncBlockDriverOps;
 use vfs::{
     DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, WeakDirEntry,
     path::MAX_NAME_LEN,

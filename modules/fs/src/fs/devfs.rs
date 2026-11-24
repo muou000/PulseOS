@@ -530,16 +530,16 @@ fn now() -> Duration {
     hal::time::wall_time()
 }
 
-fn map_dev_err(err: axdriver::prelude::DevError) -> VfsError {
+fn map_dev_err(err: driver::prelude::DevError) -> VfsError {
     match err {
-        axdriver::prelude::DevError::AlreadyExists => VfsError::AlreadyExists,
-        axdriver::prelude::DevError::Again => VfsError::WouldBlock,
-        axdriver::prelude::DevError::BadState => VfsError::BadState,
-        axdriver::prelude::DevError::InvalidParam => VfsError::InvalidInput,
-        axdriver::prelude::DevError::Io => VfsError::Io,
-        axdriver::prelude::DevError::NoMemory => VfsError::NoMemory,
-        axdriver::prelude::DevError::ResourceBusy => VfsError::ResourceBusy,
-        axdriver::prelude::DevError::Unsupported => VfsError::OperationNotSupported,
+        driver::prelude::DevError::AlreadyExists => VfsError::AlreadyExists,
+        driver::prelude::DevError::Again => VfsError::WouldBlock,
+        driver::prelude::DevError::BadState => VfsError::BadState,
+        driver::prelude::DevError::InvalidParam => VfsError::InvalidInput,
+        driver::prelude::DevError::Io => VfsError::Io,
+        driver::prelude::DevError::NoMemory => VfsError::NoMemory,
+        driver::prelude::DevError::ResourceBusy => VfsError::ResourceBusy,
+        driver::prelude::DevError::Unsupported => VfsError::OperationNotSupported,
     }
 }
 

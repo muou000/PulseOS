@@ -42,7 +42,7 @@ pub use self::net_impl::{bench_receive, bench_transmit};
 pub use smoltcp::time::Duration;
 pub use smoltcp::wire::{IpAddress as IpAddr, IpEndpoint as SocketAddr, Ipv4Address as Ipv4Addr, Ipv6Address as Ipv6Addr};
 
-use axdriver::{prelude::*, AxDeviceContainer};
+use driver::{prelude::*, AxDeviceContainer};
 
 /// Initializes the network subsystem by NIC devices.
 pub fn init_network(mut net_devs: AxDeviceContainer<AxNetDevice>) {

@@ -8,7 +8,7 @@ use core::mem;
 
 use async_lock::{Mutex, MutexGuard};
 use async_trait::async_trait;
-use axdriver::prelude::AsyncBlockDriverOps;
+use driver::prelude::AsyncBlockDriverOps;
 use vfs::{
     DirEntry, Filesystem, FilesystemOps, NodeType, Reference, StatFs, VfsError, VfsResult,
     WeakDirEntry, path::MAX_NAME_LEN,

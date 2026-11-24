@@ -1,0 +1,20 @@
+[package]
+name = "display"
+version.workspace = true
+edition.workspace = true
+authors = ["Shiping Yuan <robert_yuan@pku.edu.com>"]
+description = "ArceOS graphics module"
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/axdisplay"
+documentation = "https://arceos-org.github.io/arceos/axdisplay/index.html"
+
+[features]
+smoke-test = []
+
+[dependencies]
+log.workspace = true
+lazyinit.workspace = true
+driver = { workspace = true, features = ["display"] }
+sync.workspace = true
+driver_display.workspace = true

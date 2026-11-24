@@ -34,8 +34,9 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   ├── kernel_alloc           # 内存分配器接口
 │   ├── config                 # 系统编译期配置与常量生成
 │   ├── cpu                    # 架构相关的特权级指令与硬件上下文
-│   ├── axdriver               # 设备驱动管理层
-│   ├── axdriver_*             # 基础、块设备、网络、PCI、VirtIO 驱动模块
+│   ├── driver                 # 设备探测、注册与驱动选择
+│   ├── driver_*               # 基础、块设备、显示、网络、PCI 和 VirtIO 驱动接口与实现
+│   ├── display                # 使用 driver_display 接口的上层显示模块
 │   ├── fs                     # 文件系统运行时与挂载
 │   ├── vfs                    # 虚拟文件系统抽象层
 │   ├── hal                    # 硬件抽象层与页表管理

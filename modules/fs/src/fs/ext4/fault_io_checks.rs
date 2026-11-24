@@ -4,7 +4,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::future::{Ready, ready};
 
-use axdriver::prelude::{
+use driver::prelude::{
     AsyncBlockDriverOps, BaseDriverOps, BlockDriverOps, DevError, DevResult, DeviceType,
 };
 use ext4plus::Ext4Read;
