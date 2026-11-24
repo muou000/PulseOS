@@ -21,7 +21,7 @@ status: accepted
 | `axruntime` | `runtime` | `Pulse`、`axfeat` | #268 |
 | `axsched` | `sched` | `axtask` | #268 |
 | `axsync` | `sync` | `Pulse`、`axdisplay`、`axfeat`、`axfs`、`axnet`、`ext4plus`、`pulse_core`、`axsync` 自身的 dev-dependency，以及直接编译互斥锁源码的 `tests/axsync_host` | #268 |
-| `axtask` | `task` | `Pulse`、`axdriver`、`axfeat`、`axfs`、`axnet`、`axruntime`、`axsync`、`pulse_core`、`pulse_syscalls`、`axtask` 自身的 dev-dependency | #268 |
+| `axtask` | `task` | `Pulse`、`axdriver`、`axfeat`、`axfs`、`axnet`、`axruntime`、`axsync`、`pulse_core`、`pulse_syscalls`、`axtask` 自身的 dev-dependency，以及用别名提供任务接口的 `tests/axsync_host` | #268 |
 | `axmm` | `mm` | `axfs`、`axruntime`、`pulse_core`、`pulse_syscalls` | #269 |
 | `axfs` | `fs` | `Pulse`、`axfeat`、`axruntime`、`pulse_core`、`pulse_syscalls`，以及直接编译文件系统源码的 `tests/axfs_io_host`、`tests/axfs_mount_host` | #269 |
 | `axfs-ng-vfs` | `vfs` | `axfs`、`pulse_core`、`pulse_syscalls`、`tests/axfs_io_host`、`tests/axfs_mount_host` | #269 |
@@ -29,7 +29,7 @@ status: accepted
 | `axpoll` | `poll` | `axdriver`、`axdriver_block`、`axdriver_net`、`axfs`、`axfs-ng-vfs`、`axnet`、`axtask`、`pulse_core`、`pulse_io_uring_core`、`pulse_syscalls`，两个 FS host workspace 还各自 patch 此包 | #269 |
 | `axnet` | `net` | `Pulse`、`axfeat`、`axruntime`、`pulse_core`、`pulse_syscalls` | #269 |
 | `pulse_io_uring_core` | `io_uring_core` | `pulse_core`、`pulse_syscalls` | #269 |
-| `axdriver` | `driver` | `axdisplay`、`axfeat`、`axfs`、`axnet`、`axruntime` | #270 |
+| `axdriver` | `driver` | `axdisplay`、`axfeat`、`axfs`、`axnet`、`axruntime`，以及用别名提供驱动接口的 `tests/axfs_io_host` | #270 |
 | `axdriver_base` | `driver_base` | `axdriver`、`axdriver_block`、`axdriver_display`、`axdriver_net`、`axdriver_virtio` | #270 |
 | `axdriver_block` | `driver_block` | `axdriver`、`axdriver_virtio`、`tests/axfs_io_host` | #270 |
 | `axdriver_display` | `driver_display` | `axdisplay`、`axdriver`、`axdriver_virtio` | #270 |
@@ -60,7 +60,7 @@ pub fn probe(v: alloc::vec::Vec<u8>, level: log::Level, _: &kernel_alloc::Global
 
 | 旧 `pub mod` | 最终所有者与职责 | 当前主要调用方 |
 | --- | --- | --- |
-| `bpf` | `bpf` 拥有指令、verifier、interpreter、program、map、link、perf event、ring buffer 状态及有界采样队列，主机与内核共用。内核侧使用真实页帧、等待队列和时钟。`process::bpf` 拥有 BPF 对象 FD、映射记录、IRQ 取样和无故障取栈。 | `pulse_syscalls` 的 `validation/bpf_{map,prog,link}.rs` 和 `impls/bpf/mod.rs` 在主机引用源码。内核侧调用方有 bpf/perf_event_open、mmap、epoll、进程切换映像与映射更新，以及启动时的采样注册。 |
+| `bpf` | `bpf` 拥有指令、verifier、interpreter、program、map、link、perf event、ring buffer 状态及有界采样队列，主机与内核共用。内核侧使用真实页帧、等待队列和时钟。`process::bpf` 拥有 BPF 对象 FD、映射记录、IRQ 取样和无故障取栈。 | `pulse_syscalls` 的 `validation/bpf_{map,prog,link}.rs` 和 `impls/bpf/{mod,perf_event}.rs` 在主机引用源码。内核侧调用方有 bpf/perf_event_open、mmap、epoll、进程切换映像与映射更新，以及启动时的采样注册。 |
 | `config` | `config::user` 拥有用户空间起点和大小、栈顶和大小、堆基址。`config` 保留原 `KERNEL_STACK_SIZE` 常量。 | ELF 装载、进程创建及 exec、uaccess、mmap/shmat 和管道内核检查使用用户布局。本入口的内核栈大小常量在当前树中没有调用方。 |
 | `cpu_dma_latency` | `process::fd::cpu_dma_latency` 拥有每次打开的延迟请求及所有生效请求的最小值，随 FD 对象释放请求。 | FD 表识别 `/dev/cpu_dma_latency` 并构造 `CpuDmaLatencyObject`，该对象读出全局生效值，写入本次打开的目标值。 |
 | `fd_table` | `process::fd` 拥有共享 FD 表、打开文件描述、`FdObject` 及 pipe、TTY、epoll、signalfd、timerfd 等对象。进程拥有表，部分就绪方法接收进程或线程。 | 进程 fork/exec/close/exit，文件、网络、BPF、io_uring 系统调用与各自的 FD 适配，以及启动时的 TTY 回调注册。 |
@@ -79,7 +79,7 @@ pub fn probe(v: alloc::vec::Vec<u8>, level: log::Level, _: &kernel_alloc::Global
 
 ```mermaid
 flowchart TD
-    boot[Pulse 启动] --> process
+    boot[Pulse 启动] --> process["process（exec 提交与退出清理）"]
     sys[pulse_syscalls] --> process
     sys --> ipc
     sys --> bpf
@@ -122,7 +122,7 @@ cargo tree --locked -p Pulse --target loongarch64-unknown-none-softfloat \
 | --- | --- | --- |
 | 根工作区 metadata | 40 个成员，默认解析 278 个包。全特性 319 个包，其中 52 个 path、266 个 registry、1 个 git。25 个模块各有一个本地 package ID。 | 看 `packages[].source`、`manifest_path`、`targets[].name` 和 `resolve.nodes[].deps[].pkg`，用调用方声明的 `dependencies[].source / req / rename` 解释实际去向。 |
 | RV64 QEMU / MMIO | 选中本地 `axplat-riscv64-qemu-virt`，以及 23 个模块，包括本地 CPU 与 VirtIO 块/网络驱动。 | 复查 MMIO feature、驱动类型和页表所在的实现路径。 |
-| LA64 QEMU / PCI | 选中本地 `axplat-loongarch64-qemu-virt`，同样选中 23 个模块，使用 PCI 总线。 | 复查 PCI feature、本地驱动和 MSI-X 路径。两棵默认树均未启用 axdisplay 和 axdriver_display，按需用 `axfeat/display` 查显示链。 |
+| LA64 QEMU / PCI | 选中本地 `axplat-loongarch64-qemu-virt`，同样选中 23 个模块，使用 PCI 总线。 | 复查 PCI feature、本地驱动和 MSI-X 路径。两棵默认树均未启用 axdisplay 和 axdriver_display，两边加 `axfeat/display` 后均选中全部 25 个本地模块。 |
 | 外部及保留身份的包 | 两棵树中的 `axerrno`、`axconfig-macros`、`axconfig-gen`、`axplat-macros`、`ax-kspin`、`ax-kernel-guard`、`ax-crate-interface` 来自 registry。全特性图还包含 git 的 `bcm2835-sdhci`。 | 保留这些包的发布名。仓内 `platforms/axplat`、四个平台包、`api/axfeat` 也保留各自的身份。改的是它们指向模块的边。 |
 
 ### 旧名请求与 patch
@@ -143,6 +143,6 @@ cargo tree --locked -p Pulse --target loongarch64-unknown-none-softfloat \
 ### 独立工作区、构建和历史记录
 
 - **Feature 与链接。** 同批改根包、`api/axfeat` 和各模块中的依赖键、`dep:包`、`包/feature`、`包?/feature`，保留用户选择的 `alloc-slab`、`sched-eevdf`、`fs`、`net`、`display`、总线和板级驱动等开关。特别检查同名 feature 与可选依赖（例如 `fs` 显式使用 `dep:fs`），避免自引用或意外启用。将旧门面的 `bpf-trace`、`guest-checks`、`mapping-lifecycle-test`、`file-io-test` 和 `ls2k1000` 转发到实际实现。`scripts/make/cargo.mk` 的 `-p` / `--exclude` 和 rustdoc 名单要跟包名更新。任务扩展的弱符号、extern 声明和 `def_task_ext!` 生成的强符号须一致，保留启动注册和链接行为。
-- **主机工作区。** 根 `[patch]` 的解析范围止于当前 workspace。逐个运行 `cargo metadata --locked --manifest-path <目录>/Cargo.toml --format-version 1`。在 `tests/axfs_io_host`、`tests/axfs_mount_host` 更新 VFS、poll patch、I/O 测试的块驱动依赖和各自的 Cargo.lock，并修正 `#[path]` 的 FS 源码路径，分别运行 `cargo test --locked --manifest-path …`。`tests/axsync_host` 的宿主别名和 mutex 源码路径也随包更新，按其 README 运行 `cargo run --locked --manifest-path tests/axsync_host/Cargo.toml`。三个清单在基线均可独立锁定解析。
+- **主机工作区。** 根 `[patch]` 的解析范围止于当前 workspace。逐个运行 `cargo metadata --locked --manifest-path <目录>/Cargo.toml --format-version 1`。在 `tests/axfs_io_host`、`tests/axfs_mount_host` 更新 VFS、poll patch、I/O 测试的块驱动依赖和各自的 Cargo.lock，并修正 `#[path]` 的 FS 源码路径，分别运行 `cargo test --locked --manifest-path …`。#270 同步修改 `tests/axfs_io_host/tests/fat_disk.rs` 的 `extern crate self as axdriver` 和 prelude 导入，并复跑该工作区测试。这样测试内嵌的 FAT 源码也能解析到 `driver::prelude`。`tests/axsync_host` 的 `extern crate self as axtask` 和 mutex 源码路径随 #268 更新，按其 README 运行 `cargo run --locked --manifest-path tests/axsync_host/Cargo.toml`。三个清单在基线均可独立锁定解析。
 - **共享实现的测试。** #265 让 BPF host validation 和生产配置通过 Cargo 使用同一份 `bpf` 状态机，去掉跨 crate 的源码 `#[path]`。#267 迁移线程采样时钟的 host 测试。#268/#269 将原 task、sync、VFS 和 io_uring 状态机的 host 命令切到新 `-p` 名称。两种 QEMU 的 `make test` 构建、启用 `bpf-trace` 的构建和相应 guest 行为分别记录，板级依赖另跑 `make vf2`、`make ls2k1000`。
-- **平台、工具和证据。** 保留平台包名、Rust 平台入口及 `[package.metadata.axplat]`、平台配置中供 Make 匹配的 package/platform、`cargo axplat`、`axconfig-gen` 和 `AX_CONFIG_PATH`。保持用户 ABI、BPF schema、外部 CLI 及许可证署名。更新仍用于当前树的构建来源清单 `scripts/build_provenance.py` 及其测试、`tests/pcp_boot/run.py` 的 panic 路径、正在使用的调度测试补丁和开发文档。已归档的采样符号、构建 ID、原始提交链接以及仅在旧提交上回放的补丁保留原身份。
+- **平台、工具和证据。** 保留平台包名、Rust 平台入口及 `[package.metadata.axplat]`、平台配置中供 Make 匹配的 package/platform、`cargo axplat`、`axconfig-gen` 和 `AX_CONFIG_PATH`。保持用户 ABI、BPF schema、外部 CLI 及许可证署名。更新仍用于当前树的构建来源清单 `scripts/build_provenance.py` 及其测试、`tests/pcp_boot/run.py` 的 panic 路径、当前开发文档和其中仍要求应用的补丁。基线 `git apply --check` 可应用 `tests/io_uring/worker-scheduler.patch`，而 `tests/kernel_cpus/switch-counts.patch` 已在 `pulse_core/src/task/thread.rs` 失配。#268 更新调度测试补丁时需修复该处，#271 对最终树复查。已归档的采样符号、构建 ID、原始提交链接以及仅在旧提交上回放的补丁保留原身份。
