@@ -2240,11 +2240,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pulse_bpf_schema"
-version = "0.1.0"
-
-[[package]]
-name = "pulse_core"
+name = "process"
 version = "0.1.0"
 dependencies = [
  "axalloc",
@@ -2278,6 +2274,20 @@ dependencies = [
  "pulse_user_abi",
  "sha2",
  "spin 0.10.0",
+]
+
+[[package]]
+name = "pulse_bpf_schema"
+version = "0.1.0"
+
+[[package]]
+name = "pulse_core"
+version = "0.1.0"
+dependencies = [
+ "axconfig",
+ "axmm",
+ "elf_loader",
+ "process",
 ]
 
 [[package]]

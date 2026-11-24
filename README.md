@@ -48,19 +48,19 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   ├── axruntime              # 内核运行时初始化
 │   ├── axsched                # 调度器集成层
 │   ├── axsync                 # 内核同步原语
-│   └── axtask                 # 内核任务模型与调度
+│   ├── axtask                 # 内核任务模型与调度
+│   ├── bpf                    # BPF 程序、map 和 perf event
+│   ├── elf_loader             # 准备 ELF 映像和初始用户栈
+│   ├── ipc                    # System V IPC
+│   ├── process                # 用户进程、线程、FD、socket、trap 与 io_uring 执行
+│   └── pulse_io_uring_core    # io_uring 请求与注册资源状态机
 ├── platforms                  # 硬件平台抽象与具体实现
 │   ├── axplat                 # 统一硬件平台抽象接口
 │   ├── axplat-riscv64-qemu-virt
 │   ├── axplat-riscv64-visionfive2
 │   ├── axplat-loongarch64-qemu-virt
 │   └── axplat-loongarch64-ls2k1000
-├── pulse_core                 # PulseOS 宏内核核心实现
-│   └── src
-│       ├── fd_table           # 文件描述符表与 FdObject
-│       ├── ipc、mm、net、task # 进程/线程管理、内存映射、IPC与网络
-│       ├── trap.rs            # 用户态/内核态 Trap 分发
-│       └── config.rs、flock.rs、record_lock.rs # 核心辅助模块
+├── pulse_core                 # 启动代码和系统调用使用的临时兼容入口
 ├── pulse_syscalls             # Linux 兼容系统调用实现与分派
 │   └── src
 │       ├── handler.rs         # 系统调用统一入口

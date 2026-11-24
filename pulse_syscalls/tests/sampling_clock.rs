@@ -1,4 +1,4 @@
-#[path = "../../pulse_core/src/task/sampling_clock.rs"]
+#[path = "../../modules/process/src/sampling_clock.rs"]
 mod sampling_clock;
 use sampling_clock::OnCpuClock;
 

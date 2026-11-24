@@ -136,9 +136,9 @@ Linux v6.12 的非 sleepable `bpf_get_stack` 使用 `may_fault=false`，LoongArc
 - [P2] [LA trap](../../modules/axcpu/src/loongarch64/trap.rs)、[context](../../modules/axcpu/src/loongarch64/context.rs)、[assembly](../../modules/axcpu/src/loongarch64/trap.S)。
 - [P3] [generic IRQ](../../modules/axcpu/src/trap.rs)、[timer hook](../../modules/axtask/src/api.rs)。
 - [P4] [TaskStack与公开top接口](../../modules/axtask/src/task.rs)。
-- [P5] [Process memory读取](../../pulse_core/src/task/process/memory.rs)、[uaccess](../../pulse_core/src/task/uaccess.rs)。
-- [P6] [page fault处理](../../pulse_core/src/trap.rs)、[exception table](../../modules/axcpu/src/exception_table.rs)。
+- [P5] [Process memory读取](../../modules/process/src/lifecycle/memory.rs)、[uaccess](../../modules/process/src/uaccess/mod.rs)。
+- [P6] [page fault处理](../../modules/process/src/trap.rs)、[exception table](../../modules/axcpu/src/exception_table.rs)。
 - [P7] [固定context与队列容量](../../crates/pulse_bpf_schema/src/lib.rs)。
 - [P8] [interpreter](../../modules/bpf/src/interpreter.rs)、[verifier](../../modules/bpf/src/verifier.rs)、[program load license处理](../../pulse_syscalls/src/impls/bpf/prog.rs)。
-- [P9] [Thread](../../pulse_core/src/task/thread.rs)。
+- [P9] [Thread](../../modules/process/src/thread.rs)。
 - [P10] [kernel构建flags](../../scripts/make/cargo.mk)。

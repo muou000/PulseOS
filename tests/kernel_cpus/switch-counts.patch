@@ -141,18 +141,16 @@ index 8a22ba18..ed1deef5 100644
          // Drop all exited tasks and recycle resources.
          let n = EXITED_TASKS.with_current(|exited_tasks| exited_tasks.len());
          for _ in 0..n {
-diff --git a/pulse_core/src/task/thread.rs b/pulse_core/src/task/thread.rs
-index 1e6bfe70..8d383634 100644
---- a/pulse_core/src/task/thread.rs
-+++ b/pulse_core/src/task/thread.rs
-@@ -468,6 +468,7 @@ impl Thread {
-
- impl TaskExtSwitch for ThreadHandle {
-     fn on_enter(&self) {
+diff --git a/modules/process/src/thread.rs b/modules/process/src/thread.rs
+index 89c1224e..444d41c5 100644
+--- a/modules/process/src/thread.rs
++++ b/modules/process/src/thread.rs
+@@ -481,4 +481,5 @@
+         #[cfg(feature = "guest-checks")]
+         USER_DISPATCHES[axhal::percpu::this_cpu_id()].fetch_add(1, Ordering::Relaxed);
 +        axtask::reservation_counts::user_switch(self.0.tid(), self.0.sampling_task_id());
          self.0.on_enter_cpu();
      }
-
 diff --git a/pulse_syscalls/src/impls/misc/system.rs b/pulse_syscalls/src/impls/misc/system.rs
 index a00d08d3..94ebda54 100644
 --- a/pulse_syscalls/src/impls/misc/system.rs
