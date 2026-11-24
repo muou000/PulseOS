@@ -67,22 +67,29 @@ def check_dedicated_ring(log):
     if not target_sqe:
         raise ValueError("Missing target POLL_ADD SQ consumption")
     ring = target_sqe[1]
-    idle = re.findall(r"DEDICATED_RING idle post_publish_need_wakeup=1 enters=1 unique=(\d+)\b", trace)
-    if len(idle) != 1 or not 1 <= int(idle[0]) <= 4:
+    idle = re.findall(r"DEDICATED_RING idle post_publish_need_wakeup=1 enters=1 unique=(\d+) "
+                      r"witness=4001 witness_enters=([01])\b", trace)
+    if len(idle) != 1 or not 1 <= int(idle[0][0]) <= 4:
         raise ValueError(f"Expected one post-publication wake and progress within four idle attempts: {idle}")
-    idle_count = int(idle[0])
+    idle_count, witness_enters = map(int, idle[0])
     sqes = list(re.finditer(rf"SQPOLL consume ring={ring} user_data=(\d+) cpu=(\d+)\b", trace))
     tags = [int(m[1]) for m in sqes]
     active_tags = [2001, 2002, 1001]
-    if tags != [0, *active_tags, *range(3001, 3001 + idle_count)] or any(m[2] != "7" for m in sqes):
+    if tags != [0, *active_tags, *range(3001, 3001 + idle_count), 4001] or any(m[2] != "7" for m in sqes):
         raise ValueError(f"Unexpected SQ observations: {[m.groups() for m in sqes]}")
 
     enters = list(re.finditer(rf"SQPOLL enter ring={ring} wakeup=(\w+) wait=(\w+)", trace))
     totals = re.findall(rf"SQPOLL (setup|teardown) ring={ring} enter_calls=(\d+)\b", trace)
-    if (totals != [("setup", "0"), ("teardown", "2")] or len(enters) != 2
+    # The successful idle SQE can win the poller's final recheck and race the
+    # wake syscall. The guest publishes 4001 only after that syscall returns.
+    prev, last_idle, witness = sqes[-3:]
+    lifetime = 2 + witness_enters
+    if (totals != [("setup", "0"), ("teardown", str(lifetime))] or len(enters) != lifetime
             or any(m.groups() != ("true", "false") for m in enters)
-            or enters[0].start() >= sqes[1].start() or enters[1].start() <= sqes[-2].end()):
-        raise ValueError(f"Expected only warmup and idle wake across ring lifetime (kernel count {totals})")
+            or enters[0].start() >= sqes[1].start()
+            or not prev.end() < enters[1].start() < witness.start()
+            or (witness_enters and enters[2].start() <= last_idle.end())):
+        raise ValueError(f"Expected warmup, idle wake, and witness progress (kernel count {totals})")
 
     inline = [(tag, cpu, res) for tag, cpu, res in re.findall(
         rf"SQPOLL inline ring={ring} user_data=(\d+) cpu=(\d+) res=(-?\d+)", trace
@@ -120,7 +127,8 @@ def check_dedicated_ring(log):
         "polls": [{"req": int(req), "phase": phase, "cpu": int(cpu), "result": result,
                    "task": task, "seq": int(seq)} for req, phase, cpu, result, task, seq in polls],
         "committed": reqs, "worker": [m.groupdict() for m in jobs],
-        "enter_calls": {"warmup": 1, "active": 0, "idle": 1, "lifetime": int(totals[-1][1])},
+        "enter_calls": {"warmup": 1, "active": 0, "idle": 1, "witness": witness_enters,
+                        "lifetime": int(totals[-1][1])},
         "active_request_placement": {
             "sq": placement(m[2] for m in sqes if int(m[1]) in active_tags),
             "inline": placement(cpu for _, cpu, _ in inline),
@@ -130,5 +138,5 @@ def check_dedicated_ring(log):
             "worker_finish": placement(m["cpu"] for m in jobs if m["phase"] == "finish"),
         },
         "user_dispatch": user_dispatch_counts(trace, ring),
-        "active_unique_cqes": 3, "idle_unique_cqes": idle_count, "passed": True,
+        "active_unique_cqes": 3, "idle_unique_cqes": idle_count, "witness_unique_cqes": 1, "passed": True,
     }

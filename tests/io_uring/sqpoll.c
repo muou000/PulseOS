@@ -528,6 +528,14 @@ static void dedicated_ring(void)
     } while (r.enters == before && idle_cqes < 4);
     unsigned idle_enters = r.enters - before;
     CHECK(idle_enters == 1 && load(CQ(&r, head)) == load(CQ(&r, tail)));
+    /* Even if the poller raced the wake, this SQE is published after it returned. */
+    before = r.enters;
+    nop.user_data = 4001;
+    submit(&r, &nop, 1);
+    kick_if_asleep(&r);
+    expect(&r, nop.user_data, 0);
+    unsigned witness_enters = r.enters - before;
+    CHECK(load(CQ(&r, head)) == load(CQ(&r, tail)));
     destroy(&r);
     CHECK(read(sentinel[0], bytes, 1) == 0 && close(sentinel[0]) == 0);
     CHECK(close(fd) == 0 && close(signal_pipe[0]) == 0 && close(signal_pipe[1]) == 0);
@@ -536,7 +544,8 @@ static void dedicated_ring(void)
            (unsigned long long)start, (unsigned long long)end);
     printf("DEDICATED_RING active unique=3 enters=%u producer0_cpu=%d producer1_cpu=%d wake_cpu=%d\n",
            active_enters, submit_cpu, w.reader_cpu, w.wake_cpu);
-    printf("DEDICATED_RING idle post_publish_need_wakeup=1 enters=%u unique=%u\n", idle_enters, idle_cqes);
+    printf("DEDICATED_RING idle post_publish_need_wakeup=1 enters=%u unique=%u witness=4001 witness_enters=%u\n",
+           idle_enters, idle_cqes, witness_enters);
     puts("DEDICATED_RING close writer_eof=1 PASS");
 }
 
