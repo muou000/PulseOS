@@ -1,0 +1,71 @@
+{
+  "passed": true,
+  "reason": "block read and TCP round trip used configured MSI-X vectors with EIOINTC claims and registered handlers",
+  "elapsed_seconds": 77.301,
+  "qemu_command": [
+    "qemu-system-loongarch64",
+    "-machine",
+    "virt",
+    "-kernel",
+    "/tmp/pulse270-runtime/trace-la-PulseOS_loongarch64-qemu-virt.elf",
+    "-m",
+    "8G",
+    "-nographic",
+    "-smp",
+    "8",
+    "-drive",
+    "file=/home/muou/PulseOS/disk-la.img,if=none,format=raw,id=x0,snapshot=on",
+    "-device",
+    "virtio-blk-pci,drive=x0",
+    "-no-reboot",
+    "-device",
+    "virtio-net-pci,netdev=net0",
+    "-netdev",
+    "user,id=net0",
+    "-rtc",
+    "base=utc"
+  ],
+  "shell_payload": "IFS= read -r line < /etc/passwd; printf '\\nMSIX_BLOCK_%s\\n' \"$line\"; if exec 3<>/dev/tcp/10.0.2.2/43378; then printf 'PULSE_MSIX_REQUEST\\n' >&3; if IFS= read -r line <&3; then printf 'MSIX_NET_%s\\n' \"$line\"; fi; exec 3<&-; exec 3>&-; fi; printf 'MSIX_DONE_%s\\n' OK\n",
+  "payload_sent": true,
+  "kernel": "/tmp/pulse270-runtime/trace-la-PulseOS_loongarch64-qemu-virt.elf",
+  "kernel_sha256": "e7cc951a9a994df5bd651167c08a8d8ff4d0c127ae5cc514754acdfb297f8d9c",
+  "image": "/home/muou/PulseOS/disk-la.img",
+  "image_sha256": "ef9a74f8c7fdde1e61b10dbe49c1264b8fea859a77571e9b8f5ea4411c86a04f",
+  "counts": {
+    "block_msix_config": 1,
+    "net_msix_config": 1,
+    "block_eiointc_claim": 216,
+    "net_eiointc_claim": 5,
+    "block_handler": 216,
+    "net_handler": 5,
+    "block_handler_registered": 216,
+    "net_handler_registered": 5,
+    "block_read": 1,
+    "network_roundtrip": 1
+  },
+  "excerpts": {
+    "block_msix_config": "\u001b[m\u001b[37m[  0.671044 driver::virtio:1603] \u001b[36mPCI device at 00:01.0 configured to use MSI-X (irq 64)\u001b[m",
+    "net_msix_config": "\u001b[m\u001b[37m[  0.704515 driver::virtio:1603] \u001b[36mPCI device at 00:02.0 configured to use MSI-X (irq 65)\u001b[m",
+    "block_eiointc_claim": "\u001b[m\u001b[37m[  1.002063 axplat_loongarch64_qemu_virt::irq:131] \u001b[90mEIOINTC IRQ 64\u001b[m",
+    "block_handler": "\u001b[m\u001b[37m[  1.003061 driver::virtio:122] \u001b[36mcommon_virtio_irq_handler: irq=64\u001b[m",
+    "block_handler_registered": "\u001b[m\u001b[37m[  1.003479 driver::virtio:125] \u001b[36mcommon_virtio_irq_handler: found 1 handlers for irq=64\u001b[m",
+    "block_read": "\u001b[m\u001b[37m[ 75.034157 6:17 task::wait_queue:350] \u001b[36mtask wait_timeout: Task(17, \"gc\") deadline=MSIX_BLOCK_root:x:0:0:root:/root:/bin/bash",
+    "net_eiointc_claim": "\u001b[m\u001b[37m[ 76.025961 0:5 axplat_loongarch64_qemu_virt::irq:131] \u001b[90mEIOINTC IRQ 65\u001b[m",
+    "net_handler": "\u001b[m\u001b[37m[ 76.042638 0:5 driver::virtio:122] \u001b[36mcommon_virtio_irq_handler: irq=65\u001b[m",
+    "net_handler_registered": "\u001b[m\u001b[37m[ 76.060418 0:5 driver::virtio:125] \u001b[36mcommon_virtio_irq_handler: found 1 handlers for irq=65\u001b[m",
+    "network_roundtrip": "\u001b[m\u001b[37m[ 76.967099 2:8 task::run_queue:852] \u001b[MSIX_NET_PULSE_MSIX_RESPONSE"
+  },
+  "faults": [],
+  "server": {
+    "listening": "127.0.0.1:43378",
+    "received": "PULSE_MSIX_REQUEST\n",
+    "responded": true,
+    "peer": [
+      "127.0.0.1",
+      40987
+    ]
+  },
+  "log": "/tmp/pulse270-runtime/trace-la/guest.log",
+  "log_bytes": 4105702,
+  "console_tail": null
+}
