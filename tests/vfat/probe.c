@@ -3,7 +3,7 @@ typedef unsigned long usize;
 
 enum {
     ioctl = 29, unlinkat = 35, openat = 56, close = 57, read = 63,
-    write = 64, pread64 = 67, fsync = 82, exit_group = 94, munmap = 215,
+    write = 64, pread64 = 67, sync = 81, fsync = 82, exit_group = 94, munmap = 215,
     mmap = 222, renameat2 = 276, AT_FDCWD = -100, O_RDWR = 2, O_CREAT = 64,
     LOOP_SET_FD = 0x4c00, LOOP_CLR_FD = 0x4c01,
     PROT_READ = 1, MAP_SHARED = 1, EBUSY = 16, EIO = 5,
@@ -118,10 +118,25 @@ static void fault(char mode)
     if (mode == 'r') {
         expect("read", CALL3(read, fd, page, sizeof(page)), -EIO);
         say("VFAT_READ_EIO\n");
+    } else if (mode == 'w') {
+        long observer = open_file(fixture, O_RDWR);
+        expect("cached write", CALL3(write, fd, page, sizeof(page)), sizeof(page));
+        /* The global sync or a preceding background writeback now consumes the
+           one-shot device fault. Either way, no fsync has run on these fds. */
+        long result = CALL3(sync, 0, 0, 0);
+        if (result != 0) expect("global sync", result, -EIO);
+        long later = open_file(fixture, O_RDWR);
+        expect("fsync after writeback error", CALL3(fsync, fd, 0, 0), -EIO);
+        expect("fsync retry", CALL3(fsync, fd, 0, 0), 0);
+        expect("fsync on earlier open", CALL3(fsync, observer, 0, 0), -EIO);
+        expect("fsync on later open", CALL3(fsync, later, 0, 0), 0);
+        expect("close earlier open", CALL3(close, observer, 0, 0), 0);
+        expect("close later open", CALL3(close, later, 0, 0), 0);
+        say("VFAT_WRITEBACK_EIO\n");
     } else {
         expect("cached write", CALL3(write, fd, page, sizeof(page)), sizeof(page));
         expect("fsync", CALL3(fsync, fd, 0, 0), -EIO);
-        say(mode == 'w' ? "VFAT_WRITEBACK_EIO\n" : "VFAT_FLUSH_EIO\n");
+        say("VFAT_FLUSH_EIO\n");
     }
     expect("close", CALL3(close, fd, 0, 0), 0);
     long root = open_file("/etc/passwd", 0);

@@ -207,12 +207,74 @@ pub use handle::*;
 
 struct InodeAccessState {
     count: AtomicIsize,
+    writeback_error: SpinNoPreempt<WritebackError>,
+}
+
+struct WritebackError {
+    sequence: u64,
+    latest: Option<VfsError>,
+}
+
+impl WritebackError {
+    fn record(&mut self, error: VfsError) {
+        self.sequence = self.sequence.wrapping_add(1);
+        self.latest = Some(error);
+    }
+}
+
+/// Independent opens sample the inode's error sequence. Duplicated descriptors
+/// share a File and therefore acknowledge the same sequence.
+struct WritebackErrorCursor {
+    inode: Arc<InodeAccessState>,
+    seen: AtomicU64,
+}
+
+impl WritebackErrorCursor {
+    fn for_open(location: &Location, flags: FileFlags) -> Option<Self> {
+        if flags.contains(FileFlags::PATH)
+            || location.node_type() != NodeType::RegularFile
+            || !node_allows_page_cache(location.flags())
+            || location.filesystem().name() == "tmpfs"
+        {
+            return None;
+        }
+        let inode = inode_access_state(location);
+        let seen = AtomicU64::new(inode.writeback_error.lock().sequence);
+        Some(Self { inode, seen })
+    }
+
+    // Called under the file cache's exclusive I/O lock, before a subsequent
+    // checkpoint can publish another failure.
+    fn check_and_advance(&self, result: VfsResult<()>) -> Option<VfsError> {
+        let mut errors = self.inode.writeback_error.lock();
+        if let Err(error) = result {
+            errors.record(error);
+        }
+        if self.seen.swap(errors.sequence, Ordering::Relaxed) != errors.sequence {
+            errors.latest
+        } else {
+            None
+        }
+    }
+}
+
+fn record_checkpoint_error(key: FileCacheKey, error: VfsError) {
+    let inode = INODE_ACCESS_STATES[file_state_registry_shard(key)]
+        .lock()
+        .get(&key);
+    if let Some(inode) = inode {
+        inode.writeback_error.lock().record(error);
+    }
 }
 
 impl InodeAccessState {
     const fn new() -> Self {
         Self {
             count: AtomicIsize::new(0),
+            writeback_error: SpinNoPreempt::new(WritebackError {
+                sequence: 0,
+                latest: None,
+            }),
         }
     }
 

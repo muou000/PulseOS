@@ -1803,7 +1803,11 @@ impl CachedFileShared {
         Ok(())
     }
 
-    async fn sync_dirty_pages_async(&self, file: &FileNode, data_only: bool) -> VfsResult<()> {
+    pub(super) async fn sync_dirty_pages_async(
+        &self,
+        file: &FileNode,
+        data_only: bool,
+    ) -> VfsResult<()> {
         self.sync_dirty_range_with_backend(file, None, data_only).await
     }
 
@@ -2187,16 +2191,21 @@ async fn flush_file_cache_state(state: Arc<CachedFileShared>) -> Option<(u64, Vf
         if state.is_unlinked() {
             None
         } else {
-            Some(
-                async {
-                    let cached_size = state.size();
-                    if file.len().await? != cached_size {
-                        file.set_len(cached_size).await?;
-                    }
-                    state.flush_dirty_pages_async(file).await
+            let result = async {
+                let cached_size = state.size();
+                if file.len().await? != cached_size {
+                    file.set_len(cached_size).await?;
                 }
-                .await,
-            )
+                state.flush_dirty_pages_async(file).await
+            }
+            .await;
+            if let Err(error) = result {
+                record_checkpoint_error(
+                    FileCacheKey { fs_id: state.fs_id, inode },
+                    error,
+                );
+            }
+            Some(result)
         }
     };
     let result = result?;
@@ -2656,7 +2665,7 @@ impl MappedPageIdentity {
 #[derive(Clone)]
 pub struct CachedFile {
     inner: Location,
-    shared: Arc<CachedFileShared>,
+    pub(super) shared: Arc<CachedFileShared>,
     in_memory: bool,
     read_hint: Arc<AtomicU64>,
 }

@@ -26,8 +26,10 @@ def faults(scratch, boot):
     temp = scratch.parent
 
     def shell(mode):
-        return (f"mkdir -p /tmp/vfat-probe && mount -t vfat /dev/vdb /tmp/vfat-probe && "
-                f"printf {mode} | /vfat-probe && umount /tmp/vfat-probe")
+        probe = (f"mkdir -p /tmp/vfat-probe && mount -t vfat /dev/vdb /tmp/vfat-probe && "
+                 f"printf {mode} | /vfat-probe")
+        # This disposable guest exits with its flush fault still active.
+        return probe if mode == "f" else probe + " && umount /tmp/vfat-probe"
 
     boot(str(scratch), shell("s"), "VFAT_PROBE_PASS", "seed")
     # The first guest created a 4 KiB file full of Z on a fresh volume.
@@ -43,9 +45,12 @@ def faults(scratch, boot):
         disk = temp / f"{tag}.img"
         shutil.copyfile(scratch, disk)
         config = temp / f"{tag}.conf"
-        rule = f'[inject-error]\nevent = "{event}"\niotype = "{operation}"\nerrno = "5"\nonce = "on"\n'
-        if operation != "flush":
-            rule += f'sector = "{start // 512}"\n'
+        rule = f'[inject-error]\nevent = "{event}"\niotype = "{operation}"\nerrno = "5"\n'
+        if operation == "flush":
+            # A background volume checkpoint can reach the device before fsync.
+            rule += 'once = "off"\n'
+        else:
+            rule += f'once = "on"\nsector = "{start // 512}"\n'
         config.write_text(rule)
         boot(f"blkdebug:{config}:{disk}", shell(tag[0]), f"VFAT_{tag.upper()}_EIO", tag)
     boot(str(scratch), shell("b"), "VFAT_BUSY_FD_AND_MMAP_OK", "busy")
