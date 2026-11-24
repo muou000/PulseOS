@@ -44,6 +44,7 @@ def run_benchmarks(kernel: Path, image: Path, timeout: float = 300) -> dict:
         "-m", "8G",
         "-nographic",
         "-smp", "8",
+        "-cpu", "max",
         "-bios", "default",
         "-drive", f"file={image},if=none,format=raw,id=x0,snapshot=on",
         "-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",

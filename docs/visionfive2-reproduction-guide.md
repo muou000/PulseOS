@@ -212,12 +212,13 @@ Windows/WSL 环境更适合在 Windows 中使用 Rufus、balenaEtcher 或同类 
 
 ### 5.3 仓库脚本生成的最小镜像
 
-以下命令已经在当前源码验证，生成的 ext4 包含 `1.1.1.1` 和 `8.8.8.8`：
+VisionFive 2 使用 RV64GC、无 RVV 的 Ubuntu 24.04.5 测试镜像。运行 `make img ARCH=riscv64 RISCV_PLATFORM=visionfive2` 可生成 `disk-vf2.img`。需要 Alpine 最小镜像时，使用以下命令：
 
 ```bash
-OUTPUT_DIR=target/vf2-rootfs IMG_SIZE=128M ./scripts/build_img.sh riscv64
+RISCV_PLATFORM=visionfive2 ROOTFS_VARIANT=base OUTPUT_DIR=target/vf2-rootfs IMG_SIZE=128M \
+  ./scripts/build_img.sh --fetch riscv64
 debugfs -R 'cat /etc/resolv.conf' \
-  target/vf2-rootfs/rootfs-riscv64.img
+  target/vf2-rootfs/rootfs-visionfive2.img
 ```
 
 但当前 `rootfs/base` 底包生成的最小镜像没有 `/usr/bin/git`。
