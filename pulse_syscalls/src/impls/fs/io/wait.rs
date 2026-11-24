@@ -3,7 +3,7 @@ use core::time::Duration;
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{POLLERR, POLLNVAL, pollfd};
-use pulse_core::{fd_table::FdObject, task::Thread};
+use process::{fd::FdObject, Thread};
 
 use super::requested_poll_revents;
 use crate::impls::fs::common::get_fd_objects;

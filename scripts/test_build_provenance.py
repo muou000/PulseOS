@@ -17,6 +17,9 @@ class BuildProvenanceTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         (self.repo / "src").mkdir()
         (self.repo / "src/main.rs").write_text("fn main() {}\n")
+        process = self.repo / "modules/process/src"
+        process.mkdir(parents=True)
+        (process / "lib.rs").write_text("pub mod task;\n")
         (self.repo / "Cargo.toml").write_text("[package]\nname='fixture'\n")
         (self.repo / ".gitignore").write_text(".axconfig.toml\n*.elf\n*.bin\n*.json\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
@@ -44,6 +47,8 @@ class BuildProvenanceTests(unittest.TestCase):
         self.start()
         saved = self.finish()
         self.assertFalse(saved["source"]["git_worktree_dirty"])
+        self.assertIn("modules", saved["source"]["roots"])
+        self.assertNotIn("pulse_core", saved["source"]["roots"])
         self.assertEqual(saved["configuration"]["values"]["features"], "qemu bpf-trace")
         self.assertEqual(saved["configuration"]["axconfig_text"], self.config.read_text())
         self.assertEqual(provenance.verify_manifest(self.sidecar, self.elf, self.binary), saved)
@@ -55,7 +60,7 @@ class BuildProvenanceTests(unittest.TestCase):
             provenance.verify_manifest(self.sidecar, self.elf, self.binary)
 
     def test_refuses_mid_build_source_or_configuration_change(self):
-        for relative in ("src/main.rs", ".axconfig.toml"):
+        for relative in ("src/main.rs", "modules/process/src/lib.rs", ".axconfig.toml"):
             with self.subTest(relative=relative):
                 self.start()
                 with (self.repo / relative).open("a") as output:

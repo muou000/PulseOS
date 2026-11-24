@@ -1,8 +1,8 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::*;
-use pulse_core::{
-    fd_table::{FdEntry, FdFlags, FdObject},
-    task::with_current_process,
+use process::{
+    fd::{FdEntry, FdFlags, FdObject},
+    with_current_process,
 };
 
 pub(crate) fn get_fd_entry(fd: usize) -> Result<FdEntry, LinuxError> {

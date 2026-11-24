@@ -8,7 +8,7 @@ use axerrno::LinuxError;
 use fs::OpenOptions;
 use vfs::{MetadataUpdate, NodePermission, NodeType, VfsError, path::Path};
 use linux_raw_sys::general::*;
-use pulse_core::fd_table::open_result_to_entry;
+use process::fd::open_result_to_entry;
 
 use crate::impls::{
     fs::common::{context_for_dirfd, insert_fd_entry, open_fd_flags, resolve_location_at_ptr},

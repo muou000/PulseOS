@@ -5,10 +5,10 @@
 //! page-table and address-space guards never survive a file operation.
 
 use axerrno::LinuxError;
-use pulse_core::fd_table::{FdObject, FileObject};
+use process::fd::{FdObject, FileObject};
 
 use super::WriteOffset;
-use pulse_core::mm::{PinnedUserBuffers, UserBufferCursor};
+use process::uaccess::{PinnedUserBuffers, UserBufferCursor};
 
 use crate::{
     validation::io::{UserIoSegment, validate_direct_io, validate_user_io_segments},

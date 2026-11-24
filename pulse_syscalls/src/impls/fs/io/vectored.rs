@@ -5,7 +5,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
@@ -23,7 +23,7 @@ pub fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> isize {
     }
     let _tty_write_transaction = (segments.iter().any(|segment| segment.len != 0)
         && object.is_tty_output())
-    .then(pulse_core::fd_table::lock_tty_write_transaction);
+    .then(process::fd::lock_tty_write_transaction);
     let mut fallback_buf = None;
     #[cfg(feature = "bpf-trace")]
     let mut marker_scanner = OutputMarkerScanner::new(fd);
@@ -47,7 +47,7 @@ pub fn sys_readv(fd: usize, iov: usize, iovcnt: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
@@ -141,7 +141,7 @@ pub fn sys_preadv(fd: usize, iov: usize, iovcnt: usize, pos_l: usize, pos_h: usi
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
@@ -287,7 +287,7 @@ pub fn sys_pwritev(fd: usize, iov: usize, iovcnt: usize, pos_l: usize, pos_h: us
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;

@@ -7,7 +7,7 @@ use core::sync::atomic::Ordering;
 use axerrno::LinuxError;
 use kernel_log::*;
 use super::get_socket;
-use pulse_core::net::SocketInner;
+use process::socket::SocketInner;
 
 use crate::impls::utils::{read_user_value, write_user_value};
 
@@ -291,7 +291,7 @@ pub fn sys_getsockopt(
                 let to_copy = core::cmp::min(len as usize, 104); // Typical size of tcp_info
                 let buf = [0u8; 104];
                 let res = crate::impls::utils::with_process(|process| {
-                    pulse_core::task::uaccess::write_user_bytes(process, optval, &buf[..to_copy])
+                    process::uaccess::write_user_bytes(process, optval, &buf[..to_copy])
                 });
                 if res.is_err() {
                     return -LinuxError::EFAULT.code() as isize;
@@ -312,7 +312,7 @@ pub fn sys_getsockopt(
                 };
                 let to_copy = core::cmp::min(len as usize, val.len());
                 let res = crate::impls::utils::with_process(|process| {
-                    pulse_core::task::uaccess::write_user_bytes(
+                    process::uaccess::write_user_bytes(
                         process,
                         optval,
                         val.as_bytes()[..to_copy].as_ref(),

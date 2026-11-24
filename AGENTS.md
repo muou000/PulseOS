@@ -11,7 +11,6 @@
   - `configs/`：内核及平台构建配置文件（如 `defconfig.toml`）。
   - `platforms/`：平台适配实现与 `axplat` 统一抽象层（RISC-V virt, VisionFive 2, LoongArch virt, LS2K1000）。
   - `modules/process/`：用户进程与线程生命周期、用户内存访问、FD、socket、io_uring 执行和 trap。
-  - `pulse_core/`：为启动代码和系统调用保留旧接口的临时重导出入口。
   - `pulse_syscalls/`：Linux 兼容系统调用实现与分发。
   - `crates/`：独立的外部支持库或待解耦 crates（如 `eevdf-scheduler`, `ext4plus`, `smoltcp`, `virtio-drivers` 等）。
   - `scripts/`：根 Makefile 构建支撑（`scripts/make/`）与镜像辅助脚本。
@@ -45,7 +44,7 @@ qemu-system-riscv64 -machine virt -cpu max -kernel kernel-rv -m 8G -nographic -s
 ### LoongArch64
 
 ```bash
-qemu-system-loongarch64 -machine virt -kernel kernel-la -m 8G -nographic -smp 8 -drive file=disk.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
+qemu-system-loongarch64 -machine virt -kernel kernel-la -m 8G -nographic -smp 8 -drive file=disk-la.img,if=none,format=raw,id=x0,snapshot=on -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
 ```
 
 ## 任务执行约定

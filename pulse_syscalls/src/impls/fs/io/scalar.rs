@@ -19,13 +19,13 @@ pub fn sys_read(fd: usize, buf: usize, count: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
     if let Some(pipe) = object
         .as_any()
-        .downcast_ref::<pulse_core::fd_table::PipeObject>()
+        .downcast_ref::<process::fd::PipeObject>()
     {
         if buf % 4096 == 0
             && count >= 65536
@@ -108,14 +108,14 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
     let sigpipe_writer = is_sigpipe_writer(object.as_ref());
     if let Some(pipe) = object
         .as_any()
-        .downcast_ref::<pulse_core::fd_table::PipeObject>()
+        .downcast_ref::<process::fd::PipeObject>()
     {
         if buf % 4096 == 0
             && count >= 65536
@@ -144,7 +144,7 @@ pub fn sys_write(fd: usize, buf: usize, count: usize) -> isize {
 
     let _tty_write_transaction = object
         .is_tty_output()
-        .then(pulse_core::fd_table::lock_tty_write_transaction);
+        .then(process::fd::lock_tty_write_transaction);
     let mut fallback_buf = None;
     #[cfg(feature = "bpf-trace")]
     let mut marker_scanner = OutputMarkerScanner::new(fd);
@@ -184,7 +184,7 @@ pub fn sys_pread64(fd: usize, buf: usize, count: usize, offset: usize) -> isize 
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
@@ -268,7 +268,7 @@ pub fn sys_pwrite64(fd: usize, buf: usize, count: usize, offset: usize) -> isize
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;

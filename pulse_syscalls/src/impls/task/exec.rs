@@ -2,7 +2,7 @@ use alloc::{string::ToString, vec::Vec};
 
 use axerrno::LinuxError;
 use hal::context::TrapFrame;
-use pulse_core::task::current_thread;
+use process::current_thread;
 
 use super::common::{read_user_cstring, read_user_string_array};
 

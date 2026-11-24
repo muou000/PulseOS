@@ -27,7 +27,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -82,7 +82,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         shmflg
     );
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -142,11 +142,11 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
         } else {
             // Let the kernel choose an address.
             let limit = memory_addr::VirtAddrRange::from_start_size(
-                VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
-                pulse_core::config::USER_SPACE_SIZE,
+                VirtAddr::from(config::user::USER_SPACE_BASE),
+                config::user::USER_SPACE_SIZE,
             );
             match aspace.find_free_area(
-                VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
+                VirtAddr::from(config::user::USER_SPACE_BASE),
                 length,
                 limit,
             ) {
@@ -201,7 +201,7 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
 pub fn sys_shmdt(shmaddr: usize) -> isize {
     kernel_log::debug!("sys_shmdt: shmaddr={:#x}", shmaddr);
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -238,7 +238,7 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
 pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
     kernel_log::debug!("sys_shmctl: shmid={}, cmd={}, buf={:#x}", shmid, cmd, buf);
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -255,7 +255,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 return -LinuxError::EFAULT.code() as isize;
             }
             let info = shm::IpcInfo::new();
-            return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &info) {
+            return match process::uaccess::write_user_value(proc.as_ref(), buf, &info) {
                 Ok(()) => {
                     let manager = SHM_MANAGER.lock();
                     manager.get_highest_index() as isize
@@ -282,7 +282,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 swap_attempts: 0,
                 swap_successes: 0,
             };
-            return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &info) {
+            return match process::uaccess::write_user_value(proc.as_ref(), buf, &info) {
                 Ok(()) => {
                     let manager = SHM_MANAGER.lock();
                     manager.get_highest_index() as isize
@@ -307,7 +307,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
             }
             let ds = inner.stat();
             drop(inner);
-            return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
+            return match process::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
                 Ok(()) => actual_shmid as isize,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             };
@@ -341,7 +341,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
             }
             let ds = inner.stat();
             drop(inner);
-            match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
+            match process::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
                 Ok(()) => 0,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             }
@@ -355,7 +355,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 return -LinuxError::EFAULT.code() as isize;
             }
             let new_ds: ShmidDs =
-                match pulse_core::task::uaccess::read_user_value(proc.as_ref(), buf) {
+                match process::uaccess::read_user_value(proc.as_ref(), buf) {
                     Ok(v) => v,
                     Err(_) => return -LinuxError::EFAULT.code() as isize,
                 };

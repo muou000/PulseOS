@@ -14,7 +14,7 @@ pub(super) fn query_layout(address: usize, size: usize) -> Result<usize, LinuxEr
         return Err(LinuxError::EINVAL);
     }
     let end = address.checked_add(size).ok_or(LinuxError::EINVAL)?;
-    let process = pulse_core::task::current_process()?;
+    let process = process::current_process()?;
     process
         .validate_user_range(address, size)
         .map_err(|_| LinuxError::EFAULT)?;

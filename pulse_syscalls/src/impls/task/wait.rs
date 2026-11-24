@@ -3,7 +3,7 @@ use linux_raw_sys::general::{
     CLD_CONTINUED, CLD_STOPPED, P_ALL, P_PGID, P_PID, SIGCONT, WCONTINUED, WEXITED, WNOHANG,
     WUNTRACED,
 };
-use pulse_core::task::{Process, WaitidStatusType, current_thread, signal_info_for_child};
+use process::{Process, WaitidStatusType, current_thread, signal_info_for_child};
 
 use super::common::write_user_i32;
 use crate::validation::wait::{
@@ -116,7 +116,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: i32) -> isize
         Ok(None) => {
             if infop != 0 {
                 let raw = pulse_user_abi::task::SignalInfo::new(0, 0);
-                if pulse_core::task::uaccess::write_user_value(&process, infop, &raw).is_err() {
+                if process::uaccess::write_user_value(&process, infop, &raw).is_err() {
                     return -LinuxError::EFAULT.code() as isize;
                 }
             }

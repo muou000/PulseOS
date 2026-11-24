@@ -16,7 +16,8 @@ objcopy 完成后，`finish` 再次检查源文件与配置未变化，记录最
 `make clean` 会清除这些生成文件。
 
 受管源目录是 `.cargo/`、`api/`、`crates/`、`modules/`、`platforms/`、
-`pulse_core/`、`pulse_syscalls/`、`src/`、`configs/`、`scripts/make/`；
+`pulse_syscalls/`、`src/`、`configs/` 和 `scripts/make/`。
+进程、SysV IPC、ELF 装载和 BPF 实现均由 `modules/` 覆盖。
 根 `Cargo.toml`、`Cargo.lock`、`Makefile`、存在时的 `rust-toolchain[.toml]`
 和 provenance 脚本自身也计入。文件树摘要包含未跟踪及被 Git 忽略的嵌入文件，
 避免漏掉 `.incbin` / `include_bytes!` 输入；排除 `.git`、`target`、Python 缓存目录。

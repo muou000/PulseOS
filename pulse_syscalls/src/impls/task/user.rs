@@ -2,7 +2,7 @@ use axerrno::LinuxError;
 use linux_raw_sys::general::{
     _LINUX_CAPABILITY_VERSION_1, _LINUX_CAPABILITY_VERSION_2, _LINUX_CAPABILITY_VERSION_3,
 };
-use pulse_core::task::current_process;
+use process::current_process;
 
 use crate::validation::credential::{parse_id_arg, parse_optional_id_arg};
 
@@ -282,7 +282,7 @@ pub fn sys_getgroups(size: isize, list: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
     if let Err(e) =
-        pulse_core::task::uaccess::write_user_value_array(process.as_ref(), list, &groups)
+        process::uaccess::write_user_value_array(process.as_ref(), list, &groups)
     {
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
@@ -307,7 +307,7 @@ pub fn sys_setgroups(size: usize, list: usize) -> isize {
         if list == 0 {
             return -LinuxError::EFAULT.code() as isize;
         }
-        match pulse_core::task::uaccess::read_user_value_array_sequential::<u32>(
+        match process::uaccess::read_user_value_array_sequential::<u32>(
             process.as_ref(),
             list,
             size,
@@ -410,7 +410,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
     };
 
     let mut header: CapUserHeader =
-        match pulse_core::task::uaccess::read_user_value(process.as_ref(), hdrp) {
+        match process::uaccess::read_user_value(process.as_ref(), hdrp) {
             Ok(h) => h,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -423,7 +423,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
         && header.version != _LINUX_CAPABILITY_VERSION_3
     {
         header.version = _LINUX_CAPABILITY_VERSION_3;
-        let _ = pulse_core::task::uaccess::write_user_value(process.as_ref(), hdrp, &header);
+        let _ = process::uaccess::write_user_value(process.as_ref(), hdrp, &header);
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -450,7 +450,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
         inheritable: cap_i as u32,
     };
 
-    if let Err(e) = pulse_core::task::uaccess::write_user_value(process.as_ref(), datap, &data0) {
+    if let Err(e) = process::uaccess::write_user_value(process.as_ref(), datap, &data0) {
         let errno: LinuxError = e.into();
         return -errno.code() as isize;
     }
@@ -463,7 +463,7 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> isize {
             permitted: (cap_p >> 32) as u32,
             inheritable: (cap_i >> 32) as u32,
         };
-        if let Err(e) = pulse_core::task::uaccess::write_user_value(
+        if let Err(e) = process::uaccess::write_user_value(
             process.as_ref(),
             datap + core::mem::size_of::<CapUserData>(),
             &data1,
@@ -487,7 +487,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
     };
 
     let mut header: CapUserHeader =
-        match pulse_core::task::uaccess::read_user_value(process.as_ref(), hdrp) {
+        match process::uaccess::read_user_value(process.as_ref(), hdrp) {
             Ok(h) => h,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -500,7 +500,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
         && header.version != _LINUX_CAPABILITY_VERSION_3
     {
         header.version = _LINUX_CAPABILITY_VERSION_3;
-        let _ = pulse_core::task::uaccess::write_user_value(process.as_ref(), hdrp, &header);
+        let _ = process::uaccess::write_user_value(process.as_ref(), hdrp, &header);
         return -LinuxError::EINVAL.code() as isize;
     }
 
@@ -517,7 +517,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
     }
 
     let data0: CapUserData =
-        match pulse_core::task::uaccess::read_user_value(process.as_ref(), datap) {
+        match process::uaccess::read_user_value(process.as_ref(), datap) {
             Ok(d) => d,
             Err(e) => {
                 let errno: LinuxError = e.into();
@@ -534,7 +534,7 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> isize {
     if header.version == _LINUX_CAPABILITY_VERSION_2
         || header.version == _LINUX_CAPABILITY_VERSION_3
     {
-        let data1: CapUserData = match pulse_core::task::uaccess::read_user_value(
+        let data1: CapUserData = match process::uaccess::read_user_value(
             process.as_ref(),
             datap + core::mem::size_of::<CapUserData>(),
         ) {

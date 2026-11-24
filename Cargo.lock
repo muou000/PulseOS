@@ -16,7 +16,7 @@ dependencies = [
  "hal",
  "kernel_log",
  "net",
- "pulse_core",
+ "process",
  "pulse_syscalls",
  "runtime",
  "starry-vdso",
@@ -2205,16 +2205,6 @@ name = "pulse_bpf_schema"
 version = "0.1.0"
 
 [[package]]
-name = "pulse_core"
-version = "0.1.0"
-dependencies = [
- "config",
- "elf_loader",
- "mm",
- "process",
-]
-
-[[package]]
 name = "pulse_syscalls"
 version = "0.1.0"
 dependencies = [
@@ -2239,8 +2229,8 @@ dependencies = [
  "mm",
  "net",
  "poll",
+ "process",
  "pulse_bpf_schema",
- "pulse_core",
  "pulse_user_abi",
  "rand_core 0.10.1",
  "rand_pcg",

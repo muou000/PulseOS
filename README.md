@@ -61,7 +61,6 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 │   ├── axplat-riscv64-visionfive2
 │   ├── axplat-loongarch64-qemu-virt
 │   └── axplat-loongarch64-ls2k1000
-├── pulse_core                 # 启动代码和系统调用使用的临时兼容入口
 ├── pulse_syscalls             # Linux 兼容系统调用实现与分派
 │   └── src
 │       ├── handler.rs         # 系统调用统一入口

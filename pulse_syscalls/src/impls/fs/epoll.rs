@@ -10,7 +10,7 @@ use linux_raw_sys::general::{
     epoll_event, EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLL_CLOEXEC, EPOLL_CTL_ADD,
     EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLET, EPOLLONESHOT, EPOLLRDHUP,
 };
-use pulse_core::fd_table::{
+use process::fd::{
     EpollObject, EpollRegistration, EventFdObject, FdEntry, FdFlags, FdObject, PidfdObject,
     PipeObject, PollRegistration, SignalFdObject, StdinObject, StdoutObject, TimerFdObject,
 };
@@ -104,12 +104,12 @@ pub fn sys_epoll_ctl(
         || target_obj.as_any().is::<EventFdObject>()
         || target_obj.as_any().is::<SignalFdObject>()
         || target_obj.as_any().is::<TimerFdObject>()
-        || target_obj.as_any().is::<pulse_core::net::Socket>()
-        || target_obj.as_any().is::<pulse_core::io_uring::IoUringObject>()
-        || target_obj.as_any().is::<pulse_core::bpf::PerfEventObject>()
+        || target_obj.as_any().is::<process::socket::Socket>()
+        || target_obj.as_any().is::<process::io_uring::IoUringObject>()
+        || target_obj.as_any().is::<process::bpf::PerfEventObject>()
         || target_obj
             .as_any()
-            .downcast_ref::<pulse_core::bpf::BpfMapObject>()
+            .downcast_ref::<process::bpf::BpfMapObject>()
             .is_some_and(|m| m.is_ringbuf());
 
     if !is_pollable {
@@ -309,7 +309,7 @@ impl Future for EpollFuture {
             return Poll::Ready(Ok(ready_list));
         }
 
-        let thread = pulse_core::task::current_thread().ok();
+        let thread = process::current_thread().ok();
         if let Some(thread) = thread.as_ref() {
             if thread.has_pending_signal() {
                 return Poll::Ready(Err(LinuxError::EINTR));
@@ -375,7 +375,7 @@ fn sys_epoll_pwait_inner(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
@@ -390,7 +390,7 @@ fn sys_epoll_pwait_inner(
     } else {
         None
     };
-    let _mask_guard = pulse_core::task::SignalMaskGuard::install(thread.clone(), temporary_mask);
+    let _mask_guard = process::SignalMaskGuard::install(thread.clone(), temporary_mask);
 
     let epoll_entry = match get_fd_entry(epfd) {
         Ok(entry) => entry,

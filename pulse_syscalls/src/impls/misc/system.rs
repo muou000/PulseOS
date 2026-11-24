@@ -66,7 +66,7 @@ pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> isize
         arg
     );
 
-    let process = match pulse_core::task::current_process() {
+    let process = match ::process::current_process() {
         Ok(process) => process,
         Err(error) => return -error.code() as isize,
     };
@@ -176,7 +176,7 @@ pub fn sys_get_mempolicy(
         }
     };
 
-    let process = match pulse_core::task::current_process() {
+    let process = match ::process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -251,7 +251,7 @@ pub fn sys_uname(buf: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let process = match pulse_core::task::current_process() {
+    let process = match ::process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -290,7 +290,7 @@ pub fn sys_uname(buf: usize) -> isize {
 pub fn sys_sethostname(name_addr: usize, len: usize) -> isize {
     kernel_log::debug!("sys_sethostname: name_addr={:#x}, len={}", name_addr, len);
 
-    let process = match pulse_core::task::current_process() {
+    let process = match ::process::current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
@@ -371,7 +371,7 @@ pub fn sys_getrusage(who: i32, addr: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let process = match pulse_core::task::current_process() {
+    let process = match ::process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -407,7 +407,7 @@ pub fn sys_getrusage(who: i32, addr: usize) -> isize {
 }
 
 pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usize) -> isize {
-    let process = match pulse_core::task::current_process() {
+    let process = match ::process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -440,7 +440,7 @@ pub fn sys_prlimit64(pid: i32, resource: usize, new_limit: usize, old_limit: usi
         if let Err(e) = validate_nofile_ceiling(
             resource,
             new_rlim.rlim_max,
-            pulse_core::fd_table::FD_LIMIT as u64,
+            ::process::fd::FD_LIMIT as u64,
         ) {
             return -e.code() as isize;
         }
@@ -488,7 +488,7 @@ pub fn sys_getrandom(buf: usize, buflen: usize, flags: usize) -> isize {
         Ok(buf) => buf,
         Err(e) => return -e.code() as isize,
     };
-    match pulse_core::task::with_current_process(|process| process.write_user_bytes(buf, &tmp)) {
+    match ::process::with_current_process(|process| process.write_user_bytes(buf, &tmp)) {
         Ok(Ok(())) => tmp.len() as isize,
         Ok(Err(_)) => -LinuxError::EFAULT.code() as isize,
         Err(e) => -e.code() as isize,
@@ -522,7 +522,7 @@ pub fn sys_sysinfo(info: usize) -> isize {
         mem_unit: 1,
         _f: linux_raw_sys::system::__IncompleteArrayField::new(),
     };
-    match pulse_core::task::with_current_process(|process| {
+    match ::process::with_current_process(|process| {
         uaccess::write_user_value(process, info, &sysinfo)
     }) {
         Ok(Ok(())) => 0,
@@ -564,7 +564,7 @@ pub fn sys_syslog(action: usize, bufp: usize, len: usize) -> isize {
                 Err(e) => return -e.code() as isize,
             };
             out.copy_from_slice(&KMSG_PLACEHOLDER[..read_len]);
-            match pulse_core::task::with_current_process(|process| {
+            match ::process::with_current_process(|process| {
                 uaccess::write_user_bytes(process, bufp, &out)
             }) {
                 Ok(Ok(())) => read_len as isize,
@@ -618,7 +618,7 @@ pub fn sys_riscv_hwprobe(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let res = pulse_core::task::with_current_process(|process| {
+    let res = ::process::with_current_process(|process| {
         let mut selected_cpus = hal::online_cpu_mask();
         if cpus_addr != 0 && cpusetsize != 0 {
             let mut mask = [0u8; size_of::<usize>()];

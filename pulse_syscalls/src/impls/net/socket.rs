@@ -7,9 +7,9 @@ use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{AF_INET, AF_INET6, AF_UNIX, IPPROTO_TCP, IPPROTO_UDP},
 };
-use pulse_core::{
-    fd_table::{FdEntry, FdFlags},
-    net::{
+use process::{
+    fd::{FdEntry, FdFlags},
+    socket::{
         LocalSocket, Socket, SocketInner, adapt_sockaddr_for_domain, bind_unix_socket_with_fs,
         check_unix_bind_available, lookup_unix_path_by_addr, lookup_unix_socket_by_key,
         normalize_connect_addr, resolve_unix_path_sync,

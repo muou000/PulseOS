@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use axerrno::LinuxError;
 use io::SeekFrom;
 use linux_raw_sys::general::iovec;
-use pulse_core::fd_table::{FdObject, FileObject};
+use process::fd::{FdObject, FileObject};
 
 use super::{
     MAX_IO_CHUNK, ScratchBuffer, UserWriteSource, is_sigpipe_writer, queue_sigpipe_on_epipe,

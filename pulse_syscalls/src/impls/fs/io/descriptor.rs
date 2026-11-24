@@ -7,7 +7,7 @@ pub fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
@@ -40,7 +40,7 @@ pub fn sys_fdatasync(fd: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
@@ -107,7 +107,7 @@ pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;
@@ -135,7 +135,7 @@ pub fn sys_fsync(fd: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let object = entry.object;

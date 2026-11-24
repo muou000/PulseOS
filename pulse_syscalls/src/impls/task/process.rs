@@ -9,7 +9,7 @@ use linux_raw_sys::{
         PR_SET_PDEATHSIG,
     },
 };
-use pulse_core::task::{
+use process::{
     can_signal, current_process, current_thread, process_by_pid, processes_snapshot,
     queue_signal_to_process_with_info, queue_signal_to_process_with_info_strict,
     queue_signal_to_thread_with_info, queue_signal_to_thread_with_info_strict, Process, SIGRTMIN,
@@ -28,7 +28,7 @@ fn read_user_siginfo(process: &Process, addr: usize) -> Result<SignalInfo, Linux
         return Err(LinuxError::EFAULT);
     }
 
-    pulse_core::task::uaccess::read_user_value(process, addr)
+    process::uaccess::read_user_value(process, addr)
         .map_err(|_| LinuxError::EFAULT)
 }
 
@@ -233,7 +233,7 @@ pub fn sys_tkill(tid: isize, sig: isize) -> isize {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-    let Some(target_thread) = pulse_core::task::thread_by_tid_global(tid as u64) else {
+    let Some(target_thread) = process::thread_by_tid_global(tid as u64) else {
         return -LinuxError::ESRCH.code() as isize;
     };
     let target_proc = target_thread.process_arc();
@@ -264,7 +264,7 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: isize) -> isize {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
-    let Some(target_thread) = pulse_core::task::thread_by_tid_global(tid as u64) else {
+    let Some(target_thread) = process::thread_by_tid_global(tid as u64) else {
         return -LinuxError::ESRCH.code() as isize;
     };
     let target_proc = target_thread.process_arc();
@@ -366,7 +366,7 @@ pub fn sys_rt_tgsigqueueinfo(tgid: isize, tid: isize, sig: isize, info_ptr: usiz
         return -LinuxError::EPERM.code() as isize;
     }
 
-    let Some(target_thread) = pulse_core::task::thread_by_tid_global(tid as u64) else {
+    let Some(target_thread) = process::thread_by_tid_global(tid as u64) else {
         return -LinuxError::ESRCH.code() as isize;
     };
     let target_process = target_thread.process_arc();
@@ -467,10 +467,10 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
             Ok(name) => {
                 let name = if name.len() > 15 { &name[..15] } else { &name };
                 #[cfg(feature = "bpf-trace")]
-                let mapping_transition = pulse_core::bpf::mappings::MutationGuard::task(task::current().id().as_u64());
+                let mapping_transition = process::bpf::mappings::MutationGuard::task(task::current().id().as_u64());
                 task::current().set_name(name);
                 #[cfg(feature = "bpf-trace")]
-                pulse_core::task::emit_current_mapping_metadata("rename", mapping_transition.begin_ns());
+                process::emit_current_mapping_metadata("rename", mapping_transition.begin_ns());
                 0
             }
             Err(e) => e,
@@ -480,7 +480,7 @@ pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: us
             let mut bytes = [0u8; 16];
             let len = core::cmp::min(name.len(), 15);
             bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
-            match pulse_core::task::uaccess::write_user_bytes(&process, arg2, &bytes) {
+            match process::uaccess::write_user_bytes(&process, arg2, &bytes) {
                 Ok(_) => 0,
                 Err(e) => -e.code() as isize,
             }
@@ -536,13 +536,13 @@ pub fn sys_pidfd_open(pid: isize, flags: usize) -> isize {
         return -LinuxError::ESRCH.code() as isize;
     };
 
-    let mut fd_flags = pulse_core::fd_table::FdFlags::CLOEXEC;
+    let mut fd_flags = process::fd::FdFlags::CLOEXEC;
     if (flags & (O_NONBLOCK as usize)) != 0 {
-        fd_flags.insert(pulse_core::fd_table::FdFlags::NONBLOCK);
+        fd_flags.insert(process::fd::FdFlags::NONBLOCK);
     }
 
-    let entry = pulse_core::fd_table::FdEntry::new(
-        alloc::sync::Arc::new(pulse_core::fd_table::PidfdObject::new(pid as u64)),
+    let entry = process::fd::FdEntry::new(
+        alloc::sync::Arc::new(process::fd::PidfdObject::new(pid as u64)),
         fd_flags,
     );
 
@@ -571,7 +571,7 @@ pub fn sys_pidfd_getfd(pidfd: isize, targetfd: isize, flags: usize) -> isize {
     let Some(pidfd_object) = pidfd_entry
         .object
         .as_any()
-        .downcast_ref::<pulse_core::fd_table::PidfdObject>()
+        .downcast_ref::<process::fd::PidfdObject>()
     else {
         return -LinuxError::EBADF.code() as isize;
     };
@@ -587,7 +587,7 @@ pub fn sys_pidfd_getfd(pidfd: isize, targetfd: isize, flags: usize) -> isize {
         Err(_) => return -LinuxError::EBADF.code() as isize,
     };
     let mut fd_flags = target_entry.flags;
-    fd_flags.insert(pulse_core::fd_table::FdFlags::CLOEXEC);
+    fd_flags.insert(process::fd::FdFlags::CLOEXEC);
     match caller.insert_fd_entry(target_entry.duplicate(fd_flags)) {
         Ok(fd) => fd as isize,
         Err(e) => -e.code() as isize,
@@ -669,7 +669,7 @@ pub fn sys_pidfd_send_signal(pidfd: isize, sig: isize, info_ptr: usize, flags: u
     let pidfd_obj = match fd_entry
         .object
         .as_any()
-        .downcast_ref::<pulse_core::fd_table::PidfdObject>()
+        .downcast_ref::<process::fd::PidfdObject>()
     {
         Some(obj) => obj,
         None => return -LinuxError::EBADF.code() as isize,

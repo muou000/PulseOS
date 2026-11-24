@@ -4,9 +4,9 @@ use hal::context::TrapFrame;
 use linux_raw_sys::general::{
     MINSIGSTKSZ, O_CLOEXEC, O_NONBLOCK, SIGSEGV, SS_DISABLE, SS_ONSTACK, sigaction,
 };
-use pulse_core::{
-    fd_table::{FdEntry, FdFlags, SignalFdObject},
-    task::{SigAction, uaccess},
+use process::{
+    fd::{FdEntry, FdFlags, SignalFdObject},
+    SigAction, uaccess,
 };
 use pulse_user_abi::task::{SignalAction, SignalInfo};
 
@@ -38,7 +38,7 @@ pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize:
     if let Err(e) = validate_sigset_size(sigsetsize) {
         return -e.code() as isize;
     }
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
@@ -90,7 +90,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     if let Err(e) = validate_sigset_size(sigsetsize) {
         return -e.code() as isize;
     }
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
@@ -136,7 +136,7 @@ pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize
     // before the user write.
     let old = shared.replace_action(signum, new_action);
     if new_action.is_some() {
-        pulse_core::task::discard_pending_if_ignored(process.as_ref(), signum);
+        process::discard_pending_if_ignored(process.as_ref(), signum);
     }
 
     if oldact != 0 {
@@ -174,7 +174,7 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
@@ -188,7 +188,7 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> isize {
 }
 
 pub fn sys_rt_sigreturn(tf: &mut TrapFrame) -> isize {
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
@@ -202,7 +202,7 @@ pub fn sys_rt_sigreturn(tf: &mut TrapFrame) -> isize {
                 thread.tid(),
                 err
             );
-            let _ = pulse_core::task::force_signal_to_thread(thread.as_ref(), SIGSEGV as usize);
+            let _ = process::force_signal_to_thread(thread.as_ref(), SIGSEGV as usize);
             0
         }
     }
@@ -212,7 +212,7 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> isize {
     if let Err(e) = validate_sigset_size(sigsetsize) {
         return -e.code() as isize;
     }
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
@@ -239,7 +239,7 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, sigsetsize: 
         return -e.code() as isize;
     }
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
@@ -365,7 +365,7 @@ pulse_user_abi::impl_user_abi_struct! {
 pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
     kernel_log::debug!("sys_sigaltstack: ss={:#x}, oss={:#x}", ss, oss);
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -e.code() as isize,
     };
@@ -383,7 +383,7 @@ pub fn sys_sigaltstack(ss: usize, oss: usize) -> isize {
         }
 
         let raw_flags = raw_ss.ss_flags as u32;
-        let altstack = match pulse_core::task::SignalAltStack::from_user_parts(
+        let altstack = match process::SignalAltStack::from_user_parts(
             raw_ss.ss_sp,
             raw_ss.ss_size,
             raw_flags,
@@ -424,7 +424,7 @@ pub fn sys_signalfd4(ufd: isize, mask: usize, sigsetsize: usize, flags: usize) -
         return -e.code() as isize;
     }
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
@@ -503,13 +503,13 @@ mod tests {
 
     #[test]
     fn sigaction_exchange_returns_the_previous_disposition() {
-        let shared = pulse_core::task::SignalShared::new();
+        let shared = process::SignalShared::new();
         let first = SigAction::from_parts(0x1234, SA_RESTART as usize, 0x55);
         let second = SigAction::from_parts(0x5678, SA_NODEFER as usize, 0xaa);
 
         assert_eq!(
             shared.replace_action(10, Some(first)).handler,
-            pulse_core::task::SIG_DFL
+            process::SIG_DFL
         );
         assert_eq!(
             shared.replace_action(10, Some(second)).handler,

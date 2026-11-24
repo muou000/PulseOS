@@ -49,10 +49,10 @@ fn read_futex2_timeout_ns(timeout: usize, clockid: i32) -> Result<Option<u64>, L
 }
 
 fn read_futex2_waiter(
-    process: &pulse_core::task::Process,
+    process: &process::Process,
     addr: usize,
 ) -> Result<ParsedFutex2Waiter, LinuxError> {
-    let waiter: Futex2Waiter = pulse_core::task::uaccess::read_user_value(process, addr)
+    let waiter: Futex2Waiter = process::uaccess::read_user_value(process, addr)
         .map_err(|_| LinuxError::EFAULT)?;
     if waiter.reserved != 0 {
         return Err(LinuxError::EINVAL);
@@ -117,7 +117,7 @@ pub fn sys_futex(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -236,7 +236,7 @@ pub fn sys_futex_waitv(
         Err(e) => return -e.code() as isize,
     };
 
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -263,7 +263,7 @@ pub fn sys_futex_wake(uaddr: usize, mask: usize, nr: isize, flags: u32) -> isize
         Ok(nr) => nr,
         Err(e) => return -e.code() as isize,
     };
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -297,7 +297,7 @@ pub fn sys_futex_wait(
         Ok(timeout) => timeout,
         Err(e) => return -e.code() as isize,
     };
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -322,7 +322,7 @@ pub fn sys_futex_requeue(waiters: usize, flags: u32, nr_wake: isize, nr_requeue:
         Ok(count) => count,
         Err(e) => return -e.code() as isize,
     };
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
