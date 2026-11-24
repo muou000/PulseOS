@@ -3,9 +3,11 @@
 use core::time::Duration;
 
 use axerrno::{LinuxError, LinuxResult};
-use ipc::sem::{
-    self, GETALL, GETNCNT, GETPID, GETVAL, GETZCNT, IPC_RMID, IPC_SET, IPC_STAT, SETALL, SETVAL,
-    SemBuf, SemSet, SemidDs,
+use ipc::{
+    IPC_RMID, IPC_SET, IPC_STAT,
+    sem::{
+        self, GETALL, GETNCNT, GETPID, GETVAL, GETZCNT, SETALL, SETVAL, SemBuf, SemSet, SemidDs,
+    },
 };
 use pulse_core::task::{current_process, current_thread, uaccess};
 

@@ -1,11 +1,13 @@
 //! System V shared memory syscall implementations.
 
-use ::ipc::shm::{
-    self, IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, SHM_INFO, SHM_MANAGER, SHM_RDONLY,
-    SHM_REMAP, SHM_RND, SHM_STAT, ShmidDs,
-};
 use axerrno::LinuxError;
 use axhal::mem::virt_to_phys;
+use ipc::{
+    IPC_CREAT, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT,
+    shm::{
+        self, IPC_INFO, SHM_INFO, SHM_MANAGER, SHM_RDONLY, SHM_REMAP, SHM_RND, SHM_STAT, ShmidDs,
+    },
+};
 use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 
 /// shmget: create or get a shared memory segment.
@@ -24,8 +26,6 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> isize {
     if size == 0 && key != IPC_PRIVATE {
         return -LinuxError::EINVAL.code() as isize;
     }
-
-    const IPC_CREAT: i32 = 0o1000;
 
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,
@@ -94,103 +94,105 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
     let groups = credentials.groups.clone();
     drop(credentials);
 
-    let mut registry = proc.ipc.shared_memory.lock();
-    let manager = SHM_MANAGER.lock();
-    let Some(shm_inner) = manager.get_inner_by_shmid(shmid) else {
-        return -LinuxError::EINVAL.code() as isize;
-    };
-    // Acquire the segment before releasing the manager so the last detach or
-    // IPC_RMID cannot reap it between lookup and attachment.
-    let mut inner = shm_inner.lock();
-    drop(manager);
-
-    // Permission check:
-    let req_mode = if (shmflg as u32) & SHM_RDONLY != 0 {
-        0o400
-    } else {
-        0o600
-    };
-    if !shm::ipc_has_permission(&inner.stat().shm_perm, req_mode, euid, egid, &groups) {
-        return -LinuxError::EACCES.code() as isize;
-    }
-
-    // Allocate physical pages on first attach.
-    let page_addr = match inner.alloc_pages() {
-        Ok(addr) => addr,
-        Err(e) => return -LinuxError::from(e).code() as isize,
-    };
-
-    let length = inner.mapping_size();
-    let mut mapping_flags = inner.mapping_flags;
-    if (shmflg as u32) & SHM_RDONLY != 0 {
-        mapping_flags.remove(axhal::paging::MappingFlags::WRITE);
-    }
-
-    // Determine the virtual address to map at.
-    let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.write();
-    let mut pending_shootdown = None;
-
-    let map_addr = if shmaddr != 0 && (shmflg as u32) & SHM_RND != 0 {
-        // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
-        shmaddr & !(PAGE_SIZE_4K - 1)
-    } else if shmaddr != 0 {
-        if shmaddr & (PAGE_SIZE_4K - 1) != 0 {
+    proc.ipc.with_shared_memory(|registry| {
+        let manager = SHM_MANAGER.lock();
+        let Some(shm_inner) = manager.get_inner_by_shmid(shmid) else {
             return -LinuxError::EINVAL.code() as isize;
+        };
+        // Acquire the segment before releasing the manager so the last detach or
+        // IPC_RMID cannot reap it between lookup and attachment.
+        let mut inner = shm_inner.lock();
+        drop(manager);
+
+        // Permission check:
+        let req_mode = if (shmflg as u32) & SHM_RDONLY != 0 {
+            0o400
+        } else {
+            0o600
+        };
+        if !shm::ipc_has_permission(&inner.stat().shm_perm, req_mode, euid, egid, &groups) {
+            return -LinuxError::EACCES.code() as isize;
         }
-        shmaddr
-    } else {
-        // Let the kernel choose an address.
-        let limit = memory_addr::VirtAddrRange::from_start_size(
-            VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
-            pulse_core::config::USER_SPACE_SIZE,
-        );
-        match aspace.find_free_area(
-            VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
-            length,
-            limit,
-        ) {
-            Some(vaddr) => vaddr.as_usize(),
-            None => {
-                axlog::debug!("sys_shmat: no free area found");
-                return -LinuxError::ENOMEM.code() as isize;
+
+        // Allocate physical pages on first attach.
+        let page_addr = match inner.alloc_pages() {
+            Ok(addr) => addr,
+            Err(e) => return -LinuxError::from(e).code() as isize,
+        };
+
+        let length = inner.mapping_size();
+        let mut mapping_flags = inner.mapping_flags;
+        if (shmflg as u32) & SHM_RDONLY != 0 {
+            mapping_flags.remove(axhal::paging::MappingFlags::WRITE);
+        }
+
+        // Determine the virtual address to map at.
+        let aspace_handle = proc.aspace_handle();
+        let mut aspace = aspace_handle.write();
+        let mut pending_shootdown = None;
+
+        let map_addr = if shmaddr != 0 && (shmflg as u32) & SHM_RND != 0 {
+            // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
+            shmaddr & !(PAGE_SIZE_4K - 1)
+        } else if shmaddr != 0 {
+            if shmaddr & (PAGE_SIZE_4K - 1) != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            shmaddr
+        } else {
+            // Let the kernel choose an address.
+            let limit = memory_addr::VirtAddrRange::from_start_size(
+                VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
+                pulse_core::config::USER_SPACE_SIZE,
+            );
+            match aspace.find_free_area(
+                VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
+                length,
+                limit,
+            ) {
+                Some(vaddr) => vaddr.as_usize(),
+                None => {
+                    axlog::debug!("sys_shmat: no free area found");
+                    return -LinuxError::ENOMEM.code() as isize;
+                }
+            }
+        };
+
+        if (shmflg as u32) & SHM_REMAP != 0 {
+            // Unmap existing mapping at the target address if SHM_REMAP is set.
+            let (unmap_result, shootdown) =
+                aspace.unmap(VirtAddr::from(map_addr), length).into_parts();
+            pending_shootdown = shootdown;
+            if let Err(error) = unmap_result {
+                axlog::warn!("sys_shmat: SHM_REMAP pre-unmap failed: {error:?}");
             }
         }
-    };
 
-    if (shmflg as u32) & SHM_REMAP != 0 {
-        // Unmap existing mapping at the target address if SHM_REMAP is set.
-        let (unmap_result, shootdown) = aspace.unmap(VirtAddr::from(map_addr), length).into_parts();
-        pending_shootdown = shootdown;
-        if let Err(error) = unmap_result {
-            axlog::warn!("sys_shmat: SHM_REMAP pre-unmap failed: {error:?}");
+        // Map the shared physical pages into this process's address space.
+        let paddr = virt_to_phys(page_addr);
+        let map_result = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags);
+        drop(aspace);
+        // Once map_linear succeeds the mapping owns a reference even if a prior
+        // SHM_REMAP invalidation subsequently reports a shootdown error.
+        if map_result.is_ok() {
+            inner.attach_process(pid);
+            registry.insert(VirtAddr::from(map_addr), shm_inner.clone());
         }
-    }
+        drop(inner);
+        if let Some(shootdown) = pending_shootdown
+            && let Err(error) = shootdown.complete_after_unlock()
+        {
+            axlog::error!("sys_shmat: SHM_REMAP TLB shootdown failed: {error:?}");
+            return -LinuxError::EIO.code() as isize;
+        }
+        if let Err(e) = map_result {
+            axlog::debug!("sys_shmat: map_linear failed: {:?}", e);
+            return -LinuxError::from(e).code() as isize;
+        }
 
-    // Map the shared physical pages into this process's address space.
-    let paddr = virt_to_phys(page_addr);
-    let map_result = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags);
-    drop(aspace);
-    // Once map_linear succeeds the mapping owns a reference even if a prior
-    // SHM_REMAP invalidation subsequently reports a shootdown error.
-    if map_result.is_ok() {
-        inner.attach_process(pid);
-        registry.insert(VirtAddr::from(map_addr), shm_inner.clone());
-    }
-    drop(inner);
-    if let Some(shootdown) = pending_shootdown
-        && let Err(error) = shootdown.complete_after_unlock()
-    {
-        axlog::error!("sys_shmat: SHM_REMAP TLB shootdown failed: {error:?}");
-        return -LinuxError::EIO.code() as isize;
-    }
-    if let Err(e) = map_result {
-        axlog::debug!("sys_shmat: map_linear failed: {:?}", e);
-        return -LinuxError::from(e).code() as isize;
-    }
-
-    axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
-    map_addr as isize
+        axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
+        map_addr as isize
+    })
 }
 
 /// shmdt: detach a shared memory segment from the calling process's address space.
@@ -206,25 +208,26 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
     let pid = proc.pid();
 
     let addr = VirtAddr::from(shmaddr);
-    let mut registry = proc.ipc.shared_memory.lock();
-    let Some(segment) = registry.remove(&addr) else {
-        return -LinuxError::EINVAL.code() as isize;
-    };
-    let length = segment.lock().mapping_size();
+    proc.ipc.with_shared_memory(|registry| {
+        let Some(segment) = registry.remove(&addr) else {
+            return -LinuxError::EINVAL.code() as isize;
+        };
+        let length = segment.lock().mapping_size();
 
-    // Unmap the virtual address range.
-    let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.write();
-    let mutation = aspace.unmap(addr, length);
-    drop(aspace);
-    if let Err(e) = mutation.complete_after_unlock() {
-        axlog::warn!("sys_shmdt: unmap or TLB shootdown failed: {:?}", e);
-        registry.insert(addr, segment);
-        return -LinuxError::from(e).code() as isize;
-    }
+        // Unmap the virtual address range.
+        let aspace_handle = proc.aspace_handle();
+        let mut aspace = aspace_handle.write();
+        let mutation = aspace.unmap(addr, length);
+        drop(aspace);
+        if let Err(e) = mutation.complete_after_unlock() {
+            axlog::warn!("sys_shmdt: unmap or TLB shootdown failed: {:?}", e);
+            registry.insert(addr, segment);
+            return -LinuxError::from(e).code() as isize;
+        }
 
-    shm::detach(&segment, pid);
-    0
+        shm::detach(&segment, pid);
+        0
+    })
 }
 
 /// shmctl: shared memory control operations.

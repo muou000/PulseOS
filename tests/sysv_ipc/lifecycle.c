@@ -1,10 +1,14 @@
 /* Run in an RV64 or LA64 guest with assertions enabled. */
+#define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -76,6 +80,45 @@ static void undo_on_exit(void)
     puts("PASS SEM_UNDO on process exit");
 }
 
+static void failed_fork(void)
+{
+    int id = shmget(IPC_PRIVATE, 4096, 0600);
+    assert(id >= 0);
+    void *shared = shmat(id, NULL, 0);
+    assert(shared != (void *)-1);
+    assert(shmctl(id, IPC_RMID, NULL) == 0);
+    /* An invalid parent TID destination fails after the address-space copy. */
+    long child = syscall(SYS_clone, CLONE_PARENT_SETTID | SIGCHLD,
+                         NULL, (int *)1, NULL, NULL);
+    if (child == 0)
+        _exit(1);
+    assert(child == -1 && errno == EFAULT);
+    assert(shmdt(shared) == 0);
+    expect_removed(id);
+    puts("PASS failed fork retained no attachment");
+}
+
+static void vfork_exit(void)
+{
+    int id = shmget(IPC_PRIVATE, 4096, 0600);
+    assert(id >= 0);
+    char *shared = shmat(id, NULL, 0);
+    assert(shared != (void *)-1);
+    assert(shmctl(id, IPC_RMID, NULL) == 0);
+    *shared = 'v';
+    pid_t child = vfork();
+    if (child == 0)
+        _exit(0);
+    assert(child > 0);
+    wait_for_child(child);
+    struct shmid_ds ds;
+    assert(shmctl(id, IPC_STAT, &ds) == 0);
+    assert(*shared == 'v');
+    assert(shmdt(shared) == 0);
+    expect_removed(id);
+    puts("PASS vfork exit preserved parent attachment");
+}
+
 /* The validation patch reserves this address for the first unmap attempt. */
 static void retry_reserved_unmap(void)
 {
@@ -101,9 +144,15 @@ int main(int argc, char **argv)
         retry_reserved_unmap();
         return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "--vfork") == 0) {
+        vfork_exit();
+        return 0;
+    }
     assert(argc == 1);
     last_attachment(1);
     last_attachment(0);
     undo_on_exit();
+    failed_fork();
+    vfork_exit();
     return 0;
 }

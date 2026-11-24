@@ -9,14 +9,9 @@ use axhal::paging::MappingFlags;
 use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 use spin::{Lazy, Mutex};
 
-// IPC constants (from linux-raw-sys / Linux ABI)
-pub const IPC_PRIVATE: i32 = 0;
-pub const IPC_SET: i32 = 1;
-pub const IPC_STAT: i32 = 2;
-pub const IPC_RMID: i32 = 0;
+use crate::{IPC_EXCL, IPC_PRIVATE, IpcPerm};
+
 pub const IPC_INFO: i32 = 3;
-pub const IPC_CREAT: i32 = 0o1000;
-pub const IPC_EXCL: i32 = 0o2000;
 pub const SHM_INFO: i32 = 14;
 pub const SHM_STAT: i32 = 13;
 pub const SHM_RDONLY: u32 = 0o10000;
@@ -120,71 +115,18 @@ pulse_user_abi::impl_user_abi_struct! {
     }
 }
 
-/// Linux-compatible `ipc_perm` structure (C ABI).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct IpcPerm {
-    /// key supplied to shmget
-    pub key: i32,
-    /// effective UID of owner
-    pub uid: u32,
-    /// effective GID of owner
-    pub gid: u32,
-    /// effective UID of creator
-    pub cuid: u32,
-    /// effective GID of creator
-    pub cgid: u32,
-    /// permissions + SHM_DEST and SHM_LOCKED flags
-    pub mode: u16,
-    _pad: [u8; 2],
-    _seq: u16,
-    _pad2: u16,
-    _pad3: u32,
-    _pad4: u32,
-}
-
-pulse_user_abi::impl_user_abi_struct! {
-    for IpcPerm, size = 36 => {
-        key: i32,
-        uid: u32,
-        gid: u32,
-        cuid: u32,
-        cgid: u32,
-        mode: u16,
-        _pad: [u8; 2],
-        _seq: u16,
-        _pad2: u16,
-        _pad3: u32,
-        _pad4: u32,
-    }
-}
-
-impl IpcPerm {
-    pub fn is_owner(&self, euid: u32) -> bool {
-        euid == 0 || euid == self.uid || euid == self.cuid
-    }
-
-    pub fn new(key: i32, mode: u16, uid: u32, gid: u32) -> Self {
-        Self {
-            key,
-            uid,
-            gid,
-            cuid: uid,
-            cgid: gid,
-            mode,
-            _pad: [0; 2],
-            _seq: 0,
-            _pad2: 0,
-            _pad3: 0,
-            _pad4: 0,
-        }
-    }
-}
-
 impl ShmidDs {
     pub fn new(key: i32, size: usize, mode: u16, uid: u32, gid: u32, pid: i32) -> Self {
         Self {
-            shm_perm: IpcPerm::new(key, mode, uid, gid),
+            shm_perm: IpcPerm {
+                key,
+                uid,
+                gid,
+                cuid: uid,
+                cgid: gid,
+                mode,
+                ..Default::default()
+            },
             shm_segsz: size,
             shm_atime: 0,
             shm_dtime: 0,

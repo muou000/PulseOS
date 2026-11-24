@@ -7,13 +7,8 @@ use axerrno::{LinuxError, LinuxResult};
 use axtask::WaitQueue;
 use spin::{Mutex, MutexGuard};
 
-// IPC constants
-pub const IPC_PRIVATE: i32 = 0;
-pub const IPC_CREAT: i32 = 0o1000;
-pub const IPC_EXCL: i32 = 0o2000;
-pub const IPC_RMID: i32 = 0;
-pub const IPC_SET: i32 = 1;
-pub const IPC_STAT: i32 = 2;
+use crate::{IPC_CREAT, IPC_EXCL, IPC_PRIVATE, IpcPerm};
+
 const IPC_NOWAIT: i16 = 0o4000;
 const SEM_UNDO: i16 = 0o10000;
 pub const GETPID: i32 = 11;
@@ -23,57 +18,6 @@ pub const GETNCNT: i32 = 14;
 pub const GETZCNT: i32 = 15;
 pub const SETVAL: i32 = 16;
 pub const SETALL: i32 = 17;
-
-/// Linux-compatible `ipc_perm` structure (C ABI).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct IpcPerm {
-    pub key: i32,
-    pub uid: u32,
-    pub gid: u32,
-    pub cuid: u32,
-    pub cgid: u32,
-    pub mode: u16,
-    _pad: [u8; 2],
-    _seq: u16,
-    _pad2: u16,
-    _pad3: u32,
-    _pad4: u32,
-}
-
-pulse_user_abi::impl_user_abi_struct! {
-    for IpcPerm, size = 36 => {
-        key: i32,
-        uid: u32,
-        gid: u32,
-        cuid: u32,
-        cgid: u32,
-        mode: u16,
-        _pad: [u8; 2],
-        _seq: u16,
-        _pad2: u16,
-        _pad3: u32,
-        _pad4: u32,
-    }
-}
-
-impl IpcPerm {
-    fn new(key: i32, mode: u16, pid: i32) -> Self {
-        Self {
-            key,
-            uid: 0,
-            gid: 0,
-            cuid: pid as u32,
-            cgid: pid as u32,
-            mode,
-            _pad: [0; 2],
-            _seq: 0,
-            _pad2: 0,
-            _pad3: 0,
-            _pad4: 0,
-        }
-    }
-}
 
 /// Linux-compatible `semid_ds` structure (C ABI).
 #[repr(C)]
@@ -102,7 +46,13 @@ impl SemidDs {
     fn new(key: i32, nsems: usize, mode: u16, pid: i32) -> Self {
         let now = axhal::time::wall_time().as_secs() as i64;
         Self {
-            sem_perm: IpcPerm::new(key, mode, pid),
+            sem_perm: IpcPerm {
+                key,
+                cuid: pid as u32,
+                cgid: pid as u32,
+                mode,
+                ..Default::default()
+            },
             sem_otime: 0,
             sem_ctime: now,
             sem_nsems: nsems,

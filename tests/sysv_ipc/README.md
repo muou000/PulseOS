@@ -3,8 +3,10 @@
 `lifecycle.c` follows a segment marked with `IPC_RMID` across fork. The
 parent detaches first. The child checks that it can still use the mapping,
 then releases the final attachment by `shmdt` or exit. Both paths must
-invalidate the ID. A third case checks that two `SEM_UNDO` operations on
-the same semaphore are rolled back when the child exits.
+invalidate the ID. A failed fork must leave only the parent's attachment,
+and a vfork child's exit must preserve that attachment in the shared VM.
+The semaphore case checks that two `SEM_UNDO` operations on the same
+semaphore are rolled back when the child exits.
 
 Build the probe with the matching Linux cross compiler and install it on a
 private copy of the test image. For RV64, run from the repository root:

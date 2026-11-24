@@ -93,7 +93,7 @@ impl Process {
             args: RwLock::new(alloc::vec![String::from("pulse_init")]),
             signal_trampoline: AtomicUsize::new(0),
             ipc: IpcContext {
-                shared_memory: Arc::new(axsync::Mutex::new(BTreeMap::new())),
+                shared_memory: RwLock::new(Arc::default()),
                 sem_undos: Default::default(),
             },
             stopped_signal_pending: AtomicI32::new(0),
@@ -117,7 +117,7 @@ impl Process {
         parent: Arc<Process>,
         aspace: Arc<AddressSpaceLock>,
         brk_state: Arc<Mutex<BrkState>>,
-        share_vm: bool,
+        shared_memory: Arc<SharedMemoryRegistry>,
         is_vfork: bool,
         share_fs: bool,
         share_files: bool,
@@ -127,17 +127,6 @@ impl Process {
     ) -> AxResult<Arc<Self>> {
         let parent_arc = parent;
         let parent = parent_arc.as_ref();
-        let shared_memory = if share_vm {
-            parent.ipc.shared_memory.clone()
-        } else {
-            let mut new_shm = BTreeMap::new();
-            let parent_shm = parent.ipc.shared_memory.lock();
-            for (vaddr, inner_arc) in parent_shm.iter() {
-                inner_arc.lock().attach_process(pid);
-                new_shm.insert(*vaddr, inner_arc.clone());
-            }
-            Arc::new(axsync::Mutex::new(new_shm))
-        };
         let fs_context = if share_fs {
             RwLock::new(parent.fs_context_handle())
         } else {
@@ -247,7 +236,7 @@ impl Process {
             args: RwLock::new(parent.args.read().clone()),
             signal_trampoline: AtomicUsize::new(signal_trampoline),
             ipc: IpcContext {
-                shared_memory,
+                shared_memory: RwLock::new(shared_memory),
                 sem_undos: Default::default(),
             },
             stopped_signal_pending: AtomicI32::new(0),
