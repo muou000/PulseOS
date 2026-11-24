@@ -45,8 +45,9 @@ int main(int argc, char **argv)
     }
     alarm(15);
     pthread_t thread;
+    int cookie;
     check_pthread(pthread_barrier_init(&barrier, NULL, 2), "pthread_barrier_init");
-    check_pthread(pthread_create(&thread, NULL, sibling, &thread), "pthread_create");
+    check_pthread(pthread_create(&thread, NULL, sibling, &cookie), "pthread_create");
     rendezvous();
 
     char *const args[] = {argv[1], NULL};
@@ -59,7 +60,7 @@ int main(int argc, char **argv)
     rendezvous();
     void *reply;
     check_pthread(pthread_join(thread, &reply), "pthread_join");
-    if (reply != &thread) {
+    if (reply != &cookie) {
         fputs("sibling failed to acknowledge the execve return\n", stderr);
         return 1;
     }
