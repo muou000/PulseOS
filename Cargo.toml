@@ -40,6 +40,7 @@ members = [
     "modules/axsched",
     "modules/axsync",
     "modules/axtask",
+    "modules/bpf",
     "modules/ipc",
     "api/axfeat",
     "platforms/axplat",
@@ -58,6 +59,7 @@ keywords = ["arceos", "kernel", "pulseos"]
 categories = ["os", "no-std"]
 
 [workspace.dependencies]
+bpf = { path = "modules/bpf" }
 ipc = { path = "modules/ipc" }
 pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }

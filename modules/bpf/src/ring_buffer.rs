@@ -23,8 +23,7 @@ pub const BPF_RINGBUF_PAGE_SIZE: usize = 4096;
 pub const BPF_RINGBUF_CONTROL_PAGES: usize = 2;
 pub const BPF_RINGBUF_DATA_OFFSET: usize = BPF_RINGBUF_CONTROL_PAGES * BPF_RINGBUF_PAGE_SIZE; // 8192
 
-pub const BPF_RB_NO_WAKEUP: u64 = 1 << 0;
-pub const BPF_RB_FORCE_WAKEUP: u64 = 1 << 1;
+pub use crate::insn::{BPF_RB_FORCE_WAKEUP, BPF_RB_NO_WAKEUP};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RingBufRecord {

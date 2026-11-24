@@ -5,9 +5,7 @@ mod tests {
     use alloc::sync::Arc;
     use axerrno::LinuxError;
 
-    use crate::validation::bpf_link::{
-        core_insn::*, core_map::*, core_program::*, core_verifier::*,
-    };
+    use bpf::{insn::*, map::*, program::*, verifier::*};
 
     pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
     pub const BPF_FUNC_RINGBUF_OUTPUT: i32 = 130;

@@ -6,9 +6,7 @@ mod tests {
     use alloc::vec::Vec;
     use axerrno::LinuxError;
 
-    use crate::validation::bpf_link::{
-        core_insn::*, core_map::*, core_perf_event::*, core_program::*, core_verifier::*,
-    };
+    use bpf::{insn::*, map::*, perf_event::*, program::*, verifier::*};
 
     pub const BPF_MAP_TYPE_PERF_EVENT_ARRAY: u32 = 4;
     pub const BPF_FUNC_PERF_EVENT_OUTPUT: i32 = 25;

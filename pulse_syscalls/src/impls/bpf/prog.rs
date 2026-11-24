@@ -1,10 +1,11 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 use axerrno::LinuxError;
+use bpf::{
+    verifier::{verify_program, MapResolver, VerifierConfig, VerifierLog, BPF_MAXINSNS},
+    BpfInsn, BpfMap, BpfProgType, BpfProgram,
+};
 use pulse_core::{
-    bpf::{
-        verifier::{verify_program, MapResolver, VerifierConfig, VerifierLog, BPF_MAXINSNS},
-        BpfInsn, BpfMap, BpfMapObject, BpfProgType, BpfProgram, BpfProgramObject,
-    },
+    bpf::{BpfMapObject, BpfProgramObject},
     fd_table::{FdEntry, FdFlags},
     task::Process,
 };

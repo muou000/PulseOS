@@ -18,6 +18,7 @@ guest-checks = ["pulse_core/guest-checks"]
 file-io-test = ["axfs/file-io-test", "pulse_core/file-io-test"]
 
 [dependencies]
+bpf.workspace = true
 axerrno.workspace = true
 pulse_io_uring_core.workspace = true
 linux-raw-sys = { workspace = true, features = ["system", "prctl", "mempolicy", "io_uring"] }

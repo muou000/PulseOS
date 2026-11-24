@@ -19,7 +19,6 @@ mod impls;
 #[cfg(not(target_os = "none"))]
 #[allow(dead_code)]
 pub(crate) mod impls {
-    #[path = "bpf/mod.rs"]
     pub mod bpf;
 }
 

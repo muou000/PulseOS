@@ -1,11 +1,9 @@
 use alloc::sync::Arc;
 
 use axerrno::LinuxError;
+use bpf::{BpfLink, BpfMap, BpfMapCreateRequest, BpfMapSpec};
 use pulse_core::{
-    bpf::{
-        BpfLink, BpfLinkObject, BpfMap, BpfMapCreateRequest, BpfMapObject, BpfMapSpec,
-        BpfProgramObject, PerfEventObject,
-    },
+    bpf::{BpfLinkObject, BpfMapObject, BpfProgramObject, PerfEventObject},
     fd_table::{FdEntry, FdFlags},
     task::Process,
 };
@@ -89,7 +87,7 @@ pub fn sys_bpf(cmd: i32, attr: usize, size: usize) -> isize {
         BpfCmd::MapUpdateElem => {
             let attr = unsafe { &attr_buf.map_elem };
             let map = get_bpf_map(&process, attr.map_fd)?;
-            let perf_slot_info = if map.spec().map_type() == pulse_core::bpf::BpfMapType::PerfEventArray {
+            let perf_slot_info = if map.spec().map_type() == bpf::BpfMapType::PerfEventArray {
                 let mut key_bytes = [0u8; 4];
                 read_user(&process, attr.key as usize, &mut key_bytes)?;
                 let cpu = u32::from_ne_bytes(key_bytes);
@@ -103,7 +101,7 @@ pub fn sys_bpf(cmd: i32, attr: usize, size: usize) -> isize {
                 // Output slots must never own sampling sources: source ->
                 // program -> map -> source would otherwise form an Arc cycle
                 // that keeps sampling after the last descriptor is closed.
-                if event_obj.event().spec().clock != pulse_core::bpf::PerfEventClock::BpfOutput
+                if event_obj.event().spec().clock != bpf::PerfEventClock::BpfOutput
                     || event_obj.event().cpu() != Some(cpu as usize)
                 {
                     return Err(LinuxError::EINVAL);
@@ -233,7 +231,7 @@ fn link_create(process: &Process, attr: &BpfLinkCreateAttr) -> Result<isize, Lin
     if attr.flags != 0 {
         return Err(LinuxError::EINVAL);
     }
-    if attr.attach_type != abi::BPF_PERF_EVENT {
+    if attr.attach_type != bpf::BPF_PERF_EVENT {
         return Err(LinuxError::EINVAL);
     }
     if attr.target_btf_id_or_cookie != 0 || attr.extra.iter().any(|&b| b != 0) {
@@ -272,7 +270,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
 
     // 1. Hash map: key_size=8, val_size=1024, max_entries=1
     let hash_req = BpfMapCreateRequest {
-        map_type: pulse_core::bpf::BPF_MAP_TYPE_HASH,
+        map_type: bpf::BPF_MAP_TYPE_HASH,
         key_size: 8,
         value_size: 1024,
         max_entries: 1,
@@ -294,7 +292,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     // Update with BPF_ANY succeeds
-    hash_map.update(&key8, &val_set, pulse_core::bpf::BPF_ANY)?;
+    hash_map.update(&key8, &val_set, bpf::BPF_ANY)?;
 
     // Lookup returns updated value
     hash_map.lookup(&key8, &mut val_get)?;
@@ -304,7 +302,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
 
     // 2. Array map: key_size=4, val_size=1024, max_entries=1
     let array_req = BpfMapCreateRequest {
-        map_type: pulse_core::bpf::BPF_MAP_TYPE_ARRAY,
+        map_type: bpf::BPF_MAP_TYPE_ARRAY,
         key_size: 4,
         value_size: 1024,
         max_entries: 1,
@@ -322,7 +320,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     // Update array map with BPF_ANY
-    array_map.update(&key4, &val_set, pulse_core::bpf::BPF_ANY)?;
+    array_map.update(&key4, &val_set, bpf::BPF_ANY)?;
     array_map.lookup(&key4, &mut val_get)?;
     if val_get != val_set {
         return Err(LinuxError::EINVAL);
@@ -334,7 +332,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     // Array map update with BPF_NOEXIST fails with EEXIST
-    if array_map.update(&key4, &val_set, pulse_core::bpf::BPF_NOEXIST) != Err(LinuxError::EEXIST) {
+    if array_map.update(&key4, &val_set, bpf::BPF_NOEXIST) != Err(LinuxError::EEXIST) {
         return Err(LinuxError::EINVAL);
     }
 
@@ -350,43 +348,43 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
 
     // 1. Valid TRACEPOINT program: r0 = 0; exit
     let valid_insns = [
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
-            pulse_core::bpf::BPF_REG_0,
+        bpf::BpfInsn::new(
+            bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_K,
+            bpf::BPF_REG_0,
             0,
             0,
             0,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT,
+        bpf::BpfInsn::new(
+            bpf::BPF_JMP | bpf::BPF_EXIT,
             0,
             0,
             0,
             0,
         ),
     ];
-    let config = pulse_core::bpf::verifier::VerifierConfig::new(
-        pulse_core::bpf::BpfProgType::Tracepoint,
+    let config = bpf::verifier::VerifierConfig::new(
+        bpf::BpfProgType::Tracepoint,
         1,
     );
-    let mut log = pulse_core::bpf::verifier::VerifierLog::new();
-    let verified = pulse_core::bpf::verifier::verify_program(&config, &valid_insns, None, &mut log)?;
-    if verified.insns.len() != 2 || verified.prog_type != pulse_core::bpf::BpfProgType::Tracepoint {
+    let mut log = bpf::verifier::VerifierLog::new();
+    let verified = bpf::verifier::verify_program(&config, &valid_insns, None, &mut log)?;
+    if verified.insns.len() != 2 || verified.prog_type != bpf::BpfProgType::Tracepoint {
         return Err(LinuxError::EINVAL);
     }
 
     // 2. Malformed program: missing exit
     let bad_insns = [
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
-            pulse_core::bpf::BPF_REG_0,
+        bpf::BpfInsn::new(
+            bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_K,
+            bpf::BPF_REG_0,
             0,
             0,
             0,
         ),
     ];
-    let mut bad_log = pulse_core::bpf::verifier::VerifierLog::new();
-    if pulse_core::bpf::verifier::verify_program(&config, &bad_insns, None, &mut bad_log).is_ok() {
+    let mut bad_log = bpf::verifier::VerifierLog::new();
+    if bpf::verifier::verify_program(&config, &bad_insns, None, &mut bad_log).is_ok() {
         return Err(LinuxError::EINVAL);
     }
     if !bad_log.as_str().contains("0:") {
@@ -400,14 +398,14 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     struct GuestMapResolver {
         map: Arc<BpfMap>,
     }
-    impl pulse_core::bpf::verifier::MapResolver for GuestMapResolver {
+    impl bpf::verifier::MapResolver for GuestMapResolver {
         fn resolve_map(&self, _fd: u32) -> Result<Arc<BpfMap>, LinuxError> {
             Ok(self.map.clone())
         }
     }
 
     let arr_req = BpfMapCreateRequest {
-        map_type: pulse_core::bpf::BPF_MAP_TYPE_ARRAY,
+        map_type: bpf::BPF_MAP_TYPE_ARRAY,
         key_size: 4,
         value_size: 8,
         max_entries: 1,
@@ -417,72 +415,72 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     let resolver = GuestMapResolver { map: arr_map.clone() };
 
     let prog_insns = [
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_LD | pulse_core::bpf::BPF_IMM | pulse_core::bpf::BPF_DW,
-            pulse_core::bpf::BPF_REG_1,
-            pulse_core::bpf::BPF_PSEUDO_MAP_FD,
+        bpf::BpfInsn::new(
+            bpf::BPF_LD | bpf::BPF_IMM | bpf::BPF_DW,
+            bpf::BPF_REG_1,
+            bpf::BPF_PSEUDO_MAP_FD,
             0,
             1,
         ),
-        pulse_core::bpf::BpfInsn::new(0, 0, 0, 0, 0),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X,
-            pulse_core::bpf::BPF_REG_2,
-            pulse_core::bpf::BPF_REG_10,
+        bpf::BpfInsn::new(0, 0, 0, 0, 0),
+        bpf::BpfInsn::new(
+            bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_X,
+            bpf::BPF_REG_2,
+            bpf::BPF_REG_10,
             0,
             0,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_ADD | pulse_core::bpf::BPF_K,
-            pulse_core::bpf::BPF_REG_2,
+        bpf::BpfInsn::new(
+            bpf::BPF_ALU64 | bpf::BPF_ADD | bpf::BPF_K,
+            bpf::BPF_REG_2,
             0,
             0,
             -8,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ST | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW,
-            pulse_core::bpf::BPF_REG_2,
+        bpf::BpfInsn::new(
+            bpf::BPF_ST | bpf::BPF_MEM | bpf::BPF_DW,
+            bpf::BPF_REG_2,
             0,
             0,
             0,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_CALL,
+        bpf::BpfInsn::new(
+            bpf::BPF_JMP | bpf::BPF_CALL,
             0,
             0,
             0,
-            pulse_core::bpf::BPF_FUNC_MAP_LOOKUP_ELEM,
+            bpf::BPF_FUNC_MAP_LOOKUP_ELEM,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_JEQ | pulse_core::bpf::BPF_K,
-            pulse_core::bpf::BPF_REG_0,
+        bpf::BpfInsn::new(
+            bpf::BPF_JMP | bpf::BPF_JEQ | bpf::BPF_K,
+            bpf::BPF_REG_0,
             0,
             3,
             0,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X,
-            pulse_core::bpf::BPF_REG_1,
-            pulse_core::bpf::BPF_REG_0,
+        bpf::BpfInsn::new(
+            bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_X,
+            bpf::BPF_REG_1,
+            bpf::BPF_REG_0,
             0,
             0,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ST | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW,
-            pulse_core::bpf::BPF_REG_1,
+        bpf::BpfInsn::new(
+            bpf::BPF_ST | bpf::BPF_MEM | bpf::BPF_DW,
+            bpf::BPF_REG_1,
             0,
             0,
             12345,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
-            pulse_core::bpf::BPF_REG_0,
+        bpf::BpfInsn::new(
+            bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_K,
+            bpf::BPF_REG_0,
             0,
             0,
             0,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT,
+        bpf::BpfInsn::new(
+            bpf::BPF_JMP | bpf::BPF_EXIT,
             0,
             0,
             0,
@@ -490,9 +488,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         ),
     ];
 
-    let mut guest_log = pulse_core::bpf::verifier::VerifierLog::new();
-    let guest_verified = pulse_core::bpf::verifier::verify_program(&config, &prog_insns, Some(&resolver), &mut guest_log)?;
-    let guest_prog = pulse_core::bpf::BpfProgram::new(
+    let mut guest_log = bpf::verifier::VerifierLog::new();
+    let guest_verified = bpf::verifier::verify_program(&config, &prog_insns, Some(&resolver), &mut guest_log)?;
+    let guest_prog = bpf::BpfProgram::new(
         guest_verified.prog_type,
         [0u8; 16],
         guest_verified.insns,
@@ -515,16 +513,16 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     axlog::ax_println!("[BPF_GUEST] Starting software perf event control checks...");
 
     // 1. CPU clock event: disabled by default
-    let cpu_spec = pulse_core::bpf::PerfEventSpec {
-        clock: pulse_core::bpf::PerfEventClock::CpuClock,
-        scope: pulse_core::bpf::PerfEventScope::PerCpu { cpu: 0 },
+    let cpu_spec = bpf::PerfEventSpec {
+        clock: bpf::PerfEventClock::CpuClock,
+        scope: bpf::PerfEventScope::PerCpu { cpu: 0 },
         sample_period: 0,
         disabled: true,
         cloexec: true,
     };
-    let cpu_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&cpu_spec)?;
-    let cpu_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(cpu_spec, cpu_now_ns));
-    let cpu_obj = pulse_core::bpf::PerfEventObject::new(cpu_event.clone())?;
+    let cpu_now_ns = PerfEventObject::current_time_ns_for_spec(&cpu_spec)?;
+    let cpu_event = alloc::sync::Arc::new(bpf::PerfEvent::new(cpu_spec, cpu_now_ns));
+    let cpu_obj = PerfEventObject::new(cpu_event.clone())?;
 
     let mut count_buf = [0u8; 8];
     // Initial read is 0
@@ -535,10 +533,10 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     // Reset via ioctl
-    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_RESET, 0)?;
+    cpu_obj.ioctl(bpf::PERF_EVENT_IOC_RESET, 0)?;
 
     // Enable via ioctl
-    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_ENABLE, 0)?;
+    cpu_obj.ioctl(bpf::PERF_EVENT_IOC_ENABLE, 0)?;
     if !cpu_event.is_enabled() {
         return Err(LinuxError::EINVAL);
     }
@@ -549,7 +547,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     // Disable via ioctl
-    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_DISABLE, 0)?;
+    cpu_obj.ioctl(bpf::PERF_EVENT_IOC_DISABLE, 0)?;
     if cpu_event.is_enabled() {
         return Err(LinuxError::EINVAL);
     }
@@ -562,7 +560,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     // Reset via ioctl: must be 0
-    cpu_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_RESET, 0)?;
+    cpu_obj.ioctl(bpf::PERF_EVENT_IOC_RESET, 0)?;
     cpu_obj.read(&mut count_buf)?;
     if u64::from_ne_bytes(count_buf) != 0 {
         return Err(LinuxError::EINVAL);
@@ -571,23 +569,23 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     // 2. Task clock is for this actual thread, not an assumed PID 1 or
     // a nonexistent identity silently counted using the wall clock.
     let sampling_tid = pulse_core::task::current_thread()?.tid();
-    let task_spec = pulse_core::bpf::PerfEventSpec {
-        clock: pulse_core::bpf::PerfEventClock::TaskClock,
-        scope: pulse_core::bpf::PerfEventScope::Task { pid: sampling_tid },
+    let task_spec = bpf::PerfEventSpec {
+        clock: bpf::PerfEventClock::TaskClock,
+        scope: bpf::PerfEventScope::Task { pid: sampling_tid },
         sample_period: 0,
         disabled: true,
         cloexec: false,
     };
-    let task_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&task_spec)?;
-    let task_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(task_spec, task_now_ns));
-    let task_obj = pulse_core::bpf::PerfEventObject::new(task_event.clone())?;
+    let task_now_ns = PerfEventObject::current_time_ns_for_spec(&task_spec)?;
+    let task_event = alloc::sync::Arc::new(bpf::PerfEvent::new(task_spec, task_now_ns));
+    let task_obj = PerfEventObject::new(task_event.clone())?;
 
-    task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_RESET, 0)?;
-    task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_ENABLE, 0)?;
+    task_obj.ioctl(bpf::PERF_EVENT_IOC_RESET, 0)?;
+    task_obj.ioctl(bpf::PERF_EVENT_IOC_ENABLE, 0)?;
     for i in 0..1000000usize {
         core::hint::black_box(i);
     }
-    task_obj.ioctl(pulse_core::bpf::PERF_EVENT_IOC_DISABLE, 0)?;
+    task_obj.ioctl(bpf::PERF_EVENT_IOC_DISABLE, 0)?;
     task_obj.read(&mut count_buf)?;
     let task_elapsed = u64::from_ne_bytes(count_buf);
     if task_elapsed == 0 {
@@ -605,15 +603,15 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     axlog::ax_println!("[BPF_GUEST] Starting BPF Link and attach assertions...");
 
     let link_insns = [
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K,
-            pulse_core::bpf::BPF_REG_0,
+        bpf::BpfInsn::new(
+            bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_K,
+            bpf::BPF_REG_0,
             0,
             0,
             0,
         ),
-        pulse_core::bpf::BpfInsn::new(
-            pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT,
+        bpf::BpfInsn::new(
+            bpf::BPF_JMP | bpf::BPF_EXIT,
             0,
             0,
             0,
@@ -621,19 +619,19 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
         ),
     ];
 
-    let tp_cfg = pulse_core::bpf::verifier::VerifierConfig::new(pulse_core::bpf::BpfProgType::Tracepoint, 1);
-    let mut log = pulse_core::bpf::verifier::VerifierLog::new();
-    let tp_verified = pulse_core::bpf::verifier::verify_program(&tp_cfg, &link_insns, None, &mut log)?;
-    let tp_prog = alloc::sync::Arc::new(pulse_core::bpf::BpfProgram::new(
+    let tp_cfg = bpf::verifier::VerifierConfig::new(bpf::BpfProgType::Tracepoint, 1);
+    let mut log = bpf::verifier::VerifierLog::new();
+    let tp_verified = bpf::verifier::verify_program(&tp_cfg, &link_insns, None, &mut log)?;
+    let tp_prog = alloc::sync::Arc::new(bpf::BpfProgram::new(
         tp_verified.prog_type,
         [0u8; 16],
         tp_verified.insns,
         tp_verified.referenced_maps,
     ));
 
-    let sw_cfg = pulse_core::bpf::verifier::VerifierConfig::new(pulse_core::bpf::BpfProgType::PerfEvent, 1);
-    let sw_verified = pulse_core::bpf::verifier::verify_program(&sw_cfg, &link_insns, None, &mut log)?;
-    let sw_prog = alloc::sync::Arc::new(pulse_core::bpf::BpfProgram::new(
+    let sw_cfg = bpf::verifier::VerifierConfig::new(bpf::BpfProgType::PerfEvent, 1);
+    let sw_verified = bpf::verifier::verify_program(&sw_cfg, &link_insns, None, &mut log)?;
+    let sw_prog = alloc::sync::Arc::new(bpf::BpfProgram::new(
         sw_verified.prog_type,
         [0u8; 16],
         sw_verified.insns,
@@ -641,24 +639,24 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     ));
 
     // Create tracepoint perf event: SchedSwitch
-    let tp_spec = pulse_core::bpf::PerfEventSpec {
-        clock: pulse_core::bpf::PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch),
-        scope: pulse_core::bpf::PerfEventScope::PerCpu { cpu: 0 },
+    let tp_spec = bpf::PerfEventSpec {
+        clock: bpf::PerfEventClock::Tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch),
+        scope: bpf::PerfEventScope::PerCpu { cpu: 0 },
         sample_period: 0,
         disabled: false,
         cloexec: true,
     };
-    let tp_now_ns = pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&tp_spec)?;
-    let tp_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(tp_spec, tp_now_ns));
+    let tp_now_ns = PerfEventObject::current_time_ns_for_spec(&tp_spec)?;
+    let tp_event = alloc::sync::Arc::new(bpf::PerfEvent::new(tp_spec, tp_now_ns));
 
     // Invalid target/program combination: Tracepoint program cannot attach to CPU clock perf event
-    if pulse_core::bpf::BpfLink::new(tp_prog.clone(), cpu_event.clone()).is_ok() {
+    if bpf::BpfLink::new(tp_prog.clone(), cpu_event.clone()).is_ok() {
         return Err(LinuxError::EINVAL);
     }
 
     // Attach Tracepoint program to SchedSwitch tracepoint event via Link
-    let link = pulse_core::bpf::BpfLink::new(tp_prog.clone(), tp_event.clone())?;
-    if link.link_type() != pulse_core::bpf::BPF_LINK_TYPE_PERF_EVENT {
+    let link = bpf::BpfLink::new(tp_prog.clone(), tp_event.clone())?;
+    if link.link_type() != bpf::BPF_LINK_TYPE_PERF_EVENT {
         return Err(LinuxError::EINVAL);
     }
     if tp_event.attached_prog().is_none() {
@@ -671,12 +669,12 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     // Duplicate attach fails with EBUSY
-    if pulse_core::bpf::BpfLink::new(tp_prog.clone(), tp_event.clone()).is_ok() {
+    if bpf::BpfLink::new(tp_prog.clone(), tp_event.clone()).is_ok() {
         return Err(LinuxError::EINVAL);
     }
 
     // Wrap in BpfLinkObject and verify FD object contract
-    let link_obj = pulse_core::bpf::BpfLinkObject::new(link.clone());
+    let link_obj = BpfLinkObject::new(link.clone());
     let link_st = link_obj.stat()?;
     if (link_st.st_mode & linux_raw_sys::general::S_IFMT) != linux_raw_sys::general::S_IFREG {
         return Err(LinuxError::EINVAL);
@@ -695,9 +693,9 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     }
 
     let link_info = link_obj.info();
-    if link_info.link_type != pulse_core::bpf::BPF_LINK_TYPE_PERF_EVENT
+    if link_info.link_type != bpf::BPF_LINK_TYPE_PERF_EVENT
         || link_info.prog_id != tp_prog.id()
-        || link_info.perf_event_type != pulse_core::bpf::BPF_PERF_EVENT_TRACEPOINT
+        || link_info.perf_event_type != bpf::BPF_PERF_EVENT_TRACEPOINT
         || link_info.config != pulse_bpf_schema::TracepointId::SchedSwitch.as_u32() as u64
     {
         return Err(LinuxError::EINVAL);
@@ -735,7 +733,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     axlog::ax_println!("[BPF_GUEST] Starting PERF_EVENT sampling checks...");
 
     let sample_map_req = BpfMapCreateRequest {
-        map_type: pulse_core::bpf::BPF_MAP_TYPE_ARRAY,
+        map_type: bpf::BPF_MAP_TYPE_ARRAY,
         key_size: 4,
         value_size: 48,
         max_entries: 1,
@@ -745,38 +743,38 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     let sample_resolver = GuestMapResolver { map: sample_map.clone() };
 
     let sampling_insns = [
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X, pulse_core::bpf::BPF_REG_6, pulse_core::bpf::BPF_REG_1, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_1, 0, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ST | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_10, 0, -4, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X, pulse_core::bpf::BPF_REG_2, pulse_core::bpf::BPF_REG_10, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_ADD | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_2, 0, 0, -4),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LD | pulse_core::bpf::BPF_IMM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_PSEUDO_MAP_FD, 0, 0),
-        pulse_core::bpf::BpfInsn::new(0, 0, 0, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_CALL, 0, 0, 0, pulse_core::bpf::BPF_FUNC_MAP_LOOKUP_ELEM),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_JEQ | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_0, 0, 16, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_X, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_0, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 8, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 8, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 16, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 16, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 24, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 24, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 28, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 28, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 32, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_W, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 32, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_LDX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_1, pulse_core::bpf::BPF_REG_6, 40, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_STX | pulse_core::bpf::BPF_MEM | pulse_core::bpf::BPF_DW, pulse_core::bpf::BPF_REG_7, pulse_core::bpf::BPF_REG_1, 40, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_ALU64 | pulse_core::bpf::BPF_MOV | pulse_core::bpf::BPF_K, pulse_core::bpf::BPF_REG_0, 0, 0, 0),
-        pulse_core::bpf::BpfInsn::new(pulse_core::bpf::BPF_JMP | pulse_core::bpf::BPF_EXIT, 0, 0, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_X, bpf::BPF_REG_6, bpf::BPF_REG_1, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_ALU | bpf::BPF_MOV | bpf::BPF_K, bpf::BPF_REG_1, 0, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_ST | bpf::BPF_MEM | bpf::BPF_W, bpf::BPF_REG_10, 0, -4, 0),
+        bpf::BpfInsn::new(bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_X, bpf::BPF_REG_2, bpf::BPF_REG_10, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_ALU64 | bpf::BPF_ADD | bpf::BPF_K, bpf::BPF_REG_2, 0, 0, -4),
+        bpf::BpfInsn::new(bpf::BPF_LD | bpf::BPF_IMM | bpf::BPF_DW, bpf::BPF_REG_1, bpf::BPF_PSEUDO_MAP_FD, 0, 0),
+        bpf::BpfInsn::new(0, 0, 0, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_JMP | bpf::BPF_CALL, 0, 0, 0, bpf::BPF_FUNC_MAP_LOOKUP_ELEM),
+        bpf::BpfInsn::new(bpf::BPF_JMP | bpf::BPF_JEQ | bpf::BPF_K, bpf::BPF_REG_0, 0, 16, 0),
+        bpf::BpfInsn::new(bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_X, bpf::BPF_REG_7, bpf::BPF_REG_0, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_LDX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_1, bpf::BPF_REG_6, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_STX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_7, bpf::BPF_REG_1, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_LDX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_1, bpf::BPF_REG_6, 8, 0),
+        bpf::BpfInsn::new(bpf::BPF_STX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_7, bpf::BPF_REG_1, 8, 0),
+        bpf::BpfInsn::new(bpf::BPF_LDX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_1, bpf::BPF_REG_6, 16, 0),
+        bpf::BpfInsn::new(bpf::BPF_STX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_7, bpf::BPF_REG_1, 16, 0),
+        bpf::BpfInsn::new(bpf::BPF_LDX | bpf::BPF_MEM | bpf::BPF_W, bpf::BPF_REG_1, bpf::BPF_REG_6, 24, 0),
+        bpf::BpfInsn::new(bpf::BPF_STX | bpf::BPF_MEM | bpf::BPF_W, bpf::BPF_REG_7, bpf::BPF_REG_1, 24, 0),
+        bpf::BpfInsn::new(bpf::BPF_LDX | bpf::BPF_MEM | bpf::BPF_W, bpf::BPF_REG_1, bpf::BPF_REG_6, 28, 0),
+        bpf::BpfInsn::new(bpf::BPF_STX | bpf::BPF_MEM | bpf::BPF_W, bpf::BPF_REG_7, bpf::BPF_REG_1, 28, 0),
+        bpf::BpfInsn::new(bpf::BPF_LDX | bpf::BPF_MEM | bpf::BPF_W, bpf::BPF_REG_1, bpf::BPF_REG_6, 32, 0),
+        bpf::BpfInsn::new(bpf::BPF_STX | bpf::BPF_MEM | bpf::BPF_W, bpf::BPF_REG_7, bpf::BPF_REG_1, 32, 0),
+        bpf::BpfInsn::new(bpf::BPF_LDX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_1, bpf::BPF_REG_6, 40, 0),
+        bpf::BpfInsn::new(bpf::BPF_STX | bpf::BPF_MEM | bpf::BPF_DW, bpf::BPF_REG_7, bpf::BPF_REG_1, 40, 0),
+        bpf::BpfInsn::new(bpf::BPF_ALU64 | bpf::BPF_MOV | bpf::BPF_K, bpf::BPF_REG_0, 0, 0, 0),
+        bpf::BpfInsn::new(bpf::BPF_JMP | bpf::BPF_EXIT, 0, 0, 0, 0),
     ];
 
-    let sampling_cfg = pulse_core::bpf::verifier::VerifierConfig::new(pulse_core::bpf::BpfProgType::PerfEvent, 1);
-    let mut sampling_log = pulse_core::bpf::verifier::VerifierLog::new();
-    let sampling_verified = pulse_core::bpf::verifier::verify_program(&sampling_cfg, &sampling_insns, Some(&sample_resolver), &mut sampling_log)?;
-    let sampling_prog = alloc::sync::Arc::new(pulse_core::bpf::BpfProgram::new(
+    let sampling_cfg = bpf::verifier::VerifierConfig::new(bpf::BpfProgType::PerfEvent, 1);
+    let mut sampling_log = bpf::verifier::VerifierLog::new();
+    let sampling_verified = bpf::verifier::verify_program(&sampling_cfg, &sampling_insns, Some(&sample_resolver), &mut sampling_log)?;
+    let sampling_prog = alloc::sync::Arc::new(bpf::BpfProgram::new(
         sampling_verified.prog_type,
         [0u8; 16],
         sampling_verified.insns,
@@ -784,15 +782,15 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
     ));
 
     let sample_period_ns = 50_000u64;
-    let sampling_spec = pulse_core::bpf::PerfEventSpec {
-        clock: pulse_core::bpf::PerfEventClock::CpuClock,
-        scope: pulse_core::bpf::PerfEventScope::PerCpu { cpu: 0 },
+    let sampling_spec = bpf::PerfEventSpec {
+        clock: bpf::PerfEventClock::CpuClock,
+        scope: bpf::PerfEventScope::PerCpu { cpu: 0 },
         sample_period: sample_period_ns,
         disabled: true,
         cloexec: true,
     };
-    let sampling_event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(sampling_spec, 10_000));
-    let sampling_link = pulse_core::bpf::BpfLink::new(sampling_prog.clone(), sampling_event.clone())?;
+    let sampling_event = alloc::sync::Arc::new(bpf::PerfEvent::new(sampling_spec, 10_000));
+    let sampling_link = bpf::BpfLink::new(sampling_prog.clone(), sampling_event.clone())?;
 
     sampling_event.enable_at(10_000);
 

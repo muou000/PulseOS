@@ -1,13 +1,7 @@
 use axerrno::LinuxError;
+use bpf::BPF_OBJ_NAME_LEN;
 
-pub const BPF_OBJ_NAME_LEN: usize = 16;
 pub const BPF_MAX_ATTR_SIZE: usize = 4096;
-
-pub const BPF_ANY: u64 = 0;
-pub const BPF_NOEXIST: u64 = 1;
-pub const BPF_EXIST: u64 = 2;
-
-pub const BPF_PERF_EVENT: u32 = 41;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]

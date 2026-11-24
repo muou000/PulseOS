@@ -1,4 +1,7 @@
 use axerrno::LinuxError;
+use bpf::{PerfEventClock, PerfEventScope};
+#[cfg(target_os = "none")]
+use bpf::{PerfEvent, PerfEventSpec};
 
 pub const PERF_TYPE_HARDWARE: u32 = 0;
 pub const PERF_TYPE_SOFTWARE: u32 = 1;
@@ -68,49 +71,6 @@ pub const PERF_ATTR_FLAG_CGROUP: u64 = 1 << 32;
 
 pub const CAP_SYS_ADMIN: u32 = 21;
 pub const CAP_PERFMON: u32 = 38;
-
-#[cfg(target_os = "none")]
-pub use pulse_core::bpf::{
-    PerfEvent, PerfEventClock, PerfEventScope, PerfEventSpec,
-    PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_DISABLE, PERF_EVENT_IOC_REFRESH,
-    PERF_EVENT_IOC_RESET, PERF_EVENT_IOC_PERIOD, PERF_EVENT_IOC_SET_BPF,
-};
-
-#[cfg(not(target_os = "none"))]
-#[path = "../../../../pulse_core/src/bpf/insn.rs"]
-pub mod core_insn;
-
-#[cfg(not(target_os = "none"))]
-#[path = "../../../../pulse_core/src/bpf/map.rs"]
-pub mod core_map;
-
-#[cfg(not(target_os = "none"))]
-#[path = "../../../../pulse_core/src/bpf/interpreter.rs"]
-pub mod core_interpreter;
-
-#[cfg(not(target_os = "none"))]
-#[path = "../../../../pulse_core/src/bpf/program.rs"]
-pub mod core_program;
-
-#[cfg(not(target_os = "none"))]
-#[allow(unused_imports)]
-pub use core_insn as insn;
-#[cfg(not(target_os = "none"))]
-#[allow(unused_imports)]
-pub use core_map as map;
-#[cfg(not(target_os = "none"))]
-#[allow(unused_imports)]
-pub use core_interpreter as interpreter;
-#[cfg(not(target_os = "none"))]
-#[allow(unused_imports)]
-pub use core_map::BPF_OBJ_NAME_LEN;
-
-#[cfg(not(target_os = "none"))]
-#[path = "../../../../pulse_core/src/bpf/perf_event.rs"]
-mod core_perf_event;
-
-#[cfg(not(target_os = "none"))]
-pub use core_perf_event::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -402,7 +362,7 @@ pub fn sys_perf_event_open(
         Ok(now_ns) => now_ns,
         Err(e) => return -e.code() as isize,
     };
-    let event = alloc::sync::Arc::new(pulse_core::bpf::PerfEvent::new(spec, now_ns));
+    let event = alloc::sync::Arc::new(PerfEvent::new(spec, now_ns));
     let object = match pulse_core::bpf::PerfEventObject::new(event) {
         Ok(object) => alloc::sync::Arc::new(object),
         Err(e) => return -e.code() as isize,

@@ -910,6 +910,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bpf"
+version = "0.1.0"
+dependencies = [
+ "axalloc",
+ "axerrno",
+ "axhal",
+ "axmm",
+ "axtask",
+ "memory_addr",
+ "pulse_bpf_schema",
+ "spin 0.10.0",
+]
+
+[[package]]
 name = "bpf-analyzer"
 version = "0.1.0"
 dependencies = [
@@ -2227,6 +2241,7 @@ dependencies = [
  "axsync",
  "axtask",
  "bitflags 2.11.1",
+ "bpf",
  "hashbrown 0.16.1",
  "heapless 0.9.3",
  "ipc",
@@ -2274,6 +2289,7 @@ dependencies = [
  "axpoll",
  "axtask",
  "bitflags 2.11.1",
+ "bpf",
  "chrono",
  "heapless 0.9.3",
  "ipc",

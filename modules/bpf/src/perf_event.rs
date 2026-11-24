@@ -1,8 +1,4 @@
 //! Perf Event core model, metadata and accounting lifecycle (#97).
-//!
-//! This file is the pure part of the PerfEvent subsystem: it only depends on
-//! `core`, `alloc`, `spin` and `axerrno`, so `pulse_syscalls` host tests can compile
-//! it directly. Descriptor wrapping (`PerfEventObject: FdObject`) lives in `object.rs`.
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -10,18 +6,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use axerrno::LinuxError;
 use pulse_bpf_schema::{PerfEventContext, PerfSampleContext, TracepointId};
 
-#[cfg(target_os = "none")]
 use super::{
     interpreter::{BpfEnv, BpfVmError},
     map::PerfEventOutputSink,
     program::{BpfProgType, BpfProgram},
-};
-
-#[cfg(not(target_os = "none"))]
-use super::{
-    core_interpreter::{BpfEnv, BpfVmError},
-    core_map::PerfEventOutputSink,
-    core_program::{BpfProgType, BpfProgram},
 };
 
 pub const PERF_EVENT_IOC_ENABLE: u32 = 0x2400;
@@ -727,20 +715,9 @@ impl PerfEvent {
         }
     }
 
-    fn matches_task_identity(&self, selected_tid: u64, observed_tid: u64, observed_task_id: u64) -> bool {
-        if observed_tid == 0 {
-            return false;
-        }
+    fn matches_task_identity(&self, observed_tid: u64, observed_task_id: u64) -> bool {
         let bound = self.bound_task_id.load(Ordering::Acquire);
-        if bound != 0 {
-            return bound == observed_task_id;
-        }
-        // Legacy host state-model tests have no live Thread to bind. Production
-        // FDs must bind during construction; an unbound kernel event fails closed.
-        #[cfg(not(target_os = "none"))]
-        { selected_tid != 0 && selected_tid == observed_tid }
-        #[cfg(target_os = "none")]
-        { let _ = selected_tid; false }
+        observed_tid != 0 && bound != 0 && bound == observed_task_id
     }
 
     pub fn diagnostics(&self) -> PerfEventDiagnostics {
@@ -855,8 +832,8 @@ impl PerfEvent {
     pub fn dispatch_sample(&self, sample: &RuntimeSample) -> Result<bool, LinuxError> {
         let clock_ns = match (self.spec.clock, self.spec.scope) {
             (PerfEventClock::CpuClock, PerfEventScope::PerCpu { cpu }) if cpu == sample.cpu => sample.timestamp_ns,
-            (PerfEventClock::TaskClock, PerfEventScope::Task { pid })
-                if self.matches_task_identity(pid, sample.tid, sample.task_id) => sample.task_clock_ns,
+            (PerfEventClock::TaskClock, PerfEventScope::Task { .. })
+                if self.matches_task_identity(sample.tid, sample.task_id) => sample.task_clock_ns,
             _ => return Ok(false),
         };
         if sample.cpu >= BPF_MAX_SAMPLING_CPUS || sample.pid > u32::MAX as u64
@@ -981,7 +958,7 @@ impl PerfEvent {
         }
         let matches_scope = match self.spec.scope {
             PerfEventScope::PerCpu { cpu: selected } => selected == cpu,
-            PerfEventScope::Task { pid: selected } => self.matches_task_identity(selected, tid, task_id),
+            PerfEventScope::Task { .. } => self.matches_task_identity(tid, task_id),
         };
         if !matches_scope {
             return Ok(false);
@@ -1188,12 +1165,6 @@ pub fn tracepoint_subscription_count() -> usize {
     TRACEPOINT_SUBSCRIBER_COUNTS.iter().map(|count| count.load(Ordering::Relaxed)).sum()
 }
 
-#[cfg(test)]
-pub fn tracepoint_subscriber_count_for_test(id: TracepointId) -> usize {
-    let _guard = TRACEPOINT_SUBSCRIBER_CONTROL.lock();
-    TRACEPOINT_SUBSCRIBER_COUNTS[id as usize].load(Ordering::Relaxed)
-}
-
 static TRACEPOINT_SUBSCRIBER_COUNTS: [AtomicUsize; 32] = [
     const { AtomicUsize::new(0) },
     const { AtomicUsize::new(0) },
@@ -1380,3 +1351,65 @@ impl Drop for PerfEvent {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::{sync::Barrier, thread};
+
+    use super::*;
+    use crate::insn::*;
+
+    #[test]
+    fn runtime_tracepoint_parallel_attachment_counts_preserve_live_subscribers() {
+        let id = TracepointId::PhaseMarker;
+        let count = || {
+            let _guard = TRACEPOINT_SUBSCRIBER_CONTROL.lock();
+            TRACEPOINT_SUBSCRIBER_COUNTS[id as usize].load(Ordering::Relaxed)
+        };
+        let initial = count();
+        let ready = Barrier::new(5);
+        let release = Barrier::new(5);
+        let attached = thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let event = PerfEvent::new(
+                        PerfEventSpec {
+                            clock: PerfEventClock::Tracepoint(id),
+                            scope: PerfEventScope::PerCpu { cpu: 0 },
+                            sample_period: 0,
+                            disabled: true,
+                            cloexec: false,
+                        },
+                        0,
+                    );
+                    let insns = Arc::new([
+                        BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0, 0),
+                        BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+                    ]);
+                    let prog = Arc::new(BpfProgram::new(
+                        BpfProgType::Tracepoint,
+                        [0; crate::BPF_OBJ_NAME_LEN],
+                        insns,
+                        Vec::new(),
+                    ));
+                    for _ in 0..100 {
+                        event.attach_program(prog.clone()).unwrap();
+                        event.detach_program(&prog).unwrap();
+                    }
+                    event.attach_program(prog).unwrap();
+                    ready.wait();
+                    release.wait();
+                    // Dropping the event removes its final subscription.
+                });
+            }
+            ready.wait();
+            let attached = count();
+            release.wait();
+            attached
+        });
+        assert_eq!(attached, initial + 4);
+        assert_eq!(count(), initial);
+    }
+}

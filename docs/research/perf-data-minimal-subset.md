@@ -381,7 +381,7 @@ PulseOS 已提交代码基线为 `758fa083dde3d9c7a36e2f9f5b9c8266439cb889`。�
 
 - [P1] [术语表](../../GLOSSARY.md)：Linux BPF 兼容层级、采样调用栈、perf.data 兼容记录、BPF capture 与 BPF 采样丢失。
 - [P2] [profile BPF 程序](https://github.com/rcore-os/tgoskits/blob/3686ff71f00072fdf13edc3785c06a790899d47b/apps/starry/ebpf/profile/profile-ebpf/src/main.rs) 与 [loader](https://github.com/rcore-os/tgoskits/blob/3686ff71f00072fdf13edc3785c06a790899d47b/apps/starry/ebpf/profile/profile/src/main.rs)：现有 syscall-frequency 直方图。
-- [P3] [perf-event core](../../pulse_core/src/bpf/perf_event.rs)：现有事件定义与 tick 路径。
+- [P3] [perf-event core](../../modules/bpf/src/perf_event.rs)：现有事件定义与 tick 路径。
 - [P4] [pulse_bpf_schema](../../crates/pulse_bpf_schema/src/lib.rs)：现有 context、tracepoint 元数据与有界记录。
 - [P5] [ADR-0005](../adr/0005-profile-specific-linux-bpf-compatibility-tier.md)：既有 fixed-layout BPF v1 与具名工具兼容边界。
 - [P6] [#130 维护者的目标转向说明](https://github.com/muou000/PulseOS/issues/130#issuecomment-6542849311)：上游工具移植不是新地图目标。

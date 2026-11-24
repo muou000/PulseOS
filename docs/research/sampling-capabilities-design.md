@@ -249,9 +249,9 @@ cargo test -p pulse_syscalls --target x86_64-unknown-linux-gnu \
 - [P4] [axruntime 初始化](../../modules/axruntime/src/lib.rs)、[VisionFive 2 init](../../platforms/axplat-riscv64-visionfive2/src/init.rs)、[LS2K1000 init](../../platforms/axplat-loongarch64-ls2k1000/src/init.rs)。
 - [P5] [procfs 动态文件](../../modules/axfs/src/fs/procfs.rs)。
 - [P6] [perf-event ABI validation](../../pulse_syscalls/src/impls/bpf/perf_event.rs) 与 [#86 软件事件约定](https://github.com/muou000/PulseOS/issues/86#issuecomment-6138057642)。
-- [P7] [Program type](../../pulse_core/src/bpf/program.rs)、[verifier](../../pulse_core/src/bpf/verifier.rs)、[PROG_LOAD](../../pulse_syscalls/src/impls/bpf/prog.rs)。
+- [P7] [Program type](../../modules/bpf/src/program.rs)、[verifier](../../modules/bpf/src/verifier.rs)、[PROG_LOAD](../../pulse_syscalls/src/impls/bpf/prog.rs)。
 - [P8] [BPF command ABI](../../pulse_syscalls/src/impls/bpf/abi.rs)、[syscall dispatch](../../pulse_syscalls/src/impls/bpf/sys.rs)。
-- [P9] [interpreter/helpers](../../pulse_core/src/bpf/interpreter.rs)、[map types](../../pulse_core/src/bpf/map.rs)、[context schema](../../crates/pulse_bpf_schema/src/lib.rs)。
+- [P9] [interpreter/helpers](../../modules/bpf/src/interpreter.rs)、[map types](../../modules/bpf/src/map.rs)、[context schema](../../crates/pulse_bpf_schema/src/lib.rs)。
 - [P10] [fixture 契约](../../tools/bpf-fixture/README.md)、[fixture source](../../tools/bpf-fixture/fixture.bpf.c)、[checker](../../tools/bpf-fixture/check.py)。
 - [P11] [guest sampler](../../tests/bpf_smoke/guest_sampler.rs)。
 - [P12] [#130 的方向调整](https://github.com/muou000/PulseOS/issues/130#issuecomment-6542849311)。

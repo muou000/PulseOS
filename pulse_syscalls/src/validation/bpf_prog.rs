@@ -1,44 +1,11 @@
 //! Host validation tests for BPF Program load and verifier (#94).
 
 #[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/insn.rs"]
-mod core_insn;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/map.rs"]
-mod core_map;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/interpreter.rs"]
-mod core_interpreter;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/program.rs"]
-mod core_program;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/verifier.rs"]
-mod core_verifier;
-
-#[cfg(test)]
-use core_insn as insn;
-#[cfg(test)]
-use core_interpreter as interpreter;
-#[cfg(test)]
-use core_map as map;
-#[cfg(test)]
-use core_program as program;
-#[cfg(test)]
-use core_map::BPF_OBJ_NAME_LEN;
-
-#[cfg(test)]
 mod tests {
     use alloc::{sync::Arc, vec, vec::Vec};
     use axerrno::LinuxError;
 
-    use super::{
-        core_insn::*, core_interpreter::*, core_map::*, core_program::*, core_verifier::*,
-    };
+    use bpf::{insn::*, interpreter::*, map::*, program::*, verifier::*};
 
     fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> BpfInsn {
         BpfInsn::new(code, dst, src, off, imm)
