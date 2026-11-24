@@ -392,103 +392,45 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     reset_mounted_mountpoints();
     reset_pinned_mountpoints();
 
-    struct FsCandidate {
-        disk_idx: usize,
-        disk_size: u64,
-        dev_name: String,
-        shared_dev: disk::SharedBlockDevice,
-        fs: axfs_ng_vfs::Filesystem,
-    }
+    // The first disk supplies the root filesystem. Every additional disk
+    // must also be reachable by device name, even when its on-disk format
+    // differs from the boot filesystem or it has yet to be formatted.
+    let root_device = disk::SharedBlockDevice::new(
+        block_devs.take_one().expect("root block device is required"),
+    );
+    let root = axtask::future::block_on(fs::new_default(root_device.clone()))
+        .expect("failed to mount root filesystem on device0");
+    info!(
+        "  select block device 0 ({}, {} KiB) as root filesystem",
+        root_device.device_name(),
+        root_device.size() / 1024,
+    );
 
-    let mut candidates: Vec<FsCandidate> = Vec::new();
-    let mut disk_idx = 0usize;
+    let root_mp = axfs_ng_vfs::Mountpoint::new_root(&root);
+    let cx = FsContext::new(root_mp.root_location());
+    register_mount("device0", "/", root.name(), "rw,relatime");
+    register_mountable_device("device0", "vda", &root);
+
+    let mut dev_nodes = alloc::vec![fs::BlockDeviceSpec {
+        name: disk_node_name(0),
+        device: root_device,
+        major: 254,
+        minor: 0,
+    }];
 
     while let Some(dev) = block_devs.take_one() {
-        let shared_dev = disk::SharedBlockDevice::new(dev);
-        let disk_size = shared_dev.size();
-        let dev_name = shared_dev.device_name().to_string();
-        info!("  probing block device {}: {}", disk_idx, dev_name);
-
-        let fs = match axtask::future::block_on(fs::new_default(shared_dev.clone())) {
-            Ok(fs) => fs,
-            Err(e) => {
-                warn!(
-                    "  skip block device {} ({}): failed to initialize filesystem: {:?}",
-                    disk_idx, dev_name, e
-                );
-                disk_idx += 1;
-                continue;
-            }
-        };
-
-        info!(
-            "  filesystem on device {}: {} (size={} KiB)",
-            disk_idx,
-            fs.name(),
-            disk_size / 1024,
-        );
-
-        candidates.push(FsCandidate {
-            disk_idx,
-            disk_size,
-            dev_name,
-            shared_dev,
-            fs,
-        });
-        disk_idx += 1;
-    }
-
-    assert!(!candidates.is_empty(), "No usable filesystem found!");
-
-    // Use block device as the root filesystem. The remaining devices are
-    // registered for user-initiated mount.
-    let root_disk_idx = 0;
-    let root_pos = candidates
-        .iter()
-        .position(|cand| cand.disk_idx == root_disk_idx)
-        .expect("block device is required for the root filesystem");
-    let root = candidates.swap_remove(root_pos);
-    info!(
-        "  select block device {} ({}, {} KiB) as root filesystem",
-        root.disk_idx,
-        root.dev_name,
-        root.disk_size / 1024
-    );
-
-    let root_mp = axfs_ng_vfs::Mountpoint::new_root(&root.fs);
-    let cx = FsContext::new(root_mp.root_location());
-    register_mount(
-        &format!("device{}", root.disk_idx),
-        "/",
-        root.fs.name(),
-        "rw,relatime",
-    );
-    register_mountable_device(
-        &format!("device{}", root.disk_idx),
-        &disk_node_name(root.disk_idx),
-        &root.fs,
-    );
-
-    let mut dev_nodes = Vec::with_capacity(candidates.len() + 9);
-    dev_nodes.push(fs::BlockDeviceSpec {
-        name: disk_node_name(root.disk_idx),
-        device: root.shared_dev.clone(),
-        major: 254,
-        minor: root.disk_idx as u32,
-    });
-
-    for cand in candidates {
-        let source = format!("device{}", cand.disk_idx);
-        register_mountable_device(&source, &disk_node_name(cand.disk_idx), &cand.fs);
-        info!(
-            "  registered block device {} ({}) as {} for user-initiated mount",
-            cand.disk_idx, cand.dev_name, source
-        );
+        let index = dev_nodes.len();
+        let name = disk_node_name(index);
+        let device = disk::SharedBlockDevice::new(dev);
+        match axtask::future::block_on(fs::new_default(device.clone())) {
+            Ok(fs) => register_mountable_device(&format!("device{index}"), &name, &fs),
+            Err(error) => info!("  /dev/{name} available for explicit mount ({error:?})"),
+        }
         dev_nodes.push(fs::BlockDeviceSpec {
-            name: disk_node_name(cand.disk_idx),
-            device: cand.shared_dev,
+            name,
+            device,
             major: 254,
-            minor: cand.disk_idx as u32,
+            minor: index as u32,
         });
     }
 

@@ -1,218 +1,219 @@
-use alloc::{string::String, sync::Arc};
-use core::{any::Any, mem, ops::Deref, time::Duration};
+use alloc::{boxed::Box, sync::Arc};
 
+use async_trait::async_trait;
+use axdriver::prelude::AsyncBlockDriverOps;
 use axfs_ng_vfs::{
-    DeviceId, DirEntry, DirEntrySink, DirNode, DirNodeOps, FilesystemOps, Metadata, MetadataUpdate,
-    NodeFlags, NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
+    DirEntry, DirEntrySink, DirNode, DirNodeOps, NodeOps, NodePermission, NodeType, Reference,
+    VfsError, VfsResult, WeakDirEntry,
 };
+use hadris_fs::{DirCursor, ErrorKind, Name, RenameMode, SetAttr};
 
 use super::{
-    FsRef, ff,
-    file::FatFileNode,
-    fs::FatFilesystem,
-    util::{file_metadata, into_vfs_err},
+    fs::{Volume, vfs_error},
+    node::{FatNode, NodePin},
 };
 
-pub struct FatDirNode {
-    fs: Arc<FatFilesystem>,
-    pub(crate) inner: FsRef<ff::Dir<'static>>,
-    inode: u64,
-    this: WeakDirEntry,
-}
-
-impl FatDirNode {
-    pub fn new(fs: Arc<FatFilesystem>, dir: ff::Dir, inode: u64, this: WeakDirEntry) -> DirNode {
-        DirNode::new(Arc::new(Self {
-            fs,
-            // SAFETY: FsRef guarantees correct lifetime
-            inner: FsRef::new(unsafe { mem::transmute::<ff::Dir, ff::Dir>(dir) }),
-            inode,
-            this,
-        }))
-    }
-
-    fn create_entry(&self, entry: ff::DirEntry, name: impl Into<String>, inode: u64) -> DirEntry {
-        let reference = Reference::new(Some(self.this.clone()), name.into());
-        if entry.is_file() {
-            DirEntry::new_file(
-                FatFileNode::new(self.fs.clone(), entry.to_file(), inode),
-                NodeType::RegularFile,
-                reference,
-            )
-        } else {
-            DirEntry::new_dir(
-                |this| FatDirNode::new(self.fs.clone(), entry.to_dir(), inode, this),
-                reference,
-            )
+impl<D: AsyncBlockDriverOps + Clone + 'static> FatNode<D> {
+    fn child(
+        &self,
+        volume: &mut Volume<D>,
+        pin: NodePin<D>,
+        name: &str,
+        kind: NodeType,
+    ) -> VfsResult<DirEntry> {
+        if let Some(entry) = volume.entries.get(&pin.id).and_then(WeakDirEntry::upgrade) {
+            return Ok(entry);
         }
+        let parent = self
+            .this
+            .as_ref()
+            .and_then(WeakDirEntry::upgrade)
+            .ok_or(VfsError::NotFound)?;
+        let reference = Reference::new(Some(parent.downgrade()), name.into());
+        let id = pin.id;
+        let entry = Self::entry(pin, kind, reference, Some(parent));
+        volume.entries.insert(id, entry.downgrade());
+        Ok(entry)
     }
 }
 
-unsafe impl Send for FatDirNode {}
-
-unsafe impl Sync for FatDirNode {}
-
-impl NodeOps for FatDirNode {
-    fn inode(&self) -> u64 {
-        self.inode
+#[async_trait]
+impl<D: AsyncBlockDriverOps + Clone + 'static> DirNodeOps for FatNode<D> {
+    fn is_cacheable(&self) -> bool {
+        // Revalidate long names and short aliases together against FAT. The
+        // generic VFS cache is keyed by the caller's exact byte spelling.
+        false
     }
 
-    fn metadata(&self) -> VfsResult<Metadata> {
-        let fs = self.fs.lock();
-        let dir = self.inner.borrow(&fs);
-        if let Some(file) = dir.as_file() {
-            return Ok(file_metadata(&fs, file, NodeType::Directory));
-        }
-
-        // root directory
-        let block_size = fs.inner.bytes_per_sector() as u64;
-        Ok(Metadata {
-            inode: self.inode(),
-            device: 0,
-            nlink: 1,
-            mode: NodePermission::default(),
-            node_type: NodeType::Directory,
-            uid: 0,
-            gid: 0,
-            size: block_size,
-            block_size,
-            blocks: 1,
-            rdev: DeviceId::default(),
-            atime: Duration::default(),
-            mtime: Duration::default(),
-            ctime: Duration::default(),
-        })
-    }
-
-    fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
-        // TODO: update metadata on directory
-        Ok(())
-    }
-
-    fn filesystem(&self) -> &dyn FilesystemOps {
-        self.fs.deref()
-    }
-
-    fn sync(&self, _data_only: bool) -> VfsResult<()> {
-        Ok(())
-    }
-
-    fn into_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
-
-    fn flags(&self) -> NodeFlags {
-        NodeFlags::BLOCKING
-    }
-}
-
-impl DirNodeOps for FatDirNode {
-    fn read_dir(&self, offset: u64, sink: &mut (dyn DirEntrySink + Send)) -> VfsResult<usize> {
-        let mut fs = self.fs.lock();
-        let dir = self.inner.borrow(&fs);
-        let this_entry = self.this.upgrade().unwrap();
-        let dir_node = this_entry.as_dir()?;
-
+    async fn read_dir(
+        &self,
+        offset: u64,
+        sink: &mut (dyn DirEntrySink + Send),
+    ) -> VfsResult<usize> {
         let mut count = 0;
-        for entry in dir.iter().skip(offset as usize) {
-            let entry = entry.map_err(into_vfs_err)?;
-            let name = entry.file_name().to_ascii_lowercase();
-            let node_type = if entry.is_file() {
-                NodeType::RegularFile
-            } else {
+        if offset == 0 {
+            if !sink.accept(".", self.inode(), NodeType::Directory, 1) {
+                return Ok(0);
+            }
+            count += 1;
+        }
+        if offset < 2 {
+            let parent_id = self.parent.as_ref().map_or(self.inode(), DirEntry::inode);
+            if !sink.accept("..", parent_id, NodeType::Directory, 2) {
+                return Ok(count);
+            }
+            count += 1;
+        }
+        let mut volume = self.pin.fs.lock().await;
+        let mut cursor = DirCursor::from_raw(offset.saturating_sub(2));
+        while let Some(entry) = volume
+            .driver
+            .readdir(self.pin.id, cursor)
+            .await
+            .map_err(vfs_error)?
+        {
+            cursor = entry.next_cursor();
+            let name = entry.name().to_str().map_err(|_| VfsError::InvalidData)?;
+            let kind = if entry.file_type().is_dir() {
                 NodeType::Directory
-            };
-            let inode = if let Some(entry) = dir_node.lookup_cache(&name) {
-                entry.inode()
             } else {
-                let entry = self.create_entry(entry, name.clone(), fs.alloc_inode());
-                let inode = entry.inode();
-                dir_node.insert_cache(name.clone(), entry);
-                inode
+                NodeType::RegularFile
             };
-            if !sink.accept(&name, inode, node_type, offset + count + 1) {
+            if !sink.accept(name, entry.node().get(), kind, cursor.into_raw() + 2) {
                 break;
             }
             count += 1;
         }
-        Ok(count as usize)
+        Ok(count)
     }
 
-    fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
-        let mut fs = self.fs.lock();
-        let dir = self.inner.borrow(&fs);
-        dir.iter()
-            .find_map(|entry| entry.ok().filter(|it| it.eq_name(name)))
-            .map(|entry| self.create_entry(entry, name.to_ascii_lowercase(), fs.alloc_inode()))
-            .ok_or(VfsError::NotFound)
+    async fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
+        let mut volume = self.pin.fs.lock().await;
+        let id = volume
+            .driver
+            .lookup(self.pin.id, Name::new(name))
+            .await
+            .map_err(vfs_error)?;
+        let pin = NodePin::new(self.pin.fs.clone(), id);
+        let metadata = volume.driver.stat(id).await.map_err(vfs_error)?;
+        let kind = if metadata.file_type().is_dir() {
+            NodeType::Directory
+        } else {
+            NodeType::RegularFile
+        };
+        self.child(&mut volume, pin, name, kind)
     }
 
-    fn create(
+    async fn create(
         &self,
         name: &str,
-        node_type: NodeType,
+        kind: NodeType,
         _permission: NodePermission,
     ) -> VfsResult<DirEntry> {
-        let mut fs = self.fs.lock();
-        let dir = self.inner.borrow(&fs);
-        let reference = Reference::new(Some(self.this.clone()), name.to_ascii_lowercase());
-        match node_type {
-            NodeType::RegularFile => dir
-                .create_file(name)
-                .map(|file| {
-                    DirEntry::new_file(
-                        FatFileNode::new(self.fs.clone(), file, fs.alloc_inode()),
-                        NodeType::RegularFile,
-                        reference,
-                    )
-                })
-                .map_err(into_vfs_err),
-            NodeType::Directory => dir
-                .create_dir(name)
-                .map(|dir| {
-                    DirEntry::new_dir(
-                        |this| FatDirNode::new(self.fs.clone(), dir, fs.alloc_inode(), this),
-                        reference,
-                    )
-                })
-                .map_err(into_vfs_err),
-            _ => Err(VfsError::InvalidInput),
+        let _namespace = self.pin.fs.namespace.lock().await;
+        let mut volume = self.pin.fs.lock().await;
+        let attrs = SetAttr::new();
+        let name_bytes = Name::new(name);
+        let id = match kind {
+            NodeType::RegularFile => volume.driver.create(self.pin.id, name_bytes, &attrs).await,
+            NodeType::Directory => volume.driver.mkdir(self.pin.id, name_bytes, &attrs).await,
+            _ => return Err(VfsError::InvalidInput),
         }
+        .map_err(vfs_error)?;
+        self.child(
+            &mut volume,
+            NodePin::new(self.pin.fs.clone(), id),
+            name,
+            kind,
+        )
     }
 
-    fn link(&self, _name: &str, _node: &DirEntry) -> VfsResult<DirEntry> {
-        //  EPERM  The filesystem containing oldpath and newpath does not
-        //         support the creation of hard links.
+    async fn link(&self, _name: &str, _node: &DirEntry) -> VfsResult<DirEntry> {
         Err(VfsError::PermissionDenied)
     }
 
-    fn unlink(&self, name: &str) -> VfsResult<()> {
-        let fs = self.fs.lock();
-        let dir = self.inner.borrow(&fs);
-        dir.remove(name).map_err(into_vfs_err)
+    async fn unlink(&self, name: &str) -> VfsResult<()> {
+        let fs = &self.pin.fs;
+        let _namespace = fs.namespace.lock().await;
+        let name = Name::new(name);
+        let victim = {
+            let mut volume = fs.lock().await;
+            let id = volume
+                .driver
+                .lookup(self.pin.id, name)
+                .await
+                .map_err(vfs_error)?;
+            NodePin::new(fs.clone(), id)
+        };
+        // Writeback takes the cache I/O lock before entering the FAT driver.
+        // Acquire those locks in the same order when retiring the backing id.
+        crate::discard_unlinked_file_cache_after(Arc::as_ptr(fs) as usize, victim.id.get(), async {
+            let mut volume = fs.lock().await;
+            match volume.driver.unlink(self.pin.id, name).await {
+                Err(e) if e.kind() == ErrorKind::IsADirectory => volume
+                    .driver
+                    .rmdir(self.pin.id, name)
+                    .await
+                    .map_err(vfs_error),
+                result => result.map_err(vfs_error),
+            }
+        })
+        .await
     }
 
-    fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
-        let fs = self.fs.lock();
-        let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-
-        let dir = self.inner.borrow(&fs);
-
-        // The default implementation throws EEXIST if dst exists, so we need to
-        // handle it
-        match dst_dir.inner.borrow(&fs).remove(dst_name) {
-            Ok(_) => {}
-            Err(fatfs::Error::NotFound) => {}
-            Err(err) => return Err(into_vfs_err(err)),
+    async fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+        let dst = dst_dir
+            .downcast::<Self>()
+            .map_err(|_| VfsError::CrossesDevices)?;
+        if !Arc::ptr_eq(&self.pin.fs, &dst.pin.fs) {
+            return Err(VfsError::CrossesDevices);
         }
-
-        dir.rename(src_name, dst_dir.inner.borrow(&fs), dst_name)
-            .map_err(into_vfs_err)
-    }
-}
-
-impl Drop for FatDirNode {
-    fn drop(&mut self) {
-        self.fs.lock().release_inode(self.inode);
+        let fs = &self.pin.fs;
+        let _namespace = fs.namespace.lock().await;
+        let src_name = Name::new(src_name);
+        let dst_name = Name::new(dst_name);
+        let (source, target) = {
+            let mut volume = fs.lock().await;
+            let id = volume
+                .driver
+                .lookup(self.pin.id, src_name)
+                .await
+                .map_err(vfs_error)?;
+            let source = NodePin::new(fs.clone(), id);
+            let target = match volume.driver.lookup(dst.pin.id, dst_name).await {
+                Ok(id) => Some(NodePin::new(fs.clone(), id)),
+                Err(e) if e.kind() == ErrorKind::NotFound => None,
+                Err(e) => return Err(vfs_error(e)),
+            };
+            (source, target)
+        };
+        let rename = async {
+            let mut volume = fs.lock().await;
+            // On success (or a cancelled rename completed by hadris recovery)
+            // a new lookup supplies the source node's current parent and name.
+            volume.entries.remove(&source.id);
+            volume
+                .driver
+                .rename(
+                    self.pin.id,
+                    src_name,
+                    dst.pin.id,
+                    dst_name,
+                    RenameMode::Replace,
+                )
+                .await
+                .map_err(vfs_error)
+        };
+        match target {
+            Some(victim) if victim.id != source.id => {
+                crate::discard_unlinked_file_cache_after(
+                    Arc::as_ptr(fs) as usize,
+                    victim.id.get(),
+                    rename,
+                )
+                .await
+            }
+            _ => rename.await,
+        }
     }
 }

@@ -123,6 +123,10 @@ fn splitmix64(mut value: u64) -> u64 {
 
 struct BlockDeviceKind {
     disk: Mutex<SeekableDisk<SharedBlockDevice>>,
+    // Mounts of the same device share one FAT node table. Once all users
+    // release the volume, the next mount reads the device again.
+    #[cfg(feature = "fat")]
+    fat: async_lock::Mutex<alloc::sync::Weak<super::fat::FatFilesystem<SharedBlockDevice>>>,
 }
 
 type DirContent = InMemDir<InodeRef>;
@@ -250,6 +254,8 @@ fn new_block_device(
         },
         NodeContent::BlockDevice(BlockDeviceKind {
             disk: Mutex::new(SeekableDisk::new(device)),
+            #[cfg(feature = "fat")]
+            fat: async_lock::Mutex::default(),
         }),
     ))
 }
@@ -567,6 +573,22 @@ impl DevNode {
         } else {
             Err(VfsError::InvalidInput)
         }
+    }
+
+    #[cfg(feature = "fat")]
+    pub async fn mount_fat(&self) -> VfsResult<Filesystem> {
+        let inode = self.inode_ref()?;
+        let NodeContent::BlockDevice(block) = &inode.content else {
+            return Err(VfsError::InvalidInput);
+        };
+        let mut cached = block.fat.lock().await;
+        if let Some(fs) = cached.upgrade() {
+            return Ok(Filesystem::new(fs));
+        }
+        let device = block.disk.lock().device().lock().clone();
+        let fs = super::fat::FatFilesystem::mount(device).await?;
+        *cached = Arc::downgrade(&fs);
+        Ok(Filesystem::new(fs))
     }
 
     pub fn is_tty(&self) -> bool {

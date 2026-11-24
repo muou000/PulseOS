@@ -281,6 +281,9 @@ impl DirNode {
         permission: NodePermission,
     ) -> VfsResult<DirEntry> {
         let entry = self.ops.create(name, node_type, permission).await?;
+        if !self.ops.is_cacheable() {
+            return Ok(entry);
+        }
         let mut children = self.cache.lock().await;
         self.cache_generation.fetch_add(1, Ordering::AcqRel);
         children.insert(name.to_owned(), entry.clone());

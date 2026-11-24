@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 #[cfg(feature = "fat")]
-mod fat;
+pub(crate) mod fat;
 
 #[cfg(feature = "ext4")]
 pub mod ext4;
@@ -24,7 +24,7 @@ pub async fn new_default<D: AsyncBlockDriverOps + Clone + 'static>(
         if #[cfg(feature = "ext4")] {
             ext4::Ext4Filesystem::new(dev).await
         } else if #[cfg(feature = "fat")] {
-            Ok(fat::FatFilesystem::new(dev))
+            fat::FatFilesystem::new(dev).await
         } else {
             panic!("No filesystem feature enabled");
         }
