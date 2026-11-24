@@ -122,10 +122,10 @@ PulseOS 的整体软件栈包含用户空间、Trap 异常分发、内核服务�
 ### 编译
 
 ```bash
-make rv        # 编译 RISC-V 64 内核 (kernel-rv)
-make la        # 编译 LoongArch64 内核 (kernel-la)
-make vf2       # 编译 VisionFive 2 内核 (PulseOS_riscv64-visionfive2.bin)
-make ls2k1000  # 编译 LS2K1000 内核 (PulseOS_loongarch64-ls2k1000.bin)
+make rv        # 编译 RISC-V 64 QEMU 内核
+make la        # 编译 LoongArch64 QEMU 内核
+make vf2       # 生成 VisionFive 2 的 U-Boot 镜像
+make ls2k1000  # 生成 LS2K1000 的启动 ELF
 make test      # 编译双架构门禁
 make clean     # 清理编译产物
 ```
@@ -168,6 +168,13 @@ QEMU virt 的默认启动参数为 `-cpu max`。内核确认所有可调度 hart
 RISC-V QEMU 测试镜像使用 Ubuntu 官方的 `ubuntu-base-26.10-base-riscv64.tar.gz`。lmbench、LTP、sysbench、UnixBench、fio 和 liburing 测试程序取自 PulseOS 发布的 `rootfs-tests-riscv64.tar.xz`。VisionFive 2 直接使用这份完整的测试包。两份归档均可缓存在 `rootfs/base/`，分别用 `./scripts/fetch-rootfs.sh --arch riscv64` 和 `RISCV_PLATFORM=visionfive2 ./scripts/fetch-rootfs.sh --arch riscv64` 下载并校验。[Ubuntu Base 26.10](https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release/) · [PulseOS 测试制品及校验和](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261120)
 
 ### 运行测试 (QEMU)
+
+在新检出的仓库根目录运行 `make test` 后，给两种架构的启动文件各建一个链接。下面的 QEMU 命令和来宾测试脚本使用这两个名字。执行 `make clean` 后需重新建立链接。
+
+```sh
+ln -s "${PWD##*/}_riscv64-qemu-virt.bin" kernel-rv
+ln -s "${PWD##*/}_loongarch64-qemu-virt.elf" kernel-la
+```
 
 #### RISC-V 64
 

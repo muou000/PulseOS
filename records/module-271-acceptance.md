@@ -38,10 +38,11 @@
 
 在镜像内执行 `/opt/ltp/testcases/bin/{shmat01,shmdt01,semget01,semop01}` 及 `execve01` 至 `execve06`。exec 设置 `LTPROOT=/opt/ltp`，将 `$LTPROOT/testcases/bin` 加入 PATH 并进入该目录。`execve05` 采用 `-i 5 -n 32`。[IPC 探针](../tests/sysv_ipc/README.md) · [失败 exec 探针](../tests/exec/README.md)
 
-按架构取对应镜像，默认内核用以下入口复现。io_uring 的产物由 `scripts/build_iouring_tests.sh` 构建。
+在仓库根目录准备好对应架构的镜像和 io_uring 探针。新工作树在首次构建后按 README 建立启动文件链接，再运行各来宾入口。[QEMU 启动文件链接](../README.md#运行测试-qemu)
 
 ```sh
 make test
+scripts/build_iouring_tests.sh --arch all
 for arch in riscv64 loongarch64; do
     python3 tests/init_shutdown/run.py --arch "$arch" --action identity
     python3 tests/file_sg_io/run.py --arch "$arch" --suite mappings
@@ -90,7 +91,7 @@ make ls2k1000
 | 候选 RV64 | 50 / 50 | 371（182 / 187） | `partial` / `IncompleteError` | global timer_busy 97，event skipped 1，event cancelled 1 |
 | 候选 LA64 | 54 / 54 | 50（28 / 22） | `partial` / `IncompleteError` | global timer_busy 21 |
 
-四次探针均通过，外来任务样本、环传输丢失和 RAW 导出丢弃均为 0。主机验证 RAW 后生成 capture v6，解码条数与 RAW 逐次相符。全局和事件级诊断作用域重叠，分析器对四份 capture 均报告 `attribution_claim_allowed=false`。样本数用于验证采样注册、身份和递送。本轮未测符号调用栈、生产 recorder 全矩阵或性能变化。
+四次探针均返回 0。基线 LA64 在探针输出退出标记后由宿主结束 QEMU 进程（退出状态 -9），其余三次 QEMU 退出状态为 0。外来任务样本、环传输丢失和 RAW 导出丢弃均为 0。主机验证 RAW 后生成 capture v6，解码条数与 RAW 逐次相符。全局和事件级诊断作用域重叠，分析器对四份 capture 均报告 `attribution_claim_allowed=false`。样本数用于验证采样注册、身份和递送。本轮未测符号调用栈、生产 recorder 全矩阵或性能变化。
 
 | 内核 | 启动文件 / 匹配 ELF SHA-256 前缀 | capture SHA-256 | 本地运行目录（`tests/bpf_sampling/runs/`） |
 | --- | --- | --- | --- |
