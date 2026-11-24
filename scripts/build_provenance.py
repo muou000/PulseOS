@@ -16,8 +16,8 @@ import time
 
 
 SOURCE_ROOTS = (
-    ".cargo", "api", "crates", "modules", "platforms", "pulse_core",
-    "pulse_syscalls", "src", "configs", "scripts/make", "Cargo.toml",
+    ".cargo", "api", "crates", "modules", "platforms", "pulse_syscalls",
+    "src", "configs", "scripts/make", "Cargo.toml",
     "Cargo.lock", "Makefile", "rust-toolchain", "rust-toolchain.toml",
     "scripts/build_provenance.py",
 )

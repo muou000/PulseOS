@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use kernel_guard::NoPreemptIrqSave;
 
-/// Global timer hook function pointer. Set by pulse_core to check itimers
+/// Global timer hook function pointer. Set by the process module to check itimers
 /// on each timer tick. Must be safe to call from interrupt context.
 static TIMER_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 

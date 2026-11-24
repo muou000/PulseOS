@@ -82,7 +82,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: usize, flags: usize) -> isize {
         }
 
         // Get process credentials
-        let (uid, gid) = pulse_core::task::current_process()
+        let (uid, gid) = process::current_process()
             .map(|process| (process.fsuid(), process.fsgid()))
             .unwrap_or((0, 0));
 
@@ -301,7 +301,7 @@ pub fn sys_mknodat(dirfd: i32, pathname: usize, mode: usize, _dev: usize) -> isi
         return -LinuxError::EINVAL.code() as isize;
     };
 
-    let umask = pulse_core::task::current_process()
+    let umask = process::current_process()
         .map(|process| process.umask())
         .unwrap_or(0o022);
     let perm = ((mode as u32) & !umask) & 0o7777;

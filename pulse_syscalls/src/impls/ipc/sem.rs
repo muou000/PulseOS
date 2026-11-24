@@ -9,7 +9,7 @@ use ipc::{
         self, GETALL, GETNCNT, GETPID, GETVAL, GETZCNT, SETALL, SETVAL, SemBuf, SemSet, SemidDs,
     },
 };
-use pulse_core::task::{current_process, current_thread, uaccess};
+use process::{current_process, current_thread, uaccess};
 
 use crate::impls::utils::read_user_timespec;
 

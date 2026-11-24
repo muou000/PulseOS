@@ -4,7 +4,7 @@ use axerrno::AxError;
 use hal::context::TrapFrame;
 use bitflags::bitflags;
 use memory_addr::PAGE_SIZE_4K;
-use pulse_core::task::{CloneParams, ForkParams, Process, current_process, current_thread};
+use process::{CloneParams, ForkParams, Process, current_process, current_thread};
 
 use crate::LinuxError;
 
@@ -52,7 +52,7 @@ fn ax_error_to_linux_ret(e: AxError) -> isize {
 struct PidfdReservation<'a> {
     parent: &'a Process,
     fd: usize,
-    object: alloc::sync::Arc<pulse_core::fd_table::PidfdObject>,
+    object: alloc::sync::Arc<process::fd::PidfdObject>,
     committed: bool,
 }
 
@@ -72,9 +72,9 @@ impl Drop for PidfdReservation<'_> {
 }
 
 fn reserve_pidfd(parent: &Process, user_addr: usize) -> Result<PidfdReservation<'_>, isize> {
-    let object = alloc::sync::Arc::new(pulse_core::fd_table::PidfdObject::new(0));
+    let object = alloc::sync::Arc::new(process::fd::PidfdObject::new(0));
     let entry =
-        pulse_core::fd_table::FdEntry::new(object.clone(), pulse_core::fd_table::FdFlags::CLOEXEC);
+        process::fd::FdEntry::new(object.clone(), process::fd::FdFlags::CLOEXEC);
     let fd = parent
         .insert_fd_entry(entry)
         .map_err(|e| -e.code() as isize)?;
@@ -654,7 +654,7 @@ pub fn sys_setns(fd: usize, nstype: usize) -> isize {
 
     match fd_ns_type {
         0x0400_0000 /* CLONE_NEWUTS */ => {
-            if let Some(target_proc) = pulse_core::task::process_by_pid(ns_pid) {
+            if let Some(target_proc) = process::process_by_pid(ns_pid) {
                 process.set_hostname_handle(target_proc.hostname_handle());
             }
         }

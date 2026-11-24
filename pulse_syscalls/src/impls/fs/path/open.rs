@@ -38,7 +38,7 @@ fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
     if (flags & O_PATH as usize) != 0 {
         options.path(true);
     }
-    let umask = pulse_core::task::current_process()
+    let umask = process::current_process()
         .map(|process| process.umask())
         .unwrap_or(0o022);
     let mode = ((mode as u32) & !umask) & 0o7777;
@@ -47,7 +47,7 @@ fn flags_to_options(flags: usize, mode: usize) -> OpenOptions {
 }
 
 fn mkdir_mode(mode: usize) -> NodePermission {
-    let umask = pulse_core::task::current_process()
+    let umask = process::current_process()
         .map(|process| process.umask())
         .unwrap_or(0o022);
     let mode = ((mode as u32) & !umask) & 0o7777;
@@ -77,7 +77,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
                 }
             };
 
-        let (uid, gid) = pulse_core::task::current_process()
+        let (uid, gid) = process::current_process()
             .map(|process| (process.fsuid(), process.fsgid()))
             .unwrap_or((0, 0));
 
@@ -130,7 +130,7 @@ pub fn sys_openat(dirfd: i32, pathname: usize, flags: usize, mode: usize) -> isi
             let access_mode = flags & (O_ACCMODE as usize);
             let readable = access_mode == O_RDONLY as usize || access_mode == O_RDWR as usize;
             let writable = access_mode == O_WRONLY as usize || access_mode == O_RDWR as usize;
-            pulse_core::fd_table::create_fifo_entry(
+            process::fd::create_fifo_entry(
                 metadata.device,
                 metadata.inode,
                 readable,

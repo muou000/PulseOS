@@ -5,13 +5,13 @@ use io::SeekFrom;
 use linux_raw_sys::general::{
     POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, S_IFDIR, S_IFMT, S_IFREG, SIGPIPE, pollfd,
 };
-use pulse_core::{
-    fd_table::{
+use process::{
+    fd::{
         EventFdObject, FD_LIMIT, FdObject, FileObject, PipeObject, SignalFdObject, TimerFdObject,
         pipe_entries,
     },
-    net::Socket,
-    task::{current_thread, queue_signal_to_thread, uaccess},
+    socket::Socket,
+    current_thread, queue_signal_to_thread, uaccess,
 };
 
 use crate::{

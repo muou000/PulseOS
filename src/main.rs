@@ -12,14 +12,13 @@ extern crate axplat_riscv64_visionfive2;
 extern crate runtime;
 extern crate net;
 extern crate sync;
-extern crate pulse_core;
 extern crate pulse_syscalls;
 extern crate starry_vdso;
 
 mod cpu_reservation;
 
 use alloc::vec::Vec;
-use pulse_core::task::exec::resolve_exec_path_and_args;
+use process::exec::resolve_exec_path_and_args;
 
 /// The test-runner exit path bypasses `reboot(2)`, so it must uphold the same
 /// durability rule itself: never hand control to firmware after a failed
@@ -45,28 +44,28 @@ fn main() {
     starry_vdso::vdso::init_vdso_data();
     runtime::vdso::set_update_hook(starry_vdso::vdso::update_vdso_data);
 
-    pulse_core::task::init_itimer_hook();
+    process::init_itimer_hook();
     info!("itimer hook registered");
 
-    pulse_core::task::init_procfs_provider();
+    process::init_procfs_provider();
     info!("procfs provider registered");
 
-    pulse_core::fd_table::init_tty_callbacks();
+    process::fd::init_tty_callbacks();
     info!("TTY callbacks registered");
 
-    pulse_core::trap::init();
+    process::trap::init();
 
     const SHELL_ELF_PATH: &str = "/bin/sh";
 
-    let inner = pulse_core::task::try_new_user_task(
+    let inner = process::try_new_user_task(
         || {
             let thread =
-                pulse_core::task::current_thread().expect("init task entered without Thread");
+                process::current_thread().expect("init task entered without Thread");
             let proc = thread.process();
 
             #[cfg(feature = "mapping-lifecycle-test")]
             {
-                pulse_core::mm::lifecycle_checks::run().expect("mapping lifecycle kernel checks failed");
+                process::lifecycle_checks::run().expect("mapping lifecycle kernel checks failed");
                 fs::run_mapping_lifecycle_checks().expect("mapping cache kernel checks failed");
                 pulse_syscalls::run_mapping_shutdown_checks().expect("mapping shutdown kernel checks failed");
                 info!("MLC_KERNEL RESULT PASS");
@@ -75,12 +74,12 @@ fn main() {
             #[cfg(feature = "guest-checks")]
             {
                 pulse_syscalls::run_bpf_guest_checks().expect("bpf guest checks failed");
-                pulse_core::fd_table::run_pipe_guest_checks().expect("pipe guest checks failed");
-                pulse_core::io_uring::run_io_uring_resource_guest_checks()
+                process::fd::run_pipe_guest_checks().expect("pipe guest checks failed");
+                process::io_uring::run_io_uring_resource_guest_checks()
                     .expect("io_uring resource guest checks failed");
             }
-            pulse_core::task::run_futex_guest_checks().expect("futex guest checks failed");
-            pulse_core::task::run_process_registry_guest_checks().expect("process registry guest checks failed");
+            process::run_futex_guest_checks().expect("futex guest checks failed");
+            process::run_process_registry_guest_checks().expect("process registry guest checks failed");
             fs::run_dma_and_writeback_guest_checks().expect("dma & writeback guest checks failed");
             net::run_tcp_endpoint_concurrency_checks().expect("tcp endpoint concurrency checks failed");
             sync::run_lock_stress_checks().expect("sync lock stress checks failed");
@@ -89,7 +88,7 @@ fn main() {
             // wakeups/allocations must not race allocator accounting assertions
             // or the synthetic BPF model checks. It is ready before userspace.
             #[cfg(feature = "bpf-trace")]
-            pulse_core::bpf::sampling::init();
+            process::bpf::sampling::init();
 
             let shell_args_base: &[&str] = &["sh"];
             let shell_envs: &[&str] = &["PATH=/usr/sbin:/usr/bin:/sbin:/bin"];
@@ -129,13 +128,13 @@ fn main() {
     // Linux reserves PID/TID 1 for init. Kernel tasks have already consumed
     // scheduler IDs, which remain independent of this userspace identity.
     let init_tid = 1;
-    match pulse_core::task::Process::new_uspace(init_tid) {
+    match process::Process::new_uspace(init_tid) {
         Ok(proc) => {
-            let init_thread = pulse_core::task::Thread::new(proc.clone(), init_tid, inner.id());
-            pulse_core::task::register_thread_global(init_tid, init_thread.clone());
+            let init_thread = process::Thread::new(proc.clone(), init_tid, inner.id());
+            process::register_thread_global(init_tid, init_thread.clone());
             info!("Created initial user process");
 
-            let init_task = pulse_core::task::spawn_task_with_thread(inner, init_thread.clone(), true);
+            let init_task = process::spawn_task_with_thread(inner, init_thread.clone(), true);
             loop {
                 task::yield_now();
             }

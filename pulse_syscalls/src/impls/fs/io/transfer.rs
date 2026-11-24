@@ -18,7 +18,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
     };
     if out_entry
         .flags
-        .contains(pulse_core::fd_table::FdFlags::PATH)
+        .contains(process::fd::FdFlags::PATH)
     {
         return -LinuxError::EBADF.code() as isize;
     }
@@ -28,7 +28,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset: usize, count: usize) ->
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if in_entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if in_entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let input = in_entry.object;
@@ -160,10 +160,10 @@ pub fn sys_copy_file_range(
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if in_entry.flags.contains(pulse_core::fd_table::FdFlags::PATH)
+    if in_entry.flags.contains(process::fd::FdFlags::PATH)
         || out_entry
             .flags
-            .contains(pulse_core::fd_table::FdFlags::PATH)
+            .contains(process::fd::FdFlags::PATH)
     {
         return -LinuxError::EBADF.code() as isize;
     }

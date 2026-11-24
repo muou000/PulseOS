@@ -267,7 +267,7 @@ pub fn sys_perf_event_open(
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
@@ -323,7 +323,7 @@ pub fn sys_perf_event_open(
     let is_root = process.is_root_user()
         || process.has_capability(CAP_SYS_ADMIN)
         || process.has_capability(CAP_PERFMON);
-    let current_pid = match pulse_core::task::current_thread() {
+    let current_pid = match process::current_thread() {
         Ok(thread) => thread.tid(),
         Err(e) => return -e.code() as isize,
     };
@@ -335,7 +335,7 @@ pub fn sys_perf_event_open(
         is_root,
         current_pid,
         max_cpus,
-        process_exists: &|target_tid| pulse_core::task::thread_by_tid_global(target_tid).is_some(),
+        process_exists: &|target_tid| process::thread_by_tid_global(target_tid).is_some(),
     };
 
     let scope = match validate_perf_event_scope(scope_params) {
@@ -358,21 +358,21 @@ pub fn sys_perf_event_open(
         cloexec,
     };
 
-    let now_ns = match pulse_core::bpf::PerfEventObject::current_time_ns_for_spec(&spec) {
+    let now_ns = match process::bpf::PerfEventObject::current_time_ns_for_spec(&spec) {
         Ok(now_ns) => now_ns,
         Err(e) => return -e.code() as isize,
     };
     let event = alloc::sync::Arc::new(PerfEvent::new(spec, now_ns));
-    let object = match pulse_core::bpf::PerfEventObject::new(event) {
+    let object = match process::bpf::PerfEventObject::new(event) {
         Ok(object) => alloc::sync::Arc::new(object),
         Err(e) => return -e.code() as isize,
     };
     let fd_flags = if cloexec {
-        pulse_core::fd_table::FdFlags::CLOEXEC
+        process::fd::FdFlags::CLOEXEC
     } else {
-        pulse_core::fd_table::FdFlags::empty()
+        process::fd::FdFlags::empty()
     };
-    let entry = pulse_core::fd_table::FdEntry::new(object, fd_flags);
+    let entry = process::fd::FdEntry::new(object, fd_flags);
     match process.insert_fd_entry(entry) {
         Ok(fd) => fd as isize,
         Err(e) => -e.code() as isize,

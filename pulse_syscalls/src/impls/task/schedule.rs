@@ -5,7 +5,7 @@ use linux_raw_sys::general::{
     CAP_SYS_NICE, PRIO_PGRP, PRIO_PROCESS, PRIO_USER, SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO,
     SCHED_IDLE, SCHED_NORMAL, SCHED_RR, timespec,
 };
-use pulse_core::task::{
+use process::{
     Process, Thread, current_process, current_thread, processes_snapshot, thread_by_tid_global,
 };
 

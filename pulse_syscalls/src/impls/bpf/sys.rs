@@ -2,10 +2,10 @@ use alloc::sync::Arc;
 
 use axerrno::LinuxError;
 use bpf::{BpfLink, BpfMap, BpfMapCreateRequest, BpfMapSpec};
-use pulse_core::{
+use process::{
     bpf::{BpfLinkObject, BpfMapObject, BpfProgramObject, PerfEventObject},
-    fd_table::{FdEntry, FdFlags},
-    task::Process,
+    fd::{FdEntry, FdFlags},
+    Process,
 };
 
 use super::{
@@ -40,7 +40,7 @@ impl From<&BpfMapCreateAttr> for BpfMapCreateRequest {
 }
 
 pub fn sys_bpf(cmd: i32, attr: usize, size: usize) -> isize {
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(t) => t,
         Err(e) => return -LinuxError::from(e).code() as isize,
     };
@@ -526,7 +526,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
 
     let mut count_buf = [0u8; 8];
     // Initial read is 0
-    use pulse_core::fd_table::FdObject;
+    use process::fd::FdObject;
     cpu_obj.read(&mut count_buf)?;
     if u64::from_ne_bytes(count_buf) != 0 {
         return Err(LinuxError::EINVAL);
@@ -568,7 +568,7 @@ pub fn run_bpf_guest_checks() -> Result<(), LinuxError> {
 
     // 2. Task clock is for this actual thread, not an assumed PID 1 or
     // a nonexistent identity silently counted using the wall clock.
-    let sampling_tid = pulse_core::task::current_thread()?.tid();
+    let sampling_tid = process::current_thread()?.tid();
     let task_spec = bpf::PerfEventSpec {
         clock: bpf::PerfEventClock::TaskClock,
         scope: bpf::PerfEventScope::Task { pid: sampling_tid },

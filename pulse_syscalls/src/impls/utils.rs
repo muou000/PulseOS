@@ -5,10 +5,10 @@ use axerrno::LinuxError;
 use hal::mem::phys_to_virt;
 use linux_raw_sys::general::{UTIME_NOW, UTIME_OMIT, iovec, timespec, timeval};
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr};
-use pulse_core::mm::{
+use process::uaccess::{
     PinnedUserBuffers, UserBufferCursor, release_pinned_user_frame, release_pinned_user_frames,
 };
-use pulse_core::task::uaccess;
+use process::uaccess;
 
 use crate::validation::user_abi::{
     read_user_array_from, read_user_iovec_array_from, read_user_value_from, write_user_slice_to,
@@ -57,9 +57,9 @@ impl Drop for PinnedUserSlice {
 pub(crate) const USER_PATH_MAX: usize = uaccess::DEFAULT_USER_CSTRING_MAX;
 
 pub(crate) fn with_process<R>(
-    f: impl FnOnce(&pulse_core::task::Process) -> R,
+    f: impl FnOnce(&process::Process) -> R,
 ) -> Result<R, LinuxError> {
-    let process = pulse_core::task::current_process()?;
+    let process = process::current_process()?;
     Ok(f(process.as_ref()))
 }
 
@@ -210,7 +210,7 @@ pub(crate) enum ScratchBuffer {
     },
     Heap(Vec<u8>),
     ThreadLocal {
-        thread: Arc<pulse_core::task::Thread>,
+        thread: Arc<process::Thread>,
         buffer: Option<Vec<u8>>,
         len: usize,
     },
@@ -259,7 +259,7 @@ pub(crate) fn alloc_zeroed_bytes(
             len,
         })
     } else {
-        if let Ok(thread) = pulse_core::task::current_thread() {
+        if let Ok(thread) = process::current_thread() {
             let mut buf = thread.take_io_buffer();
             if buf.len() < len {
                 if buf.try_reserve_exact(len - buf.len()).is_err() {
@@ -297,7 +297,7 @@ pub(crate) fn alloc_uninit_bytes(
             len,
         })
     } else {
-        if let Ok(thread) = pulse_core::task::current_thread() {
+        if let Ok(thread) = process::current_thread() {
             let mut buf = thread.take_io_buffer();
             if buf.len() < len {
                 if buf.try_reserve_exact(len - buf.len()).is_err() {
@@ -366,7 +366,7 @@ fn pin_user_slice(
     max_len: usize,
     required_flags: hal::paging::MappingFlags,
 ) -> Option<PinnedUserSlice> {
-    let process = pulse_core::task::current_process().ok()?;
+    let process = process::current_process().ok()?;
     if max_len == 0 {
         return None;
     }

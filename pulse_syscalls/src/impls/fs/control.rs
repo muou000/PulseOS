@@ -13,7 +13,7 @@ use linux_raw_sys::{
         LOOP_SET_STATUS, LOOP_SET_STATUS64,
     },
 };
-use pulse_core::fd_table::FdEntry;
+use process::fd::FdEntry;
 
 use pulse_user_abi::fs::{HdGeometry, RtcTime};
 
@@ -22,7 +22,7 @@ use crate::impls::utils::write_user_value;
 static TTY_IOCTL_STUB_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxError> {
-    let process = pulse_core::task::current_process()?;
+    let process = process::current_process()?;
     let fd_table = process.fd_table();
     let entry = fd_table.read().get_entry_cloned(fd)?;
 
@@ -59,7 +59,7 @@ fn do_handle_loop_ioctl(fd: usize, cmd: u32, arg: usize) -> Result<isize, LinuxE
                 if let Some(file_obj) = backing_entry
                     .object
                     .as_any()
-                    .downcast_ref::<pulse_core::fd_table::FileObject>()
+                    .downcast_ref::<process::fd::FileObject>()
                 {
                     let file = file_obj.inner();
                     fs::set_loop_backing(loop_id, file.clone_with_new_position())
@@ -237,7 +237,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
 
     let cmd32 = cmd as u32;
 
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -273,7 +273,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         TCGETS => {
             warn_tty_ioctl_stub_once(fd, cmd32);
             if arg != 0 {
-                if let Err(e) = pulse_core::fd_table::read_tty_termios(arg) {
+                if let Err(e) = process::fd::read_tty_termios(arg) {
                     return -e.code() as isize;
                 }
             }
@@ -282,7 +282,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         TCSETS | TCSETSW | TCSETSF => {
             warn_tty_ioctl_stub_once(fd, cmd32);
             if arg != 0 {
-                if let Err(e) = pulse_core::fd_table::write_tty_termios(arg) {
+                if let Err(e) = process::fd::write_tty_termios(arg) {
                     return -e.code() as isize;
                 }
             }
@@ -291,7 +291,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         TCGETS2 => {
             warn_tty_ioctl_stub_once(fd, cmd32);
             if arg != 0 {
-                if let Err(e) = pulse_core::fd_table::read_tty_termios2(arg) {
+                if let Err(e) = process::fd::read_tty_termios2(arg) {
                     return -e.code() as isize;
                 }
             }
@@ -300,7 +300,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         TCSETS2 | TCSETSW2 | TCSETSF2 => {
             warn_tty_ioctl_stub_once(fd, cmd32);
             if arg != 0 {
-                if let Err(e) = pulse_core::fd_table::write_tty_termios2(arg) {
+                if let Err(e) = process::fd::write_tty_termios2(arg) {
                     return -e.code() as isize;
                 }
             }
@@ -308,7 +308,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         TIOCGPGRP | TIOCSPGRP => {
             warn_tty_ioctl_stub_once(fd, cmd32);
-            match pulse_core::fd_table::tty_pgrp_ioctl(cmd32, arg) {
+            match process::fd::tty_pgrp_ioctl(cmd32, arg) {
                 Some(Ok(result)) => result,
                 Some(Err(e)) => -e.code() as isize,
                 None => unreachable!(),
@@ -316,14 +316,14 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         TIOCGWINSZ => {
             warn_tty_ioctl_stub_once(fd, cmd32);
-            if let Err(e) = pulse_core::fd_table::read_tty_winsize(arg) {
+            if let Err(e) = process::fd::read_tty_winsize(arg) {
                 return -e.code() as isize;
             }
             0
         }
         TIOCSWINSZ => {
             warn_tty_ioctl_stub_once(fd, cmd32);
-            if let Err(e) = pulse_core::fd_table::write_tty_winsize(arg) {
+            if let Err(e) = process::fd::write_tty_winsize(arg) {
                 return -e.code() as isize;
             }
             0

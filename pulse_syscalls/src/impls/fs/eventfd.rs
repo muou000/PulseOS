@@ -1,6 +1,6 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::{EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE};
-use pulse_core::fd_table::{FdFlags, eventfd_entry};
+use process::fd::{FdFlags, eventfd_entry};
 
 use crate::impls::fs::common::insert_fd_entry;
 

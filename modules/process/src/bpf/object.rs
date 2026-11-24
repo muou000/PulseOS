@@ -2,10 +2,10 @@ use alloc::sync::Arc;
 use core::any::Any;
 
 use axerrno::{LinuxError, LinuxResult};
+use bpf::BpfMap;
 use io::PollState;
 use linux_raw_sys::general::stat;
 
-use super::BpfMap;
 use crate::fd::{FdObject, PollEventSequence, PollRegistration};
 
 /// A BPF Map object FD.
@@ -16,7 +16,7 @@ use crate::fd::{FdObject, PollEventSequence, PollRegistration};
 /// `ENOTTY`, and `mmap` fails because the object has no file location.
 pub struct BpfMapObject {
     map: Arc<BpfMap>,
-    ringbuf: Option<Arc<super::BpfRingBuf>>,
+    ringbuf: Option<Arc<bpf::BpfRingBuf>>,
 }
 
 impl BpfMapObject {
@@ -29,7 +29,7 @@ impl BpfMapObject {
         &self.map
     }
 
-    pub fn info(&self) -> super::BpfMapInfo {
+    pub fn info(&self) -> bpf::BpfMapInfo {
         self.map.info()
     }
 
@@ -182,19 +182,19 @@ impl FdObject for BpfMapObject {
 ///
 /// Follows the same object lifecycle and permissions as BpfMapObject.
 pub struct BpfProgramObject {
-    program: Arc<super::BpfProgram>,
+    program: Arc<bpf::BpfProgram>,
 }
 
 impl BpfProgramObject {
-    pub fn new(program: Arc<super::BpfProgram>) -> Self {
+    pub fn new(program: Arc<bpf::BpfProgram>) -> Self {
         Self { program }
     }
 
-    pub fn program(&self) -> &Arc<super::BpfProgram> {
+    pub fn program(&self) -> &Arc<bpf::BpfProgram> {
         &self.program
     }
 
-    pub fn info(&self) -> super::BpfProgInfo {
+    pub fn info(&self) -> bpf::BpfProgInfo {
         self.program.info()
     }
 }
@@ -239,7 +239,7 @@ impl FdObject for BpfProgramObject {
 /// Implements Linux-compatible `read` (returning 64-bit elapsed counter value)
 /// and `ioctl` (ENABLE, DISABLE, RESET, PERIOD, etc.).
 pub struct PerfEventObject {
-    event: Arc<super::PerfEvent>,
+    event: Arc<bpf::PerfEvent>,
     // Keep the selected thread clock available after exit and PID/TID reuse.
     clock_thread: Option<Arc<crate::Thread>>,
 }
@@ -247,27 +247,27 @@ pub struct PerfEventObject {
 impl PerfEventObject {
     /// Wrap a newly created event, fixing its thread identity before publishing
     /// it to runtime dispatch. Rebase task-clock accounting on that same thread.
-    pub fn new(event: Arc<super::PerfEvent>) -> LinuxResult<Self> {
+    pub fn new(event: Arc<bpf::PerfEvent>) -> LinuxResult<Self> {
         let clock_thread = match event.spec().scope {
-            super::PerfEventScope::Task { pid } => {
+            bpf::PerfEventScope::Task { pid } => {
                 Some(crate::thread_by_tid_global(pid).ok_or(LinuxError::ESRCH)?)
             }
             _ => None,
         };
         if let Some(thread) = &clock_thread {
             event.bind_task_identity(thread.sampling_task_id())?;
-            if event.spec().clock == super::PerfEventClock::TaskClock {
+            if event.spec().clock == bpf::PerfEventClock::TaskClock {
                 let clock = thread.sampling_clock_ns(hal::time::monotonic_time_nanos())
                     .ok_or(LinuxError::EAGAIN)?;
                 event.reset_at(clock);
             }
         }
         // Register ioctl attachments too; the registry holds only Weak refs.
-        super::register_active_perf_event(&event);
+        bpf::register_active_perf_event(&event);
         Ok(Self { event, clock_thread })
     }
 
-    pub fn event(&self) -> &Arc<super::PerfEvent> {
+    pub fn event(&self) -> &Arc<bpf::PerfEvent> {
         &self.event
     }
 
@@ -277,10 +277,10 @@ impl PerfEventObject {
         self.clock_thread.as_ref()?.sampling_live_tid()
     }
 
-    pub fn current_time_ns_for_spec(spec: &super::PerfEventSpec) -> LinuxResult<u64> {
+    pub fn current_time_ns_for_spec(spec: &bpf::PerfEventSpec) -> LinuxResult<u64> {
         let now_ns = hal::time::monotonic_time_nanos() as u64;
         match (spec.clock, spec.scope) {
-            (super::PerfEventClock::TaskClock, super::PerfEventScope::Task { pid }) => {
+            (bpf::PerfEventClock::TaskClock, bpf::PerfEventScope::Task { pid }) => {
                 let thread = crate::thread_by_tid_global(pid).ok_or(LinuxError::ESRCH)?;
                 thread.sampling_clock_ns(now_ns).ok_or(LinuxError::EAGAIN)
             }
@@ -289,7 +289,7 @@ impl PerfEventObject {
     }
 
     pub fn current_time_ns(&self) -> LinuxResult<u64> {
-        if self.event.spec().clock == super::PerfEventClock::TaskClock
+        if self.event.spec().clock == bpf::PerfEventClock::TaskClock
             && let Some(thread) = &self.clock_thread {
             return thread.sampling_clock_ns(hal::time::monotonic_time_nanos())
                 .ok_or(LinuxError::EAGAIN);
@@ -313,7 +313,7 @@ impl FdObject for PerfEventObject {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> LinuxResult<isize> {
-        if cmd == super::PERF_EVENT_IOC_SET_BPF {
+        if cmd == bpf::PERF_EVENT_IOC_SET_BPF {
             let process = crate::current_process()?;
             let obj = process.get_fd_object(arg)?;
             let Some(prog_obj) = obj.as_any().downcast_ref::<BpfProgramObject>() else {
@@ -421,7 +421,7 @@ impl FdObject for PerfEventObject {
             }
             existing
         } else {
-            match super::perf_event::PerfBuffer::new(nr_data_pages) {
+            match bpf::perf_event::PerfBuffer::new(nr_data_pages) {
                 Ok(new_buf) => {
                     self.event.set_buffer(new_buf.clone());
                     new_buf
@@ -448,19 +448,19 @@ impl FdObject for PerfEventObject {
 
 /// A BPF Link object FD (#98).
 pub struct BpfLinkObject {
-    link: Arc<super::BpfLink>,
+    link: Arc<bpf::BpfLink>,
 }
 
 impl BpfLinkObject {
-    pub fn new(link: Arc<super::BpfLink>) -> Self {
+    pub fn new(link: Arc<bpf::BpfLink>) -> Self {
         Self { link }
     }
 
-    pub fn link(&self) -> &Arc<super::BpfLink> {
+    pub fn link(&self) -> &Arc<bpf::BpfLink> {
         &self.link
     }
 
-    pub fn info(&self) -> super::BpfLinkInfo {
+    pub fn info(&self) -> bpf::BpfLinkInfo {
         self.link.info()
     }
 }

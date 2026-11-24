@@ -3,7 +3,7 @@ use axerrno::LinuxError;
 use kernel_log::*;
 
 use super::{addr::{NetSocketAddr, write_unix_addr}, get_socket};
-use pulse_core::net::{SocketInner, adapt_sockaddr_for_domain};
+use process::socket::{SocketInner, adapt_sockaddr_for_domain};
 
 use crate::impls::utils::{read_user_value, write_user_value};
 
@@ -21,7 +21,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
                 Err(e) => return -(e.code() as isize),
             }
         }
-        let path = pulse_core::net::lookup_unix_path_by_socket(&socket);
+        let path = process::socket::lookup_unix_path_by_socket(&socket);
         match write_unix_addr(path, addr, addrlen) {
             Ok(()) => return 0,
             Err(e) => return -(e.code() as isize),
@@ -36,7 +36,7 @@ pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
         };
         let mut nladdr = [0u8; 12]; // sockaddr_nl is 12 bytes
         nladdr[0..2].copy_from_slice(&16u16.to_ne_bytes()); // nl_family = 16 (AF_NETLINK)
-        let pid = pulse_core::task::current_process().map(|p| p.pid() as u32).unwrap_or(0);
+        let pid = process::current_process().map(|p| p.pid() as u32).unwrap_or(0);
         nladdr[4..8].copy_from_slice(&pid.to_ne_bytes());
         
         let to_write = core::cmp::min(alen as usize, 12);
@@ -105,7 +105,7 @@ pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
             Ok(a) => a,
             Err(e) => return -(e.code() as isize),
         };
-        let path = pulse_core::net::lookup_unix_path_by_addr(peer_addr);
+        let path = process::socket::lookup_unix_path_by_addr(peer_addr);
         match write_unix_addr(path, addr, addrlen) {
             Ok(()) => return 0,
             Err(e) => return -(e.code() as isize),

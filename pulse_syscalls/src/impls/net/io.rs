@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use axerrno::LinuxError;
 use kernel_log::*;
-use pulse_core::net::{Socket, SocketInner};
+use process::socket::{Socket, SocketInner};
 use pulse_user_abi::net::MessageHeader as MsgHdr;
 
 use super::{
@@ -47,8 +47,8 @@ fn resolve_unix_addr(addr: usize, addrlen: usize) -> Result<core::net::SocketAdd
     let path = read_unix_path(addr, addrlen)?;
     let fs =
         crate::impls::utils::with_process(|process| process.fs_context_handle().lock().clone())?;
-    let key = pulse_core::net::resolve_unix_path_sync(&fs, &path)?;
-    let (target_addr, _) = pulse_core::net::lookup_unix_socket_by_key(&key)?;
+    let key = process::socket::resolve_unix_path_sync(&fs, &path)?;
+    let (target_addr, _) = process::socket::lookup_unix_socket_by_key(&key)?;
     Ok(target_addr)
 }
 
@@ -60,7 +60,7 @@ fn send_socket_data(
 ) -> Result<usize, LinuxError> {
     let dont_wait = (flags & (linux_raw_sys::net::MSG_DONTWAIT as usize)) != 0;
     if dont_wait || socket.is_nonblocking() {
-        let pid = pulse_core::task::current_process()
+        let pid = process::current_process()
             .map(|p| p.pid() as u32)
             .unwrap_or(0);
         return socket.try_send_to(data, dest_addr, flags as u32, pid);
@@ -114,12 +114,12 @@ fn recv_socket_data(
         loop {
             match socket.try_recv_from(buf, msg_flags) {
                 Err(LinuxError::EAGAIN) => {
-                    let _ = pulse_core::fd_table::FdObject::wait_ready(
+                    let _ = process::fd::FdObject::wait_ready(
                         socket,
                         linux_raw_sys::general::POLLIN as i16,
                         None,
                     )?;
-                    if pulse_core::task::current_have_signals() {
+                    if process::current_have_signals() {
                         return Err(LinuxError::EINTR);
                     }
                 }
@@ -754,7 +754,7 @@ pub fn sys_recvmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize, timeout
                     }
                 }
 
-                if pulse_core::task::current_have_signals() {
+                if process::current_have_signals() {
                     if received_count > 0 {
                         break;
                     } else {

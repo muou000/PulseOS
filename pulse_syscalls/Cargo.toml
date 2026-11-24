@@ -12,10 +12,10 @@ default = ["irq", "ext4"]
 irq = ["task/irq"]
 ext4 = ["fs/ext4"]
 fat = ["fs/fat"]
-bpf-trace = ["task/bpf-trace", "pulse_core/bpf-trace"]
+bpf-trace = ["task/bpf-trace", "process/bpf-trace"]
 mapping-lifecycle-test = ["fs/mapping-lifecycle-test"]
-guest-checks = ["pulse_core/guest-checks"]
-file-io-test = ["fs/file-io-test", "pulse_core/file-io-test"]
+guest-checks = ["process/guest-checks"]
+file-io-test = ["fs/file-io-test", "process/file-io-test"]
 
 [dependencies]
 bpf.workspace = true
@@ -44,7 +44,7 @@ linkme.workspace = true
 memory_addr.workspace = true
 bitflags.workspace = true
 kernel_guard.workspace = true
-pulse_core.workspace = true
+process.workspace = true
 starry-vdso.workspace = true
 scope-local.workspace = true
 rand_core.workspace = true

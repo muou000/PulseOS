@@ -458,7 +458,7 @@ pub fn validate_user_attr_range(attr: usize, size: usize) -> Result<(), LinuxErr
     #[cfg(target_os = "none")]
     {
         let _ = end;
-        pulse_core::task::uaccess::validate_user_range(attr, size)
+        process::uaccess::validate_user_range(attr, size)
             .map_err(|_| LinuxError::EFAULT)?;
     }
     #[cfg(not(target_os = "none"))]

@@ -7,24 +7,6 @@
 
 mod object;
 
-// Compatibility exports for callers of the original pulse_core::bpf API.
-pub use bpf::{
-    insn::*,
-    interpreter,
-    interpreter::{
-        BPF_MAX_RECURSION_DEPTH, BPF_MAX_STEPS, BpfEnv, BpfVmError, DefaultBpfEnv, execute,
-    },
-    link,
-    link::*,
-    map::*,
-    perf_event,
-    perf_event::*,
-    program,
-    program::*,
-    ring_buffer,
-    ring_buffer::*,
-    verifier,
-};
 pub use object::{BpfLinkObject, BpfMapObject, BpfProgramObject, PerfEventObject};
 
 #[cfg(feature = "bpf-trace")]

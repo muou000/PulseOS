@@ -1,7 +1,7 @@
 use alloc::{string::String, vec::Vec};
 
 use axerrno::LinuxError;
-use pulse_core::task::{Process, uaccess};
+use process::{Process, uaccess};
 
 pub(super) fn read_user_usize(process: &Process, user_addr: usize) -> Result<usize, isize> {
     process.read_user_usize(user_addr).map_err(|e| {

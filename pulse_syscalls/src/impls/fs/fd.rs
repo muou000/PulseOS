@@ -6,10 +6,10 @@ use linux_raw_sys::general::{
     F_WRLCK, FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY, POSIX_FADV_NOREUSE,
     RLIMIT_FSIZE, S_IFMT, S_IFREG, SEEK_CUR, SEEK_END, SEEK_SET, flock,
 };
-use pulse_core::{
-    fd_table::{DirObject, FdFlags, FileObject, PidfdObject},
-    record_lock::{RecordLockOwner, RecordLockType},
-    task::uaccess,
+use process::{
+    fd::{DirObject, FdFlags, FileObject, PidfdObject},
+    fd::record_lock::{RecordLockOwner, RecordLockType},
+    uaccess,
 };
 
 use crate::impls::{
@@ -41,7 +41,7 @@ pub fn sys_close_range(first: usize, last: usize, flags: usize) -> isize {
         Err(e) => return -e.code() as isize,
     };
 
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
@@ -210,7 +210,7 @@ fn sys_fcntl_record_lock(fd: usize, cmd: u32, arg: usize) -> Result<isize, Linux
         }
         _ => return Err(LinuxError::EINVAL),
     };
-    let (start, end) = pulse_core::record_lock::resolve_range(base, lock.l_start, lock.l_len)?;
+    let (start, end) = process::fd::record_lock::resolve_range(base, lock.l_start, lock.l_len)?;
     let is_ofd = matches!(cmd, F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW);
     if is_ofd && lock.l_pid != 0 {
         return Err(LinuxError::EINVAL);
@@ -220,19 +220,19 @@ fn sys_fcntl_record_lock(fd: usize, cmd: u32, arg: usize) -> Result<isize, Linux
     } else {
         RecordLockOwner::Posix(with_process(|process| process.pid())?)
     };
-    let target = pulse_core::flock::get_lock_target(&entry.object);
+    let target = process::fd::flock::get_lock_target(&entry.object);
     let lock_type = match lock.l_type as u32 {
         F_RDLCK => RecordLockType::Read,
         F_WRLCK => RecordLockType::Write,
         F_UNLCK if !matches!(cmd, F_GETLK | F_OFD_GETLK) => {
-            return pulse_core::record_lock::unlock_lock(owner, target, start, end);
+            return process::fd::record_lock::unlock_lock(owner, target, start, end);
         }
         _ => return Err(LinuxError::EINVAL),
     };
 
     if matches!(cmd, F_GETLK | F_OFD_GETLK) {
         if let Some(conflict) =
-            pulse_core::record_lock::get_lock(owner, target, start, end, lock_type)?
+            process::fd::record_lock::get_lock(owner, target, start, end, lock_type)?
         {
             lock.l_type = match conflict.lock_type {
                 RecordLockType::Read => F_RDLCK as i16,
@@ -270,7 +270,7 @@ fn sys_fcntl_record_lock(fd: usize, cmd: u32, arg: usize) -> Result<isize, Linux
         }
     }
 
-    pulse_core::record_lock::set_lock(
+    process::fd::record_lock::set_lock(
         owner,
         target,
         start,
@@ -366,7 +366,7 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
     if length < 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    if let Ok(process) = pulse_core::task::current_process()
+    if let Ok(process) = process::current_process()
         && let Some(limit) = process.get_rlimit(RLIMIT_FSIZE)
         && (length as u64) > limit.rlim_cur
     {
@@ -447,8 +447,8 @@ pub fn sys_flock(fd: usize, operation: usize) -> isize {
         return -LinuxError::EBADF.code() as isize;
     }
     let owner = alloc::sync::Arc::as_ptr(&entry.object) as *const () as usize;
-    let target = pulse_core::flock::get_lock_target(&entry.object);
-    match pulse_core::flock::do_flock(owner, target, operation as i32) {
+    let target = process::fd::flock::get_lock_target(&entry.object);
+    match process::fd::flock::do_flock(owner, target, operation as i32) {
         Ok(_) => 0,
         Err(e) => -e.code() as isize,
     }

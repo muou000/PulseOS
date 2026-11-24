@@ -1,4 +1,4 @@
-use pulse_core::task::current_thread;
+use process::current_thread;
 
 pub fn sys_exit(exit_code: i32) -> ! {
     if exit_code != 0 {

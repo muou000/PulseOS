@@ -12,7 +12,7 @@ use linux_raw_sys::general::{
     PROT_READ, PROT_WRITE, RLIMIT_DATA,
 };
 use memory_addr::VirtAddr;
-use pulse_core::fd_table::FdObject;
+use process::fd::FdObject;
 
 use crate::LinuxError;
 
@@ -34,7 +34,7 @@ fn mmap_offset_is_valid(file_backed: bool, offset: usize) -> bool {
 }
 
 fn get_fd_object(fd: usize) -> Result<Arc<dyn FdObject>, LinuxError> {
-    let proc = pulse_core::task::current_process()?;
+    let proc = process::current_process()?;
     proc.get_fd_entry(fd)
         .map(|entry| entry.object.clone())
         .map_err(|_| LinuxError::EBADF)
@@ -57,7 +57,7 @@ fn file_flags_for_mapping(map_flags: MappingFlags) -> FileFlags {
 pub fn sys_brk(addr: usize) -> isize {
     kernel_log::debug!("sys_brk: addr={:#x}", addr);
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -70,8 +70,8 @@ pub fn sys_brk(addr: usize) -> isize {
         return old_heap_top as isize;
     }
 
-    let user_space_end = pulse_core::config::USER_SPACE_BASE
-        .checked_add(pulse_core::config::USER_SPACE_SIZE)
+    let user_space_end = config::user::USER_SPACE_BASE
+        .checked_add(config::user::USER_SPACE_SIZE)
         .expect("user address-space range must not overflow");
     if addr < brk_state.start() || addr > user_space_end {
         kernel_log::debug!("sys_brk: rejected out-of-range addr {:#x}", addr);
@@ -205,7 +205,7 @@ pub fn sys_mmap(
         offset
     );
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -324,7 +324,7 @@ pub fn sys_mmap(
                     map_flags,
                     {
                         #[cfg(feature = "bpf-trace")]
-                        { pulse_core::bpf::mappings::file_source(cached, false) }
+                        { process::bpf::mappings::file_source(cached, false) }
                         #[cfg(not(feature = "bpf-trace"))]
                         { alloc::sync::Arc::new(cached) }
                     },
@@ -360,7 +360,7 @@ pub fn sys_mmap(
         mm::MappingPlacement::Fixed(aligned_addr)
     } else {
         mm::MappingPlacement::Anywhere(if addr == 0 {
-            VirtAddr::from(pulse_core::config::USER_SPACE_BASE)
+            VirtAddr::from(config::user::USER_SPACE_BASE)
         } else {
             aligned_addr
         })
@@ -400,7 +400,7 @@ pub fn sys_mmap(
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
     kernel_log::debug!("sys_munmap: addr={:#x}, length={:#x}", addr, length);
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -468,7 +468,7 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> isize {
         _ => return -LinuxError::EINVAL.code() as isize,
     };
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -526,7 +526,7 @@ pub fn sys_mremap(
         new_address
     );
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -615,7 +615,7 @@ pub fn sys_mremap(
 }
 
 pub fn sys_mlock(addr: usize, len: usize) -> isize {
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -633,7 +633,7 @@ pub fn sys_mlock(addr: usize, len: usize) -> isize {
 }
 
 pub fn sys_munlock(addr: usize, len: usize) -> isize {
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -664,7 +664,7 @@ pub fn sys_mincore(addr: usize, len: usize, vec_addr: usize) -> isize {
     let Some(aligned_len) = page_align_up(len) else {
         return -LinuxError::ENOMEM.code() as isize;
     };
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -719,7 +719,7 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> isize {
         return -LinuxError::ENOMEM.code() as isize;
     };
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -769,7 +769,7 @@ pub fn sys_mlockall(flags: usize) -> isize {
     if (flags & MCL_ONFAULT as usize) != 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -785,7 +785,7 @@ pub fn sys_mlockall(flags: usize) -> isize {
 }
 
 pub fn sys_munlockall() -> isize {
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -824,7 +824,7 @@ pub fn sys_msync(addr: usize, length: usize, flags: usize) -> isize {
         return 0;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };

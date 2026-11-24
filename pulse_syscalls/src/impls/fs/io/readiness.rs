@@ -25,7 +25,7 @@ pulse_user_abi::impl_user_abi_struct! {
 }
 
 fn read_temporary_signal_mask(
-    process: &pulse_core::task::Process,
+    process: &process::Process,
     sigmask: usize,
     sigsetsize: usize,
 ) -> Result<Option<u64>, LinuxError> {
@@ -42,7 +42,7 @@ fn read_temporary_signal_mask(
 }
 
 fn read_pselect6_signal_mask(
-    process: &pulse_core::task::Process,
+    process: &process::Process,
     sigmask_arg: usize,
 ) -> Result<Option<u64>, LinuxError> {
     if sigmask_arg == 0 {
@@ -57,7 +57,7 @@ fn read_pselect6_signal_mask(
 /// still interrupted by an already-pending signal, as Linux's poll/select
 /// paths test for signals after their nonblocking readiness scan.
 fn wait_for_signal_or_timeout(
-    thread: &pulse_core::task::Thread,
+    thread: &process::Thread,
     timeout: Option<Duration>,
 ) -> bool {
     if thread.has_pending_signal() {
@@ -104,7 +104,7 @@ pub fn sys_ppoll(
         Err(e) => return -e.code() as isize,
     };
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
@@ -113,7 +113,7 @@ pub fn sys_ppoll(
             Ok(mask) => mask,
             Err(e) => return -e.code() as isize,
         };
-    let _mask_guard = pulse_core::task::SignalMaskGuard::install(thread.clone(), temporary_mask);
+    let _mask_guard = process::SignalMaskGuard::install(thread.clone(), temporary_mask);
 
     if nfds == 0 {
         if wait_for_signal_or_timeout(thread.as_ref(), timeout_dur) {
@@ -244,7 +244,7 @@ pub fn sys_pselect6(
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
@@ -267,7 +267,7 @@ pub fn sys_pselect6(
         Ok(mask) => mask,
         Err(e) => return -e.code() as isize,
     };
-    let _mask_guard = pulse_core::task::SignalMaskGuard::install(thread.clone(), temporary_mask);
+    let _mask_guard = process::SignalMaskGuard::install(thread.clone(), temporary_mask);
 
     let mut in_read = FdSet::zero();
     let mut in_write = FdSet::zero();

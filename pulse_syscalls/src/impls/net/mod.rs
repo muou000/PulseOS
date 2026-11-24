@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use axerrno::LinuxError;
 use crate::impls::fs::common::get_fd_entry;
-use pulse_core::net::Socket;
+use process::socket::Socket;
 
 mod addr;
 mod io;
@@ -13,7 +13,7 @@ pub use self::{io::*, name::*, opt::*, socket::*};
 
 pub(super) fn get_socket(fd: usize) -> Result<Arc<Socket>, LinuxError> {
     let entry = get_fd_entry(fd)?;
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return Err(LinuxError::EBADF);
     }
     Socket::from_fd_entry(&entry.object)

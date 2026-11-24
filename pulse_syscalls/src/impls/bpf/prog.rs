@@ -4,10 +4,10 @@ use bpf::{
     verifier::{verify_program, MapResolver, VerifierConfig, VerifierLog, BPF_MAXINSNS},
     BpfInsn, BpfMap, BpfProgType, BpfProgram,
 };
-use pulse_core::{
+use process::{
     bpf::{BpfMapObject, BpfProgramObject},
-    fd_table::{FdEntry, FdFlags},
-    task::Process,
+    fd::{FdEntry, FdFlags},
+    Process,
 };
 
 use super::abi::BpfProgLoadAttr;

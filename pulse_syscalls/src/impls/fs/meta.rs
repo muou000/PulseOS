@@ -5,7 +5,7 @@ use linux_raw_sys::general::{
     MS_NOSYMFOLLOW, R_OK, STATX_BASIC_STATS, STATX_MNT_ID, W_OK, X_OK, statfs, statx,
     statx_timestamp, timespec,
 };
-use pulse_core::fd_table::location_to_stat;
+use process::fd::location_to_stat;
 
 use crate::impls::{
     fs::common::{check_faccess_permission, get_fd_entry, get_fd_object, resolve_location_at_ptr},
@@ -115,7 +115,7 @@ pub fn sys_fstatfs(fd: usize, buf: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let location = match entry.object.location() {
@@ -539,7 +539,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let location = match entry.object.location() {
@@ -726,7 +726,7 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> isize {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
-    if entry.flags.contains(pulse_core::fd_table::FdFlags::PATH) {
+    if entry.flags.contains(process::fd::FdFlags::PATH) {
         return -LinuxError::EBADF.code() as isize;
     }
     let location = match entry.object.location() {

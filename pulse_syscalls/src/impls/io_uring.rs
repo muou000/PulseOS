@@ -9,11 +9,11 @@ use linux_raw_sys::io_uring::{
     __kernel_timespec, IORING_ENTER_GETEVENTS, IORING_ENTER_SQ_WAIT, IORING_ENTER_SQ_WAKEUP, io_uring_files_update, io_uring_getevents_arg,
     io_uring_params, io_uring_probe, io_uring_register_op,
 };
-use pulse_core::fd_table::{FdEntry, FdFlags};
-use pulse_core::io_uring::IoUringObject;
-use pulse_core::io_uring::context::AsyncExecContext;
-use pulse_core::mm::UserIoSegment;
-use pulse_core::task::{SignalMaskGuard, current_have_signals, current_process, current_thread};
+use process::fd::{FdEntry, FdFlags};
+use process::io_uring::IoUringObject;
+use process::io_uring::context::AsyncExecContext;
+use io_uring_core::resources::UserIoSegment;
+use process::{SignalMaskGuard, current_have_signals, current_process, current_thread};
 use io_uring_core::whitelist::{populate_probe, validate_register_op_v1};
 
 use super::fs::common::{get_fd_entry, insert_fd_entry};
@@ -26,11 +26,11 @@ use crate::validation::io_uring::{
     validate_kernel_timespec,
 };
 
-struct IoUringFdHandle(Arc<dyn pulse_core::fd_table::FdObject>);
+struct IoUringFdHandle(Arc<dyn process::fd::FdObject>);
 
 impl IoUringFdHandle {
     #[inline]
-    fn state(&self) -> &Arc<pulse_core::io_uring::IoUringState> {
+    fn state(&self) -> &Arc<process::io_uring::IoUringState> {
         self.0
             .as_any()
             .downcast_ref::<IoUringObject>()

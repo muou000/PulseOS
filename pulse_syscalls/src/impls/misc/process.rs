@@ -2,7 +2,7 @@ use super::*;
 
 pub fn sys_umask(mask: usize) -> isize {
     kernel_log::debug!("sys_umask: mask={:#o}", mask);
-    match pulse_core::task::current_process() {
+    match ::process::current_process() {
         Ok(process) => process.set_umask((mask as u32) & 0o777) as isize,
         Err(e) => -e.code() as isize,
     }
@@ -10,7 +10,7 @@ pub fn sys_umask(mask: usize) -> isize {
 
 pub fn sys_set_tid_address(tidptr: usize) -> isize {
     kernel_log::debug!("sys_set_tid_address: tidptr={:#x}", tidptr);
-    match pulse_core::task::current_thread() {
+    match ::process::current_thread() {
         Ok(thread) => {
             thread.set_clear_child_tid(tidptr);
             thread.tid() as isize
@@ -21,7 +21,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 
 pub fn sys_gettid() -> isize {
     kernel_log::debug!("sys_gettid");
-    match pulse_core::task::current_thread() {
+    match ::process::current_thread() {
         Ok(thread) => thread.tid() as isize,
         Err(e) => -e.code() as isize,
     }
@@ -32,7 +32,7 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
     if len != core::mem::size_of::<usize>() * 3 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    match pulse_core::task::current_thread() {
+    match ::process::current_thread() {
         Ok(thread) => {
             thread.set_robust_list_head(head);
             0
@@ -52,7 +52,7 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: usize, len_ptr: usize) -> isize
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match ::process::current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
@@ -73,16 +73,16 @@ fn process_group_id_in_use(mut groups: impl Iterator<Item = u64>, pgid: u64) -> 
 }
 
 pub fn sys_setsid() -> isize {
-    let process = match pulse_core::task::current_process() {
+    let process = match ::process::current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
     };
 
-    pulse_core::task::with_job_control_lock(|| {
+    ::process::with_job_control_lock(|| {
         // Linux rejects setsid when the caller's PID already names any
         // process group, not only when the caller itself is its leader.
         if process_group_id_in_use(
-            pulse_core::task::processes_snapshot()
+            ::process::processes_snapshot()
                 .into_iter()
                 .map(|process| process.pgid()),
             process.pid(),
@@ -100,16 +100,16 @@ pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
     if pid < 0 || pgid < 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    let caller = match pulse_core::task::current_process() {
+    let caller = match ::process::current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
 
-    pulse_core::task::with_job_control_lock(|| {
+    ::process::with_job_control_lock(|| {
         let target_proc = if pid == 0 {
             caller.clone()
         } else {
-            match pulse_core::task::process_by_pid(pid as u64) {
+            match ::process::process_by_pid(pid as u64) {
                 Some(p) => {
                     if p.pid() != caller.pid() && p.parent_pid() != caller.pid() {
                         return -LinuxError::ESRCH.code() as isize;
@@ -138,8 +138,8 @@ pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
         // process's session. A zero pgid (and pgid == pid) instead creates a
         // group led by the target process itself.
         if target_pgid != target_proc.pid()
-            && !pulse_core::task::process_group_exists_in_session(
-                pulse_core::task::processes_snapshot()
+            && !::process::process_group_exists_in_session(
+                ::process::processes_snapshot()
                     .into_iter()
                     .map(|process| (process.pgid(), process.sid())),
                 target_pgid,
@@ -159,7 +159,7 @@ pub fn sys_getpgid(pid: isize) -> isize {
     if pid < 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    let caller = match pulse_core::task::current_process() {
+    let caller = match ::process::current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
@@ -167,7 +167,7 @@ pub fn sys_getpgid(pid: isize) -> isize {
     let target_proc = if pid == 0 {
         caller
     } else {
-        match pulse_core::task::process_by_pid(pid as u64) {
+        match ::process::process_by_pid(pid as u64) {
             Some(p) => p,
             None => return -LinuxError::ESRCH.code() as isize,
         }
@@ -181,7 +181,7 @@ pub fn sys_getsid(pid: isize) -> isize {
     if pid < 0 {
         return -LinuxError::EINVAL.code() as isize;
     }
-    let caller = match pulse_core::task::current_process() {
+    let caller = match ::process::current_process() {
         Ok(p) => p,
         Err(e) => return -e.code() as isize,
     };
@@ -189,7 +189,7 @@ pub fn sys_getsid(pid: isize) -> isize {
     let target_proc = if pid == 0 {
         caller
     } else {
-        match pulse_core::task::process_by_pid(pid as u64) {
+        match ::process::process_by_pid(pid as u64) {
             Some(p) => p,
             None => return -LinuxError::ESRCH.code() as isize,
         }
@@ -212,8 +212,8 @@ mod tests {
     fn setpgid_requires_an_existing_group_in_the_target_session() {
         let groups = [(10, 1), (20, 2), (30, 2)];
 
-        assert!(pulse_core::task::process_group_exists_in_session(groups.into_iter(), 20, 2));
-        assert!(!pulse_core::task::process_group_exists_in_session(groups.into_iter(), 20, 1));
-        assert!(!pulse_core::task::process_group_exists_in_session(groups.into_iter(), 99, 2));
+        assert!(::process::process_group_exists_in_session(groups.into_iter(), 20, 2));
+        assert!(!::process::process_group_exists_in_session(groups.into_iter(), 20, 1));
+        assert!(!::process::process_group_exists_in_session(groups.into_iter(), 99, 2));
     }
 }

@@ -7,7 +7,6 @@ exclude = [
 ]
 members = [
     ".",
-    "pulse_core",
     "pulse_syscalls",
     "crates/starry-vdso",
     "crates/pulse_bpf_schema",
@@ -66,7 +65,6 @@ bpf = { path = "modules/bpf" }
 elf_loader = { path = "modules/elf_loader" }
 ipc = { path = "modules/ipc" }
 process = { path = "modules/process" }
-pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }
 pulse_bpf_schema = { path = "crates/pulse_bpf_schema" }
 pulse_user_abi = { path = "crates/pulse_user_abi" }
@@ -233,7 +231,7 @@ ls2k1000 = [
     "dep:axplat-loongarch64-ls2k1000",
     "axfeat/driver-ls2k1000-ahci",
     "hal/ls2k1000",
-    "pulse_core/ls2k1000",
+    "process/ls2k1000",
 ]
 smp = [
     "axfeat/smp",
@@ -243,13 +241,13 @@ smp = [
 ]
 sched-eevdf = ["axfeat/sched-eevdf"]
 sched-load-balance = ["axfeat/sched-load-balance"]
-mapping-lifecycle-test = ["pulse_core/mapping-lifecycle-test", "pulse_syscalls/mapping-lifecycle-test"]
-guest-checks = ["pulse_core/guest-checks", "pulse_syscalls/guest-checks"]
-file-io-test = ["pulse_core/file-io-test", "pulse_syscalls/file-io-test"]
+mapping-lifecycle-test = ["process/mapping-lifecycle-test", "pulse_syscalls/mapping-lifecycle-test"]
+guest-checks = ["process/guest-checks", "pulse_syscalls/guest-checks"]
+file-io-test = ["process/file-io-test", "pulse_syscalls/file-io-test"]
 bpf-trace = [
     "axfeat/bpf-trace",
     "task/bpf-trace",
-    "pulse_core/bpf-trace",
+    "process/bpf-trace",
     "pulse_syscalls/bpf-trace",
 ]
 
@@ -264,7 +262,7 @@ task.workspace = true
 sync.workspace = true
 net.workspace = true
 pulse_syscalls.workspace = true
-pulse_core.workspace = true
+process.workspace = true
 starry-vdso.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]

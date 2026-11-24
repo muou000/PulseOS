@@ -4,7 +4,7 @@ use linux_raw_sys::general::{
     CAP_SYS_TIME, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, ITIMER_PROF, ITIMER_REAL,
     ITIMER_VIRTUAL, TIMER_ABSTIME, itimerspec, timespec, timeval,
 };
-use pulse_core::task::uaccess;
+use process::uaccess;
 
 use crate::{
     LinuxError,
@@ -42,14 +42,14 @@ fn clock_now(clockid: i32) -> Result<Duration, LinuxError> {
         ClockSource::Realtime => Ok(hal::time::wall_time()),
         ClockSource::Monotonic => Ok(hal::time::monotonic_time()),
         ClockSource::ProcessCpu => {
-            let thread = pulse_core::task::current_thread().map_err(LinuxError::from)?;
+            let thread = process::current_thread().map_err(LinuxError::from)?;
             let process = thread.process();
             let now_ns = hal::time::monotonic_time_nanos() as u64;
             let (utime_ns, stime_ns) = process.snapshot_cpu_time_ns(now_ns);
             Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
         }
         ClockSource::ThreadCpu => {
-            let thread = pulse_core::task::current_thread().map_err(LinuxError::from)?;
+            let thread = process::current_thread().map_err(LinuxError::from)?;
             let now_ns = hal::time::monotonic_time_nanos() as u64;
             let (utime_ns, stime_ns) = thread.snapshot_cpu_time_ns(now_ns);
             Ok(Duration::from_nanos(utime_ns.saturating_add(stime_ns)))
@@ -67,13 +67,13 @@ fn clock_resolution() -> timespec {
 }
 
 fn current_has_pending_signal() -> bool {
-    pulse_core::task::current_thread()
+    process::current_thread()
         .map(|thread| thread.has_pending_signal())
         .unwrap_or(false)
 }
 
 fn current_is_group_exiting() -> bool {
-    pulse_core::task::current_process()
+    process::current_process()
         .map(|process| process.group_exiting())
         .unwrap_or(false)
 }
@@ -298,7 +298,7 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -328,7 +328,7 @@ pub fn sys_clock_settime(clockid: i32, tp: usize) -> isize {
     }
 
     // Adjust absolute POSIX timers
-    pulse_core::task::adjust_absolute_timers();
+    process::adjust_absolute_timers();
 
     // Check if any timers expired due to the clock jump, and reprogram the timer
     let _guard = kernel_guard::NoPreemptIrqSave::new();
@@ -382,7 +382,7 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let process = match pulse_core::task::current_process() {
+    let process = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -417,7 +417,7 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
     }
 
     // Adjust absolute POSIX timers
-    pulse_core::task::adjust_absolute_timers();
+    process::adjust_absolute_timers();
 
     // Check if any timers expired due to the clock jump, and reprogram the timer
     let _guard = kernel_guard::NoPreemptIrqSave::new();
@@ -431,7 +431,7 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> isize {
 pub fn sys_times(tbuf: usize) -> isize {
     kernel_log::debug!("sys_times: tbuf={:#x}", tbuf);
 
-    let thread = match pulse_core::task::current_thread() {
+    let thread = match process::current_thread() {
         Ok(thread) => thread,
         Err(e) => return -e.code() as isize,
     };
@@ -492,7 +492,7 @@ fn read_user_itimerval(addr: usize) -> Result<Itimerval, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let proc = pulse_core::task::current_process()?;
+    let proc = process::current_process()?;
     let val: Itimerval =
         uaccess::read_user_value(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
     Ok(val)
@@ -502,7 +502,7 @@ fn write_user_itimerval(addr: usize, val: &Itimerval) -> Result<(), LinuxError> 
     if addr == 0 {
         return Ok(());
     }
-    let proc = pulse_core::task::current_process()?;
+    let proc = process::current_process()?;
     uaccess::write_user_value(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
 }
 
@@ -521,7 +521,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
     // Only ITIMER_REAL is truly implemented.
     // ITIMER_VIRTUAL and ITIMER_PROF are accepted but not actually timed.
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -627,7 +627,7 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -762,7 +762,7 @@ pub fn sys_clock_adjtime(clockid: i32, buf: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -860,7 +860,7 @@ pub fn sys_timer_create(clockid: i32, sevp: usize, timerid: usize) -> isize {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -894,7 +894,7 @@ fn read_user_itimerspec(addr: usize) -> Result<itimerspec, LinuxError> {
     if addr == 0 {
         return Err(LinuxError::EFAULT);
     }
-    let proc = pulse_core::task::current_process()?;
+    let proc = process::current_process()?;
     let val: itimerspec =
         uaccess::read_user_value(proc.as_ref(), addr).map_err(|_| LinuxError::EFAULT)?;
     Ok(val)
@@ -904,7 +904,7 @@ fn write_user_itimerspec(addr: usize, val: &itimerspec) -> Result<(), LinuxError
     if addr == 0 {
         return Ok(());
     }
-    let proc = pulse_core::task::current_process()?;
+    let proc = process::current_process()?;
     uaccess::write_user_value(proc.as_ref(), addr, val).map_err(|_| LinuxError::EFAULT)
 }
 
@@ -922,11 +922,11 @@ pub fn sys_timer_settime(
         old_value
     );
 
-    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
+    if timerid >= process::MAX_POSIX_TIMER_COUNT {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -999,7 +999,7 @@ pub fn sys_timer_settime(
             now_ns.saturating_add(val_dur.as_nanos() as u64)
         };
         timer.next_deadline_ns = deadline;
-        pulse_core::task::schedule_posix_timer_event(proc.pid(), timerid, deadline, generation);
+        process::schedule_posix_timer_event(proc.pid(), timerid, deadline, generation);
     }
 
     0
@@ -1012,14 +1012,14 @@ pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
         curr_value
     );
 
-    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
+    if timerid >= process::MAX_POSIX_TIMER_COUNT {
         return -LinuxError::EINVAL.code() as isize;
     }
     if curr_value == 0 {
         return -LinuxError::EFAULT.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -1051,11 +1051,11 @@ pub fn sys_timer_gettime(timerid: usize, curr_value: usize) -> isize {
 pub fn sys_timer_getoverrun(timerid: usize) -> isize {
     kernel_log::debug!("sys_timer_getoverrun: timerid={}", timerid);
 
-    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
+    if timerid >= process::MAX_POSIX_TIMER_COUNT {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -1070,11 +1070,11 @@ pub fn sys_timer_getoverrun(timerid: usize) -> isize {
 pub fn sys_timer_delete(timerid: usize) -> isize {
     kernel_log::debug!("sys_timer_delete: timerid={}", timerid);
 
-    if timerid >= pulse_core::task::MAX_POSIX_TIMER_COUNT {
+    if timerid >= process::MAX_POSIX_TIMER_COUNT {
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let proc = match pulse_core::task::current_process() {
+    let proc = match process::current_process() {
         Ok(proc) => proc,
         Err(e) => return -e.code() as isize,
     };
@@ -1090,7 +1090,7 @@ pub fn sys_timer_delete(timerid: usize) -> isize {
 
 pub fn sys_timerfd_create(clockid: i32, flags: u32) -> isize {
     kernel_log::debug!("sys_timerfd_create: clockid={}, flags={:#x}", clockid, flags);
-    let entry = match pulse_core::fd_table::timerfd_entry(clockid, flags) {
+    let entry = match process::fd::timerfd_entry(clockid, flags) {
         Ok(entry) => entry,
         Err(e) => return -e.code() as isize,
     };
@@ -1100,12 +1100,12 @@ pub fn sys_timerfd_create(clockid: i32, flags: u32) -> isize {
     }
 }
 
-fn lookup_timerfd(fd: usize) -> Result<pulse_core::fd_table::FdEntry, LinuxError> {
+fn lookup_timerfd(fd: usize) -> Result<process::fd::FdEntry, LinuxError> {
     let entry = crate::impls::fs::common::get_fd_entry(fd)?;
     if entry
         .object
         .as_any()
-        .is::<pulse_core::fd_table::TimerFdObject>()
+        .is::<process::fd::TimerFdObject>()
     {
         Ok(entry)
     } else {
@@ -1140,7 +1140,7 @@ pub fn sys_timerfd_settime(fd: usize, flags: u32, new_value: usize, old_value: u
     let timerfd = entry
         .object
         .as_any()
-        .downcast_ref::<pulse_core::fd_table::TimerFdObject>()
+        .downcast_ref::<process::fd::TimerFdObject>()
         .expect("TimerFdObject validated");
 
     let val_ns = u64::try_from(val_dur.as_nanos()).unwrap_or(u64::MAX);
@@ -1177,7 +1177,7 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: usize) -> isize {
     let timerfd = entry
         .object
         .as_any()
-        .downcast_ref::<pulse_core::fd_table::TimerFdObject>()
+        .downcast_ref::<process::fd::TimerFdObject>()
         .expect("TimerFdObject validated");
     let (rem_ns, int_ns) = timerfd.gettime();
     let curr_spec = itimerspec {

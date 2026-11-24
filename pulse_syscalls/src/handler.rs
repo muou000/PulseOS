@@ -9,7 +9,7 @@ use crate::*;
 pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     let syscall_enter_ns = hal::time::monotonic_time_nanos() as u64;
     let task = task::current();
-    let thread = match pulse_core::task::thread_ref_from_task(&task) {
+    let thread = match process::thread_ref_from_task(&task) {
         Ok(thread) => thread,
         Err(_) => {
             let task_ext_ptr = unsafe { task.task_ext_ptr() };
@@ -52,7 +52,7 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
         args[5]
     );
     let ret = {
-        let _irq_guard = pulse_core::trap::TrapIrqEnableGuard::new();
+        let _irq_guard = process::trap::TrapIrqEnableGuard::new();
         syscall_dispatcher(tf, syscall_num, args)
     };
     thread.exit_if_exec_requested();
@@ -67,14 +67,14 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
 
     let is_sigreturn = syscall_num == syscalls::Sysno::rt_sigreturn as usize;
 
-    if !is_sigreturn && ret == -(pulse_core::task::ERESTARTSYS as isize) {
+    if !is_sigreturn && ret == -(process::ERESTARTSYS as isize) {
         let sig_state = thread.signal();
         let mut should_restart = true;
 
         // Peek to see if the next signal handler has SA_RESTART set.
         if let Some(sig) = sig_state.peek_unblocked_deliverable() {
-            let action = pulse_core::task::resolve_action(&sig_state.shared(), sig);
-            if let pulse_core::task::SignalAction::Handler(act) = action {
+            let action = process::resolve_action(&sig_state.shared(), sig);
+            if let process::SignalAction::Handler(act) = action {
                 if (act.flags & (linux_raw_sys::general::SA_RESTART as usize)) == 0 {
                     should_restart = false;
                 }
@@ -95,8 +95,8 @@ pub fn syscall_handler(tf: &mut TrapFrame, syscall_num: usize) -> isize {
     task.clear_interrupt();
 
     if thread.signal().has_pending_or_skip_once() {
-        if let Some(delivery) = pulse_core::task::check_signals_and_deliver(thread, tf) {
-            use pulse_core::task::{DefaultSignalAction, SignalAction};
+        if let Some(delivery) = process::check_signals_and_deliver(thread, tf) {
+            use process::{DefaultSignalAction, SignalAction};
             match delivery.action {
                 SignalAction::Default(DefaultSignalAction::Terminate) => {
                     process.set_exit_signal(delivery.sig as i32, false);
