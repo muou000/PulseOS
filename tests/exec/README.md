@@ -15,7 +15,9 @@ readelf -lW "$run_dir/missing-interpreter" | grep 'Requesting program interprete
 scripts/install_to_rootfs.sh "$IMAGE" "$run_dir/failed-prepare" "$run_dir/missing-interpreter" /opt/
 ```
 
-Boot the image with its architecture's QEMU command from `AGENTS.md`. Run
+Boot the copied image with its architecture's QEMU command from `AGENTS.md`.
+For `-kernel`, use the `*_riscv64-qemu-virt.bin` or
+`*_loongarch64-qemu-virt.elf` produced by `make test`. Run
 `/opt/failed-prepare /opt/missing-interpreter` in the guest. The caller and a
 sibling rendezvous before `execve`. Resolving the missing interpreter then
 fails with `ENOENT` after the main ELF segments have been prepared. The test

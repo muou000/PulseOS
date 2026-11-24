@@ -19,10 +19,13 @@
 make test
 cargo test --locked -p elf_loader -p axfeat --lib \
   --features axfeat/multitask,axfeat/irq,axfeat/fs,axtask/test
-python3 tests/hwcap/run_rvv.py off --image "$RV_24_04_IMAGE"
-python3 tests/hwcap/run_rvv.py on --image "$RV_26_10_IMAGE"
-python3 tests/hwcap/run_rvv.py on --vlen 256 --image "$RV_26_10_IMAGE"
-python3 tests/hwcap/run.py guest --primary disk-la.img
+hwcap_images=$(mktemp -d)
+RISCV_PLATFORM=visionfive2 ROOTFS_VARIANT=tests OUTPUT_DIR="$hwcap_images" scripts/build_img.sh --fetch riscv64
+RISCV_PLATFORM=qemu-virt ROOTFS_VARIANT=base OUTPUT_DIR="$hwcap_images" scripts/build_img.sh --fetch riscv64
+python3 tests/hwcap/run_rvv.py off --image "$hwcap_images/rootfs-visionfive2.img"
+python3 tests/hwcap/run_rvv.py on --image "$hwcap_images/rootfs-riscv64.img"
+python3 tests/hwcap/run_rvv.py on --vlen 256 --image "$hwcap_images/rootfs-riscv64.img"
+python3 tests/hwcap/run.py guest --primary disk-la.img --kernel "${PWD##*/}_loongarch64-qemu-virt.elf"
 ```
 
 上述主机命令启用装载器所需的文件系统、分配器和任务配置，7 项装载测试全部通过。两种目标的 `cargo tree --locked -p elf_loader --target <target>` 均解析到本地 `axfs` 和 `axmm`，依赖树中没有 `pulse_core` 或 `bpf`。
@@ -48,8 +51,10 @@ sha256sum /tmp/j266
 
 ```sh
 make test APP_FEATURES='qemu bpf-trace'
-python3 tests/bpf_sampling/run.py guest --arch riscv64 --image disk.img --mode cpu --archive --mappings --timeout 300
-python3 tests/bpf_sampling/run.py guest --arch loongarch64 --image disk-la.img --mode cpu --archive --mappings --timeout 300
+python3 tests/bpf_sampling/run.py guest --arch riscv64 --image disk.img \
+  --kernel "${PWD##*/}_riscv64-qemu-virt.bin" --mode cpu --archive --mappings --timeout 300
+python3 tests/bpf_sampling/run.py guest --arch loongarch64 --image disk-la.img \
+  --kernel "${PWD##*/}_loongarch64-qemu-virt.elf" --mode cpu --archive --mappings --timeout 300
 ```
 
 | SHA-256 | RV64 | LA64 |
