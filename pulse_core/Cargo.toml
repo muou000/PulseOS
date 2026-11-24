@@ -8,6 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+bpf.workspace = true
 ipc.workspace = true
 axhal = { workspace = true, features = ["paging", "uspace"] }
 axcpu.workspace = true
@@ -44,7 +45,7 @@ sha2 = { version = "0.10", default-features = false, optional = true }
 
 [features]
 ls2k1000 = ["axcpu/ls2k1000"]
-bpf-trace = ["axtask/bpf-trace", "axmm/mapping-observer", "dep:sha2"]
+bpf-trace = ["bpf/bpf-trace", "axtask/bpf-trace", "axmm/mapping-observer", "dep:sha2"]
 mapping-lifecycle-test = ["axfs/mapping-lifecycle-test"]
 file-io-test = ["axfs/file-io-test"]
 guest-checks = []

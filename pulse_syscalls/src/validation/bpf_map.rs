@@ -1,16 +1,4 @@
 //! Host tests for BPF Map objects (#92).
-//!
-//! `pulse_core` cannot be built for the host, so the pure Map model in
-//! `pulse_core/src/bpf/map.rs` is compiled here directly. That file must stay
-//! self-contained (only `core`, `alloc` and `axerrno`).
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/ring_buffer.rs"]
-mod core_ring_buffer;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/map.rs"]
-mod core_map;
 
 #[cfg(test)]
 mod tests {
@@ -18,12 +6,11 @@ mod tests {
 
     use axerrno::LinuxError;
 
-    use super::core_map::*;
+    use bpf::map::*;
     use crate::impls::bpf::{
         abi::{BpfAttr, BpfCmd, BpfMapElemAttr, check_attr_unused_tail},
         elem::{
             bpf_map_delete_elem, bpf_map_get_next_key, bpf_map_lookup_elem, bpf_map_update_elem,
-            BpfMapOps,
         },
         info::copy_obj_info_to_user,
     };
@@ -409,32 +396,6 @@ mod tests {
         let mut user = FakeUser::new(0x1000, 256);
         assert_eq!(run_info(&mut user, 0, 88, &kernel), Err(LinuxError::EFAULT));
         assert_eq!(run_info(&mut user, 0x9000, 88, &kernel), Err(LinuxError::EFAULT));
-    }
-
-    impl BpfMapOps for BpfMap {
-        fn key_size(&self) -> usize {
-            self.spec().key_size() as usize
-        }
-
-        fn value_size(&self) -> usize {
-            self.spec().value_size() as usize
-        }
-
-        fn lookup(&self, key: &[u8], val_out: &mut [u8]) -> Result<(), LinuxError> {
-            self.lookup(key, val_out)
-        }
-
-        fn update(&self, key: &[u8], val: &[u8], flags: u64) -> Result<(), LinuxError> {
-            self.update(key, val, flags)
-        }
-
-        fn delete(&self, key: &[u8]) -> Result<(), LinuxError> {
-            self.delete(key)
-        }
-
-        fn get_next_key(&self, key: Option<&[u8]>, next_key_out: &mut [u8]) -> Result<(), LinuxError> {
-            self.get_next_key(key, next_key_out)
-        }
     }
 
     #[test]

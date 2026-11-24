@@ -6,9 +6,7 @@ mod tests {
     use axerrno::LinuxError;
     use pulse_bpf_schema::*;
 
-    use super::super::bpf_link::{
-        core_insn::*, core_map::*, core_perf_event::*, core_program::*, core_verifier::*,
-    };
+    use bpf::{insn::*, map::*, perf_event::*, program::*, verifier::*};
 
     #[test]
     fn page_fault_completion_reaches_real_perf_output_and_old_entry_epoch_is_cancelled() {

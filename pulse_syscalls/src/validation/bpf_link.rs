@@ -1,63 +1,13 @@
 //! Host validation tests for BPF Link objects and attach lifecycle (#98).
 
 #[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/insn.rs"]
-pub mod core_insn;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/map.rs"]
-pub mod core_map;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/interpreter.rs"]
-pub mod core_interpreter;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/program.rs"]
-pub mod core_program;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/perf_event.rs"]
-pub mod core_perf_event;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/link.rs"]
-pub mod core_link;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/verifier.rs"]
-pub mod core_verifier;
-
-#[cfg(test)]
-#[path = "../../../pulse_core/src/bpf/ring_buffer.rs"]
-pub mod core_ring_buffer;
-
-#[cfg(test)]
-pub use core_insn as insn;
-#[cfg(test)]
-pub use core_map as map;
-#[cfg(test)]
-pub use core_interpreter as interpreter;
-#[cfg(test)]
-pub use core_program as program;
-#[cfg(test)]
-pub use core_perf_event as perf_event;
-#[cfg(test)]
-#[allow(unused_imports)]
-pub use core_ring_buffer as ring_buffer;
-#[cfg(test)]
-pub use core_map::BPF_OBJ_NAME_LEN;
-
-#[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
     use core::mem::{align_of, offset_of, size_of};
 
     use axerrno::LinuxError;
 
-    use super::{
-        core_insn::*, core_link::*, core_map, core_perf_event::*, core_program::*,
-    };
+    use bpf::{insn::*, link::*, map, perf_event::*, program::*};
     use crate::impls::bpf::abi::{
         BpfAttr, BpfCmd, BpfLinkCreateAttr, BpfLinkDetachAttr, check_attr_unused_tail,
     };
@@ -253,14 +203,14 @@ mod tests {
     #[test]
     fn bpf_link_and_object_reference_retention() {
         // Create map
-        let req = core_map::BpfMapCreateRequest {
-            map_type: core_map::BPF_MAP_TYPE_ARRAY,
+        let req = map::BpfMapCreateRequest {
+            map_type: map::BPF_MAP_TYPE_ARRAY,
             key_size: 4,
             value_size: 8,
             max_entries: 1,
             ..Default::default()
         };
-        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&req).unwrap()).unwrap());
+        let map = Arc::new(map::BpfMap::create(map::BpfMapSpec::validate(&req).unwrap()).unwrap());
         let map_weak = Arc::downgrade(&map);
 
         // Create prog holding map reference
@@ -414,23 +364,23 @@ mod tests {
 
     #[test]
     fn perf_event_sample_context_fields_delivered_to_program() {
-        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+        use bpf::verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
 
         // 1. Create an Array Map (key: u32, value: 48 bytes matching context fields)
-        let map_req = core_map::BpfMapCreateRequest {
-            map_type: core_map::BPF_MAP_TYPE_ARRAY,
+        let map_req = map::BpfMapCreateRequest {
+            map_type: map::BPF_MAP_TYPE_ARRAY,
             key_size: 4,
             value_size: 48,
             max_entries: 1,
             ..Default::default()
         };
-        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&map_req).unwrap()).unwrap());
+        let map = Arc::new(map::BpfMap::create(map::BpfMapSpec::validate(&map_req).unwrap()).unwrap());
 
         struct TestMapResolver {
-            map: Arc<core_map::BpfMap>,
+            map: Arc<map::BpfMap>,
         }
         impl MapResolver for TestMapResolver {
-            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> {
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<map::BpfMap>, LinuxError> {
                 Ok(self.map.clone())
             }
         }
@@ -719,7 +669,7 @@ mod tests {
 
     #[test]
     fn perf_event_verifier_rejects_out_of_bounds_context_access() {
-        use super::core_verifier::{verify_program, VerifierConfig, VerifierLog};
+        use bpf::verifier::{verify_program, VerifierConfig, VerifierLog};
 
         // The read-only stack extension ends at byte 640.
         let insns = [
@@ -784,11 +734,14 @@ mod tests {
         }, 100);
         let prog = dummy_prog(BpfProgType::PerfEvent);
         event.attach_program(prog.clone()).unwrap();
+        event.bind_task_identity(901).unwrap();
         let mut sample = runtime_observation(1_000_000, 10, 99);
+        sample.task_id = 902;
         sample.pid = 42; // A process with this PID is not the selected TID.
         sample.task_clock_ns = 105;
         assert_eq!(event.dispatch_sample(&sample), Ok(false));
         sample.tid = 42;
+        sample.task_id = 901;
         sample.pid = 123;
         assert_eq!(event.dispatch_sample(&sample), Ok(false));
         sample.timestamp_ns = 9_000_000; // The task was sleeping.
@@ -859,18 +812,18 @@ mod tests {
 
     #[test]
     fn runtime_context_and_helpers_use_the_observed_task_not_the_worker() {
-        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
-        let request = core_map::BpfMapCreateRequest {
-            map_type: core_map::BPF_MAP_TYPE_ARRAY,
+        use bpf::verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+        let request = map::BpfMapCreateRequest {
+            map_type: map::BPF_MAP_TYPE_ARRAY,
             key_size: 4,
             value_size: 80,
             max_entries: 1,
             ..Default::default()
         };
-        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&request).unwrap()).unwrap());
-        struct Resolver(Arc<core_map::BpfMap>);
+        let map = Arc::new(map::BpfMap::create(map::BpfMapSpec::validate(&request).unwrap()).unwrap());
+        struct Resolver(Arc<map::BpfMap>);
         impl MapResolver for Resolver {
-            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> {
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<map::BpfMap>, LinuxError> {
                 Ok(self.0.clone())
             }
         }
@@ -929,18 +882,18 @@ mod tests {
 
     #[test]
     fn runtime_stack_snapshot_is_frozen_and_same_cpu_sources_keep_distinct_ids() {
-        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
-        let request = core_map::BpfMapCreateRequest {
-            map_type: core_map::BPF_MAP_TYPE_ARRAY,
+        use bpf::verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+        let request = map::BpfMapCreateRequest {
+            map_type: map::BPF_MAP_TYPE_ARRAY,
             key_size: 4,
             value_size: 640,
             max_entries: 1,
             ..Default::default()
         };
-        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&request).unwrap()).unwrap());
-        struct Resolver(Arc<core_map::BpfMap>);
+        let map = Arc::new(map::BpfMap::create(map::BpfMapSpec::validate(&request).unwrap()).unwrap());
+        struct Resolver(Arc<map::BpfMap>);
         impl MapResolver for Resolver {
-            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> {
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<map::BpfMap>, LinuxError> {
                 Ok(self.0.clone())
             }
         }
@@ -1054,7 +1007,7 @@ mod tests {
     }
 
 
-    fn switch_observation(cpu: u32, tid: u32, time: u64) -> [u8; 72] {
+    fn switch_observation(cpu: u32, tid: u32, task_id: u64, time: u64) -> [u8; 72] {
         let mut bytes = [0; 72];
         bytes[0..4].copy_from_slice(&2u32.to_le_bytes());
         bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -1062,7 +1015,7 @@ mod tests {
         bytes[16..20].copy_from_slice(&cpu.to_le_bytes());
         bytes[20..24].copy_from_slice(&123u32.to_le_bytes());
         bytes[24..28].copy_from_slice(&tid.to_le_bytes());
-        bytes[32..40].copy_from_slice(&5u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&task_id.to_le_bytes());
         bytes[40..48].copy_from_slice(&5u64.to_le_bytes());
         bytes[48..56].copy_from_slice(&6u64.to_le_bytes());
         bytes
@@ -1070,15 +1023,15 @@ mod tests {
 
     #[test]
     fn runtime_tracepoint_preserves_source_context_and_helper_environment() {
-        use super::core_verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
-        let request = core_map::BpfMapCreateRequest {
-            map_type: core_map::BPF_MAP_TYPE_ARRAY, key_size: 4,
+        use bpf::verifier::{VerifierConfig, VerifierLog, verify_program, MapResolver};
+        let request = map::BpfMapCreateRequest {
+            map_type: map::BPF_MAP_TYPE_ARRAY, key_size: 4,
             value_size: 40, max_entries: 1, ..Default::default()
         };
-        let map = Arc::new(core_map::BpfMap::create(core_map::BpfMapSpec::validate(&request).unwrap()).unwrap());
-        struct Resolver(Arc<core_map::BpfMap>);
+        let map = Arc::new(map::BpfMap::create(map::BpfMapSpec::validate(&request).unwrap()).unwrap());
+        struct Resolver(Arc<map::BpfMap>);
         impl MapResolver for Resolver {
-            fn resolve_map(&self, _fd: u32) -> Result<Arc<core_map::BpfMap>, LinuxError> { Ok(self.0.clone()) }
+            fn resolve_map(&self, _fd: u32) -> Result<Arc<map::BpfMap>, LinuxError> { Ok(self.0.clone()) }
         }
         let insns = [
             BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, BPF_REG_6, BPF_REG_1, 0, 0),
@@ -1111,7 +1064,7 @@ mod tests {
             scope: PerfEventScope::PerCpu { cpu: 9 }, sample_period: 0, disabled: false, cloexec: false,
         }, 0);
         event.attach_program(prog.clone()).unwrap();
-        let bytes = switch_observation(9, 456, 987_654);
+        let bytes = switch_observation(9, 456, 5, 987_654);
         assert_eq!(event.dispatch_sample(&runtime_observation(1_000_000, 9, 456)), Ok(false), "timer must not run a tracepoint program");
         assert_eq!(event.dispatch_tracepoint(pulse_bpf_schema::TracepointId::SchedSwitch,
             &bytes, observation_generation()), Ok(true));
@@ -1136,7 +1089,7 @@ mod tests {
         let pa = dummy_prog(BpfProgType::Tracepoint); let pb = dummy_prog(BpfProgType::Tracepoint);
         let la = BpfLink::new(pa.clone(), a.clone()).unwrap();
         let lb = BpfLink::new(pb.clone(), b.clone()).unwrap();
-        let bytes = switch_observation(11, 42, 50);
+        let bytes = switch_observation(11, 42, 5, 50);
         let generation = observation_generation();
         assert_eq!(dispatch_tracepoint(TracepointId::SchedSwitch, &bytes, generation), 2);
         a.disable_at(60);
@@ -1163,15 +1116,17 @@ mod tests {
         }, 0);
         let prog = dummy_prog(BpfProgType::Tracepoint);
         event.attach_program(prog.clone()).unwrap();
+        event.bind_task_identity(5).unwrap();
         let generation = observation_generation();
         assert_eq!(event.dispatch_tracepoint(TracepointId::TaskWake, &[], generation), Ok(false));
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &[], generation), Ok(false));
-        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 0, 50), generation), Ok(false));
-        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 43, 50), generation), Ok(false));
-        let mut malformed = switch_observation(9, 42, 50);
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 0, 5, 50), generation), Ok(false));
+        let other_task = switch_observation(9, 43, 6, 50);
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &other_task, generation), Ok(false));
+        let mut malformed = switch_observation(9, 42, 5, 50);
         malformed[4..8].copy_from_slice(&2u32.to_le_bytes());
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &malformed, generation), Ok(false));
-        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 42, 50), generation), Ok(true));
+        assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &switch_observation(9, 42, 5, 50), generation), Ok(true));
         assert_eq!(event.runtime_counters().invalid, 3);
         assert_eq!(prog.run_cnt(), 1);
     }
@@ -1194,38 +1149,6 @@ mod tests {
 
 
     #[test]
-    fn runtime_tracepoint_parallel_attachment_counts_preserve_live_subscribers() {
-        use pulse_bpf_schema::TracepointId;
-        use std::sync::Barrier;
-        let id = TracepointId::PhaseMarker;
-        let initial = tracepoint_subscriber_count_for_test(id);
-        let ready = Barrier::new(5);
-        let release = Barrier::new(5);
-        std::thread::scope(|scope| {
-            for _ in 0..4 {
-                let ready = &ready; let release = &release;
-                scope.spawn(move || {
-                    let event = dummy_perf_event(PerfEventClock::Tracepoint(id));
-                    let prog = dummy_prog(BpfProgType::Tracepoint);
-                    for _ in 0..100 {
-                        event.attach_program(prog.clone()).unwrap();
-                        event.detach_program(&prog).unwrap();
-                    }
-                    event.attach_program(prog).unwrap();
-                    ready.wait();
-                    release.wait();
-                    // Drop tears down the final attachment using the same path.
-                });
-            }
-            ready.wait();
-            assert_eq!(tracepoint_subscriber_count_for_test(id), initial + 4);
-            release.wait();
-        });
-        assert_eq!(tracepoint_subscriber_count_for_test(id), initial);
-    }
-
-
-    #[test]
     fn runtime_task_identity_survives_exec_tid_rebinding_without_sampling_reused_tid() {
         let event = PerfEvent::new(PerfEventSpec {
             clock: PerfEventClock::TaskClock,
@@ -1236,6 +1159,7 @@ mod tests {
         let mut before_bind = runtime_observation(1_000, 10, 42);
         before_bind.task_id = 901;
         before_bind.task_clock_ns = 110;
+        assert_eq!(event.dispatch_sample(&before_bind), Ok(false), "a numeric TID alone cannot select a task");
         assert_eq!(event.bind_task_identity(0), Err(LinuxError::EINVAL));
         event.bind_task_identity(901).unwrap();
         assert_eq!(event.dispatch_sample(&before_bind), Ok(false), "binding invalidates old queued observations");
@@ -1265,11 +1189,9 @@ mod tests {
         let prog = dummy_prog(BpfProgType::Tracepoint);
         event.attach_program(prog.clone()).unwrap();
         event.bind_task_identity(901).unwrap();
-        let mut reused_tid = switch_observation(9, 42, 50);
-        reused_tid[32..40].copy_from_slice(&902u64.to_le_bytes());
+        let reused_tid = switch_observation(9, 42, 902, 50);
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &reused_tid, observation_generation()), Ok(false));
-        let mut rebound_tid = switch_observation(9, 100, 60);
-        rebound_tid[32..40].copy_from_slice(&901u64.to_le_bytes());
+        let rebound_tid = switch_observation(9, 100, 901, 60);
         assert_eq!(event.dispatch_tracepoint(TracepointId::SchedSwitch, &rebound_tid, observation_generation()), Ok(true));
         assert_eq!(prog.run_cnt(), 1);
     }
@@ -1292,7 +1214,7 @@ mod tests {
     fn dispatch_failure_observation(event: &PerfEvent, time: u64, cpu: usize) -> Result<bool, LinuxError> {
         match event.spec().clock {
             PerfEventClock::Tracepoint(id) => event.dispatch_tracepoint(id,
-                &switch_observation(cpu as u32, 42, time), observation_generation()),
+                &switch_observation(cpu as u32, 42, 5, time), observation_generation()),
             _ => event.dispatch_sample(&runtime_observation(time, cpu, 42)),
         }
     }
@@ -1368,7 +1290,7 @@ mod tests {
 
     #[test]
     fn runtime_detach_allows_only_the_already_accepted_program_to_finish() {
-        use core_map::{BpfMap, BpfMapCreateRequest, BpfMapSpec, PerfEventOutputSink};
+        use map::{BpfMap, BpfMapCreateRequest, BpfMapSpec, PerfEventOutputSink};
         use std::sync::{Mutex, mpsc::{channel, Sender, Receiver}};
         use std::time::Duration;
 
@@ -1393,7 +1315,7 @@ mod tests {
             let (entered_tx, entered_rx) = channel();
             let (resume_tx, resume_rx) = channel();
             let map = Arc::new(BpfMap::create(BpfMapSpec::validate(&BpfMapCreateRequest {
-                map_type: core_map::BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+                map_type: map::BPF_MAP_TYPE_PERF_EVENT_ARRAY,
                 key_size: 4, value_size: 4, max_entries: 16, ..Default::default()
             }).unwrap()).unwrap());
             map.set_slot(13, Some(1), Some(Arc::new(PausingSink {

@@ -3,6 +3,10 @@
 #[cfg(test)]
 mod tests {
     use axerrno::LinuxError;
+    use bpf::{
+        PerfEvent, PerfEventClock, PerfEventScope, PerfEventSpec, PERF_EVENT_IOC_DISABLE,
+        PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_PERIOD, PERF_EVENT_IOC_RESET,
+    };
     use crate::impls::bpf::perf_event::*;
 
     fn sample_attr(event_type: u32, config: u64) -> PerfEventAttr {

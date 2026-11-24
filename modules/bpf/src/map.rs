@@ -1,8 +1,4 @@
 //! BPF Map metadata, validation and bounded storage.
-//!
-//! This file is the pure part of the BPF object model: it only depends on
-//! `core`, `alloc`, `spin` and `axerrno`, so `pulse_syscalls` host tests can compile it
-//! directly. Kernel-only glue (the descriptor object) lives in `object.rs`.
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::any::Any;
@@ -11,15 +7,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use axerrno::LinuxError;
 use spin::RwLock;
 
-#[cfg(target_os = "none")]
 use super::ring_buffer::BpfRingBuf;
-
-#[cfg(not(target_os = "none"))]
-#[path = "ring_buffer.rs"]
-pub mod ring_buffer;
-
-#[cfg(not(target_os = "none"))]
-use ring_buffer::BpfRingBuf;
 
 pub const BPF_OBJ_NAME_LEN: usize = 16;
 

@@ -5,31 +5,36 @@
 //! and `close` follow the generic [`crate::fd_table`] lifecycle and the object
 //! is destroyed when its last reference goes away.
 
-mod insn;
-pub mod link;
-mod map;
 mod object;
-pub mod perf_event;
-pub mod program;
-pub mod interpreter;
-pub mod verifier;
-pub mod ring_buffer;
 
-pub use insn::*;
-pub use interpreter::{execute, BpfEnv, BpfVmError, DefaultBpfEnv, BPF_MAX_RECURSION_DEPTH, BPF_MAX_STEPS};
-pub use link::*;
-pub use map::*;
+// Compatibility exports for callers of the original pulse_core::bpf API.
+pub use bpf::{
+    insn::*,
+    interpreter,
+    interpreter::{
+        BPF_MAX_RECURSION_DEPTH, BPF_MAX_STEPS, BpfEnv, BpfVmError, DefaultBpfEnv, execute,
+    },
+    link,
+    link::*,
+    map::*,
+    perf_event,
+    perf_event::*,
+    program,
+    program::*,
+    ring_buffer,
+    ring_buffer::*,
+    verifier,
+};
 pub use object::{BpfLinkObject, BpfMapObject, BpfProgramObject, PerfEventObject};
-pub use perf_event::*;
-pub use program::*;
-pub use ring_buffer::*;
 
-
-
-#[cfg(feature = "bpf-trace")]
-pub mod sampling;
 #[cfg(feature = "bpf-trace")]
 pub mod mappings;
+#[cfg(feature = "bpf-trace")]
+pub mod sampling;
 
-#[cfg(all(feature = "bpf-trace", target_os = "none", any(target_arch = "riscv64", target_arch = "loongarch64")))]
+#[cfg(all(
+    feature = "bpf-trace",
+    target_os = "none",
+    any(target_arch = "riscv64", target_arch = "loongarch64")
+))]
 mod stack_capture;

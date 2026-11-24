@@ -131,7 +131,7 @@ performance thresholds or lossless-completeness claims.
 ```sh
 python3 tests/bpf_record/run.py guest --arch riscv64 --suite full --timeout 600
 python3 tests/bpf_record/run.py guest --arch loongarch64 --suite full --timeout 600
-cargo test -p bpf-record -p bpf-capture -p bpf-analyzer -p pulse_syscalls -p pulse_bpf_schema -- --test-threads=1
+cargo test -p bpf -p bpf-record -p bpf-capture -p bpf-analyzer -p pulse_syscalls -p pulse_bpf_schema -- --test-threads=1
 python3 -m unittest discover -s tests/bpf_record -p 'test_*.py'
 ```
 

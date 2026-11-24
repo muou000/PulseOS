@@ -43,7 +43,7 @@ Linux v6.12 的 `VM_FAULT_MAJOR` 指示存储读取，fault accounting 接收 re
 | 72 | outcome | u32，Resolved=1、NotHandled=2、NoMemory=3、ResolverError=4 |
 | 76 | classification | u32，Unknown=0；Minor=1/Major=2 预留，当前 producer 不产生它们 |
 
-observer 在 entry 保留 observation generation。resolver 可能睡眠；不能在 completion 重新取新 generation，把旧 fault 送入随后开启的新采集。完成时只复制标量进 queue，队列满/递归的既有 trace counters 继续负责，source dispatch 再按 activation epoch 判断。`fault_started`、`fault_completed`、`fault_clock_errors` 作为系统 scoped diagnostics 向 capture 传播，不与 trace queue drops 或各 FD 计数求和。[queue/generation](../../modules/axtask/src/bpf_trace.rs)、[activation dispatch](../../pulse_core/src/bpf/perf_event.rs)。
+observer 在 entry 保留 observation generation。resolver 可能睡眠；不能在 completion 重新取新 generation，把旧 fault 送入随后开启的新采集。完成时只复制标量进 queue，队列满/递归的既有 trace counters 继续负责，source dispatch 再按 activation epoch 判断。`fault_started`、`fault_completed`、`fault_clock_errors` 作为系统 scoped diagnostics 向 capture 传播，不与 trace queue drops 或各 FD 计数求和。[queue/generation](../../modules/axtask/src/bpf_trace.rs)、[activation dispatch](../../modules/bpf/src/perf_event.rs)。
 
 地址空间、Page Cache 和 TLB completion 的处理仍在原 coordinator 中；发布发生在 resolver 返回以后。不会为观察更改映射 ownership、重试、锁顺序或文件系统依赖方向，继续遵守 [ADR-0001](../adr/0001-mapped-page-lifecycle-protocol.md) 和 [ADR-0004](../adr/0004-axmm-file-mapping-source-boundary.md)。ADR-0004 的历史 qperf 描述不表示本事件恢复 qperf 依赖。
 
