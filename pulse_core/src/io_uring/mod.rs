@@ -1151,7 +1151,7 @@ impl IoUringState {
                     if self.sqpoll_service_cpu().is_some() {
                         for (id, prep) in ids.iter().zip(&preps) {
                             axlog::info!(
-                                "SQPOLL dispatch ring={} req={id} user_data={}",
+                                "SQPOLL committed ring={} req={id} user_data={}",
                                 self.ring_id,
                                 prep.user_data
                             );

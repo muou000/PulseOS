@@ -456,7 +456,7 @@ static void *dedicated_reads(void *arg)
     };
     reads[0].flags = 0;
     __atomic_add_fetch(&w->ready, 1, __ATOMIC_RELEASE);
-    /* Acquire exclusive ownership of both rings after CPU 0 reaps its POLL_ADD. */
+    /* CPU 0 hands over the SQ and CQ after warmup, then waits for both reads. */
     while (!load(&w->read_turn)) {}
     submit(w->ring, reads, 2);
     unsigned seen = 0;
@@ -505,23 +505,27 @@ static void dedicated_ring(void)
     unsigned before = r.enters;
     struct io_uring_sqe poll = poll_readable(signal_pipe[0], 1001);
     uint64_t start = monotonic_ns();
-    submit(&r, &poll, 1);
-    expect(&r, 1001, POLLIN);
     publish(&w.read_turn, 1);
     while (!load(&w.reads_done)) {}
+    submit(&r, &poll, 1);
+    expect(&r, 1001, POLLIN);
     uint64_t end = monotonic_ns();
     unsigned active_enters = r.enters - before;
     CHECK(!active_enters && load(CQ(&r, head)) == load(CQ(&r, tail)));
     CHECK(pthread_join(reader, NULL) == 0 && pthread_join(waker, NULL) == 0);
 
-    wait_asleep(&r);
     before = r.enters;
-    enter(&r, 0, 0, IORING_ENTER_SQ_WAKEUP);
-    while (load(SQ(&r, flags)) & IORING_SQ_NEED_WAKEUP)
-        sched_yield();
-    nop.user_data = 3001;
-    submit(&r, &nop, 1);
-    expect(&r, 3001, 0);
+    unsigned idle_cqes = 0;
+    do {
+        wait_asleep(&r);
+        nop.user_data = 3001 + idle_cqes;
+        submit(&r, &nop, 1);
+        /* submit fences the tail publication before we inspect NEED_WAKEUP.
+         * If the poller's final recheck found our SQE, try the next idle edge. */
+        kick_if_asleep(&r);
+        expect(&r, nop.user_data, 0);
+        idle_cqes++;
+    } while (r.enters == before && idle_cqes < 4);
     unsigned idle_enters = r.enters - before;
     CHECK(idle_enters == 1 && load(CQ(&r, head)) == load(CQ(&r, tail)));
     destroy(&r);
@@ -532,7 +536,7 @@ static void dedicated_ring(void)
            (unsigned long long)start, (unsigned long long)end);
     printf("DEDICATED_RING active unique=3 enters=%u producer0_cpu=%d producer1_cpu=%d wake_cpu=%d\n",
            active_enters, submit_cpu, w.reader_cpu, w.wake_cpu);
-    printf("DEDICATED_RING idle need_wakeup=1 enters=%u unique=1\n", idle_enters);
+    printf("DEDICATED_RING idle post_publish_need_wakeup=1 enters=%u unique=%u\n", idle_enters, idle_cqes);
     puts("DEDICATED_RING close writer_eof=1 PASS");
 }
 
