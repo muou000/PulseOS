@@ -2,14 +2,7 @@ use super::*;
 
 impl Process {
     pub fn new_uspace(pid: u64) -> AxResult<Arc<Self>> {
-        let mut aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
-        let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-        aspace.map_alloc(
-            va!(stack_bottom),
-            USER_STACK_SIZE,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            false,
-        )?;
+        let aspace = elf_loader::new_user_aspace()?;
         let fs_context = axfs::ROOT_FS_CONTEXT
             .get()
             .expect("root fs context not initialized")

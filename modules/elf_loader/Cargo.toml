@@ -1,0 +1,25 @@
+[package]
+name = "elf_loader"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ELF user image preparation for PulseOS"
+
+[dependencies]
+axconfig.workspace = true
+axcpu.workspace = true
+axerrno.workspace = true
+axfs.workspace = true
+axfs-ng-vfs.workspace = true
+axhal = { workspace = true, features = ["paging"] }
+axlog.workspace = true
+axmm.workspace = true
+axtask = { workspace = true, features = ["multitask"] }
+kernel-elf-parser.workspace = true
+linux-raw-sys = { workspace = true, features = ["elf_uapi"] }
+memory_addr.workspace = true
+spin.workspace = true
+starry-vdso.workspace = true
+xmas-elf.workspace = true

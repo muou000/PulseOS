@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 bpf.workspace = true
+elf_loader.workspace = true
 ipc.workspace = true
 axhal = { workspace = true, features = ["paging", "uspace"] }
 axcpu.workspace = true
@@ -28,16 +29,13 @@ pulse_bpf_schema = { workspace = true }
 pulse_io_uring_core.workspace = true
 pulse_user_abi.workspace = true
 
-linux-raw-sys = { workspace = true, features = ["elf_uapi", "io_uring"] }
+linux-raw-sys = { workspace = true, features = ["io_uring"] }
 linkme.workspace = true
-kernel-elf-parser.workspace = true
-xmas-elf.workspace = true
 memory_addr.workspace = true
 kernel_guard.workspace = true
 spin.workspace = true
 bitflags.workspace = true
 percpu.workspace = true
-starry-vdso.workspace = true
 kspin.workspace = true
 hashbrown.workspace = true
 heapless.workspace = true

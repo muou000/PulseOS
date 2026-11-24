@@ -41,6 +41,7 @@ members = [
     "modules/axsync",
     "modules/axtask",
     "modules/bpf",
+    "modules/elf_loader",
     "modules/ipc",
     "api/axfeat",
     "platforms/axplat",
@@ -60,6 +61,7 @@ categories = ["os", "no-std"]
 
 [workspace.dependencies]
 bpf = { path = "modules/bpf" }
+elf_loader = { path = "modules/elf_loader" }
 ipc = { path = "modules/ipc" }
 pulse_core = { path = "pulse_core" }
 pulse_syscalls = { path = "pulse_syscalls" }

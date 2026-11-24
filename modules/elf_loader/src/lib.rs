@@ -1,3 +1,9 @@
+//! Prepares ELF user images, their interpreters and the initial userspace stack.
+
+#![no_std]
+
+extern crate alloc;
+
 use alloc::{
     collections::VecDeque,
     string::{String, ToString},
@@ -7,10 +13,13 @@ use alloc::{
 };
 use core::mem::size_of;
 
+use axconfig::user::{
+    USER_HEAP_BASE, USER_SPACE_BASE, USER_SPACE_SIZE, USER_STACK_SIZE, USER_STACK_TOP,
+};
 use axerrno::{AxError, AxResult};
 use axfs::{CachedFile, ExecAccessGuard, FileFlags, FsContext};
 use axhal::{mem::MemRegionFlags, paging::MappingFlags};
-use axmm::AddrSpace;
+use axmm::{AddrSpace, FileMappingSource};
 use kernel_elf_parser::{AuxEntry, AuxType, ELFHeadersBuilder, ELFParser};
 use linux_raw_sys::elf_uapi::{EM_LOONGARCH, PT_GNU_STACK};
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
@@ -19,8 +28,6 @@ use xmas_elf::{
     header::{Machine, Type as ElfType},
     program::Type,
 };
-
-use crate::config::{USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 
 const USER_DYN_BASE: usize = 0x20_0000;
 const ELF_CACHE_MAX_ENTRIES: usize = 16;
@@ -429,11 +436,9 @@ fn effective_load_file_end(
 fn load_segments(
     aspace: &mut AddrSpace,
     elf: &ElfFile<'_>,
-    elf_file: &CachedFile,
+    source: Arc<dyn FileMappingSource>,
     bias: usize,
 ) -> AxResult<ElfLoadLayout> {
-    #[cfg(feature = "bpf-trace")]
-    let observed_file = crate::bpf::mappings::file_source(elf_file.clone(), true);
     let mut layout = ElfLoadLayout::default();
     let load_count = elf
         .program_iter()
@@ -507,12 +512,7 @@ fn load_segments(
                 seg_start_page,
                 map_len,
                 load_flags,
-                {
-                    #[cfg(feature = "bpf-trace")]
-                    { observed_file.clone() }
-                    #[cfg(not(feature = "bpf-trace"))]
-                    { Arc::new(elf_file.clone()) }
-                },
+                source.clone(),
                 file_flags_for_segment(&ph).into(),
                 file_start_page,
                 file_bytes,
@@ -935,17 +935,46 @@ pub fn check_elf_header(path: &str) -> AxResult<()> {
     Ok(())
 }
 
+/// Creates an empty user address space with the initial stack reserved.
+pub fn new_user_aspace() -> AxResult<AddrSpace> {
+    let mut aspace = axmm::new_user_aspace(VirtAddr::from(USER_SPACE_BASE), USER_SPACE_SIZE)?;
+    aspace.map_alloc(
+        VirtAddr::from(USER_STACK_TOP - USER_STACK_SIZE),
+        USER_STACK_SIZE,
+        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+        false,
+    )?;
+    Ok(aspace)
+}
+
+/// The resolved executable and the arguments to publish on its initial stack.
+pub struct ExecImageInput<'a> {
+    pub location: axfs_ng_vfs::Location,
+    pub exec_access: ExecAccessGuard,
+    pub path: &'a str,
+    /// Original pathname passed to exec, including when a shebang redirected it.
+    pub execfn_path: &'a str,
+    pub args: &'a [&'a str],
+    pub envs: &'a [&'a str],
+}
+
+/// Loads into a fresh address space. Each ELF file gets one mapping source
+/// shared by its file-backed segments, including those of the interpreter.
 pub fn load_user_app(
     aspace: &mut AddrSpace,
     fs: &FsContext,
     credentials: ExecCredentials,
-    main_location: axfs_ng_vfs::Location,
-    main_exec_access: ExecAccessGuard,
-    path: &str,
-    execfn_path: &str,
-    args: &[&str],
-    envs: &[&str],
+    input: ExecImageInput<'_>,
+    file_source: fn(CachedFile) -> Arc<dyn FileMappingSource>,
 ) -> AxResult<UserAppLoadInfo> {
+    let ExecImageInput {
+        location: main_location,
+        exec_access: main_exec_access,
+        path,
+        execfn_path,
+        args,
+        envs,
+    } = input;
     let mut exec_access = vec![main_exec_access];
     let main_image = read_elf_file_at(path, main_location)?;
     let main_data = main_image.bytes();
@@ -961,7 +990,12 @@ pub fn load_user_app(
         ElfType::SharedObject => find_dynamic_load_bias(aspace, main_requirements)?,
         _ => return Err(AxError::InvalidExecutable),
     };
-    let main_layout = load_segments(aspace, &main_elf, &main_image.file, main_bias)?;
+    let main_layout = load_segments(
+        aspace,
+        &main_elf,
+        file_source(main_image.file.clone()),
+        main_bias,
+    )?;
     let main_entry = VirtAddr::from(main_elf.header.pt2.entry_point() as usize)
         .checked_add(main_bias)
         .ok_or(AxError::OutOfRange)?;
@@ -995,7 +1029,12 @@ pub fn load_user_app(
             ElfType::SharedObject => find_dynamic_load_bias(aspace, interp_requirements)?,
             _ => return Err(AxError::InvalidExecutable),
         };
-        let _ = load_segments(aspace, &interp_elf, &interp_image.file, bias)?;
+        let _ = load_segments(
+            aspace,
+            &interp_elf,
+            file_source(interp_image.file.clone()),
+            bias,
+        )?;
         interp_base = Some(bias);
         dispatch_entry = VirtAddr::from(interp_elf.header.pt2.entry_point() as usize)
             .checked_add(bias)

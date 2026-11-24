@@ -1378,6 +1378,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "elf_loader"
+version = "0.1.0"
+dependencies = [
+ "axconfig",
+ "axcpu",
+ "axerrno",
+ "axfs",
+ "axfs-ng-vfs",
+ "axhal",
+ "axlog",
+ "axmm",
+ "axtask",
+ "kernel-elf-parser",
+ "linux-raw-sys",
+ "memory_addr",
+ "spin 0.10.0",
+ "starry-vdso",
+ "xmas-elf",
+]
+
+[[package]]
 name = "embedded-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2242,10 +2263,10 @@ dependencies = [
  "axtask",
  "bitflags 2.11.1",
  "bpf",
+ "elf_loader",
  "hashbrown 0.16.1",
  "heapless 0.9.3",
  "ipc",
- "kernel-elf-parser",
  "kernel_guard",
  "kspin",
  "linkme",
@@ -2257,8 +2278,6 @@ dependencies = [
  "pulse_user_abi",
  "sha2",
  "spin 0.10.0",
- "starry-vdso",
- "xmas-elf",
 ]
 
 [[package]]
