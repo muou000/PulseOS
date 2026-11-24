@@ -308,9 +308,9 @@ pub struct UtsNamespace {
 /// IPC 资源上下文
 pub struct IpcContext {
     /// 共享内存注册表
-    pub shared_memory: Arc<RwLock<BTreeMap<VirtAddr, Arc<Mutex<crate::ipc::shm::ShmInner>>>>>,
+    pub shared_memory: Arc<axsync::Mutex<BTreeMap<VirtAddr, Arc<Mutex<ipc::shm::ShmInner>>>>>,
     /// 信号量退出撤销记录
-    pub sem_undos: Mutex<Vec<crate::ipc::sem::SemUndoEntry>>,
+    pub sem_undos: ipc::sem::SemUndo,
 }
 
 /// vfork 挂起同步控制上下文

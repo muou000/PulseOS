@@ -93,8 +93,8 @@ impl Process {
             args: RwLock::new(alloc::vec![String::from("pulse_init")]),
             signal_trampoline: AtomicUsize::new(0),
             ipc: IpcContext {
-                shared_memory: Arc::new(RwLock::new(BTreeMap::new())),
-                sem_undos: Mutex::new(Vec::new()),
+                shared_memory: Arc::new(axsync::Mutex::new(BTreeMap::new())),
+                sem_undos: Default::default(),
             },
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),
@@ -131,12 +131,12 @@ impl Process {
             parent.ipc.shared_memory.clone()
         } else {
             let mut new_shm = BTreeMap::new();
-            let parent_shm = parent.ipc.shared_memory.read();
+            let parent_shm = parent.ipc.shared_memory.lock();
             for (vaddr, inner_arc) in parent_shm.iter() {
                 inner_arc.lock().attach_process(pid);
                 new_shm.insert(*vaddr, inner_arc.clone());
             }
-            Arc::new(RwLock::new(new_shm))
+            Arc::new(axsync::Mutex::new(new_shm))
         };
         let fs_context = if share_fs {
             RwLock::new(parent.fs_context_handle())
@@ -248,7 +248,7 @@ impl Process {
             signal_trampoline: AtomicUsize::new(signal_trampoline),
             ipc: IpcContext {
                 shared_memory,
-                sem_undos: Mutex::new(Vec::new()),
+                sem_undos: Default::default(),
             },
             stopped_signal_pending: AtomicI32::new(0),
             continued_signal_pending: AtomicBool::new(false),

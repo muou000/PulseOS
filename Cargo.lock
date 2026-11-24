@@ -1821,6 +1821,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipc"
+version = "0.1.0"
+dependencies = [
+ "axalloc",
+ "axerrno",
+ "axhal",
+ "axtask",
+ "memory_addr",
+ "pulse_user_abi",
+ "spin 0.10.0",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2216,6 +2229,7 @@ dependencies = [
  "bitflags 2.11.1",
  "hashbrown 0.16.1",
  "heapless 0.9.3",
+ "ipc",
  "kernel-elf-parser",
  "kernel_guard",
  "kspin",
@@ -2262,6 +2276,7 @@ dependencies = [
  "bitflags 2.11.1",
  "chrono",
  "heapless 0.9.3",
+ "ipc",
  "kernel_guard",
  "linkme",
  "linux-raw-sys",

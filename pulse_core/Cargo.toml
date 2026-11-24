@@ -8,6 +8,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+ipc.workspace = true
 axhal = { workspace = true, features = ["paging", "uspace"] }
 axcpu.workspace = true
 axlog = { workspace = true }

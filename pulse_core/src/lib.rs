@@ -9,7 +9,6 @@ pub mod fd_table;
 pub mod flock;
 pub mod io_uring;
 pub mod record_lock;
-pub mod ipc;
 pub mod mm;
 pub mod net;
 pub mod task;
