@@ -13,7 +13,7 @@ use axhal::{
     context::{TrapFrame, UspaceContext},
     paging::MappingFlags,
 };
-use axtask::{AxTaskRef, TaskInner, WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource};
+use axtask::{AxTaskRef, WaitContext, WaitQueue, WaitReason, WakeContext, WakeSource};
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{

@@ -17,6 +17,16 @@ impl InitIf for InitIfImpl {
     #[cfg(feature = "smp")]
     fn init_early_secondary(_cpu_id: usize) {
         axcpu::init::init_trap();
+        let bytes = axcpu::riscv_vector::vlenb();
+        if bytes != 0 {
+            // SAFETY: primary boot publishes a width only after this hart's DT
+            // node advertised V. This hart has not entered the scheduler yet.
+            assert_eq!(
+                unsafe { axcpu::riscv_vector::hardware_vlenb() },
+                bytes,
+                "incompatible VLEN on secondary hart"
+            );
+        }
     }
 
     /// Initializes the platform at the later stage for the primary core.

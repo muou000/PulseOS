@@ -192,6 +192,25 @@ pub fn emit_current_mapping_metadata(kind: &str, begin_ns: u64) {
     }
 }
 
+/// Creates an unpublished user task with space for its full register state.
+/// A child inherits the calling user task's vectors before it can run.
+pub fn try_new_user_task(
+    entry: impl FnOnce() + Send + 'static,
+    name: String,
+    stack_size: usize,
+) -> axerrno::AxResult<axtask::TaskInner> {
+    let inner = axtask::TaskInner::try_new(entry, name, stack_size)?;
+    #[cfg(target_arch = "riscv64")]
+    let inner = {
+        let mut inner = inner;
+        let vectors = axcpu::riscv_vector::VectorState::capture()
+            .map_err(|_| axerrno::AxError::NoMemory)?;
+        inner.ctx_mut().set_user_vectors(vectors);
+        inner
+    };
+    Ok(inner)
+}
+
 /// Binds hardware/software context (`page_table_root`, `TaskExt`, `PROCESS_REGISTRY`)
 /// to a `TaskInner` before publishing it to the scheduler queue.
 pub fn spawn_task_with_thread(

@@ -7,6 +7,9 @@ mod trap;
 pub mod asm;
 pub mod init;
 
+#[cfg(target_arch = "riscv64")]
+pub mod riscv_vector;
+
 #[cfg(feature = "uspace")]
 pub mod uspace;
 

@@ -8,7 +8,11 @@ use riscv::register::sstatus::Sstatus;
 use crate::{GeneralRegisters, TrapFrame};
 
 /// Context to enter user space.
-pub struct UspaceContext(TrapFrame);
+pub struct UspaceContext {
+    frame: TrapFrame,
+    #[cfg(target_arch = "riscv64")]
+    fresh_image: bool,
+}
 
 impl UspaceContext {
     /// Creates an empty context with all registers set to zero.
@@ -26,45 +30,53 @@ impl UspaceContext {
             sstatus.set_fs(FS::Initial); // set the FPU to initial state
         }
 
-        Self(TrapFrame {
-            regs: GeneralRegisters {
-                a0: arg0,
-                sp: ustack_top.as_usize(),
-                ..Default::default()
+        Self {
+            frame: TrapFrame {
+                regs: GeneralRegisters {
+                    a0: arg0,
+                    sp: ustack_top.as_usize(),
+                    ..Default::default()
+                },
+                sepc: entry,
+                sstatus,
             },
-            sepc: entry,
-            sstatus,
-        })
+            #[cfg(target_arch = "riscv64")]
+            fresh_image: true,
+        }
     }
 
     /// Creates a new context from the given [`TrapFrame`].
     pub const fn from(trap_frame: &TrapFrame) -> Self {
-        Self(*trap_frame)
+        Self {
+            frame: *trap_frame,
+            #[cfg(target_arch = "riscv64")]
+            fresh_image: false,
+        }
     }
 
     /// Gets the instruction pointer.
     pub const fn get_ip(&self) -> usize {
-        self.0.sepc
+        self.frame.sepc
     }
 
     /// Gets the stack pointer.
     pub const fn get_sp(&self) -> usize {
-        self.0.regs.sp
+        self.frame.regs.sp
     }
 
     /// Sets the instruction pointer.
     pub const fn set_ip(&mut self, pc: usize) {
-        self.0.sepc = pc;
+        self.frame.sepc = pc;
     }
 
     /// Sets the stack pointer.
     pub const fn set_sp(&mut self, sp: usize) {
-        self.0.regs.sp = sp;
+        self.frame.regs.sp = sp;
     }
 
     /// Sets the return value register.
     pub const fn set_retval(&mut self, a0: usize) {
-        self.0.regs.a0 = a0;
+        self.frame.regs.a0 = a0;
     }
 
     /// Enters user space.
@@ -81,11 +93,15 @@ impl UspaceContext {
         use riscv::register::{sepc, sscratch};
 
         crate::asm::disable_irqs();
+        #[cfg(target_arch = "riscv64")]
+        if self.fresh_image {
+            super::riscv_vector::reset_for_exec();
+        }
         // Address of the top of the kernel stack after saving the trap frame.
         let kernel_trap_addr = kstack_top.as_usize() - core::mem::size_of::<TrapFrame>();
         unsafe {
             sscratch::write(kstack_top.as_usize());
-            sepc::write(self.0.sepc);
+            sepc::write(self.frame.sepc);
             core::arch::asm!(
                 include_asm_macros!(),
                 "
@@ -98,11 +114,11 @@ impl UspaceContext {
                 LDR     tp, sp, 4
 
                 LDR     t0, sp, 33
-                csrw    sstatus, t0
+                RESTORE_SSTATUS t0, t1
                 POP_GENERAL_REGS
                 LDR     sp, sp, 2
                 sret",
-                tf = in(reg) &(self.0),
+                tf = in(reg) &(self.frame),
                 kernel_trap_addr = in(reg) kernel_trap_addr,
                 options(noreturn),
             )
@@ -114,13 +130,13 @@ impl core::ops::Deref for UspaceContext {
     type Target = TrapFrame;
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.frame
     }
 }
 
 impl core::ops::DerefMut for UspaceContext {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.frame
     }
 }
