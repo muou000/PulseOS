@@ -103,9 +103,6 @@ pub use core_map as map;
 pub use core_interpreter as interpreter;
 #[cfg(not(target_os = "none"))]
 #[allow(unused_imports)]
-pub use core_program as program;
-#[cfg(not(target_os = "none"))]
-#[allow(unused_imports)]
 pub use core_map::BPF_OBJ_NAME_LEN;
 
 #[cfg(not(target_os = "none"))]
