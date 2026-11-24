@@ -198,7 +198,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
     #[cfg(any(feature = "fs", feature = "net", feature = "display"))]
     {
         #[allow(unused_variables)]
-        let all_devices = axdriver::init_drivers();
+        let all_devices = driver::init_drivers();
 
         #[cfg(feature = "fs")]
         fs::init_filesystems(all_devices.block);
@@ -207,7 +207,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
         net::init_network(all_devices.net);
 
         #[cfg(feature = "display")]
-        axdisplay::init_display(all_devices.display);
+        display::init_display(all_devices.display);
     }
 
     #[cfg(feature = "smp")]

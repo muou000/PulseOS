@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use axdriver_block::ramdisk::RamDisk;
+use driver_block::ramdisk::RamDisk;
 use fs::{File, FsContext, fs};
 use vfs::{
     Filesystem, Location, Mountpoint, NodePermission, NodeType, VfsError, VfsResult, path::Path,

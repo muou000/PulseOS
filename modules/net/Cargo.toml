@@ -26,13 +26,13 @@ log.workspace = true
 cfg-if.workspace = true
 # net still depends on the spin 0.9 API; the workspace default is spin 0.10.
 spin = "0.9"
-axdriver_net.workspace = true
+driver_net.workspace = true
 lazyinit.workspace = true
 axerrno.workspace = true
 hal.workspace = true
 sync.workspace = true
 task.workspace = true
-axdriver = { workspace = true, features = ["net"] }
+driver = { workspace = true, features = ["net"] }
 io.workspace = true
 poll.workspace = true
 

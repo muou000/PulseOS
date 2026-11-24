@@ -18,7 +18,7 @@ use core::{
     time::Duration,
 };
 
-use axdriver::{AxBlockDevice, AxDeviceContainer, prelude::BaseDriverOps};
+use driver::{AxBlockDevice, AxDeviceContainer, prelude::BaseDriverOps};
 use vfs::NodePermission;
 pub use vfs::NodeType;
 use futures_util::{StreamExt, stream::FuturesUnordered};

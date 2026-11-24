@@ -2,7 +2,7 @@ use alloc::{boxed::Box, sync::Arc};
 use core::{any::Any, time::Duration};
 
 use async_trait::async_trait;
-use axdriver::prelude::AsyncBlockDriverOps;
+use driver::prelude::AsyncBlockDriverOps;
 use vfs::{
     DeviceId, DirEntry, DirNode, FileNode, FilesystemOps, Metadata, MetadataUpdate, NodeFlags,
     NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,

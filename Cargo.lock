@@ -293,98 +293,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axdisplay"
-version = "0.1.0"
-dependencies = [
- "axdriver",
- "axdriver_display",
- "lazyinit",
- "log",
- "sync",
-]
-
-[[package]]
-name = "axdriver"
-version = "0.1.0"
-dependencies = [
- "axdriver_base",
- "axdriver_block",
- "axdriver_display",
- "axdriver_net",
- "axdriver_pci",
- "axdriver_virtio",
- "cfg-if",
- "config",
- "fdt-raw",
- "hal",
- "kernel_alloc",
- "kernel_log",
- "kspin",
- "log",
- "poll",
- "task",
- "virtio-drivers",
-]
-
-[[package]]
-name = "axdriver_base"
-version = "0.1.2"
-
-[[package]]
-name = "axdriver_block"
-version = "0.1.2"
-dependencies = [
- "axdriver_base",
- "bcm2835-sdhci",
- "dwmmc-host",
- "hal",
- "log",
- "poll",
- "rdif-block",
- "sdio-host2",
- "sdmmc-protocol",
- "simple-ahci",
- "spin 0.10.0",
- "starfive-jh7110-dwmmc",
-]
-
-[[package]]
-name = "axdriver_display"
-version = "0.1.2"
-dependencies = [
- "axdriver_base",
-]
-
-[[package]]
-name = "axdriver_net"
-version = "0.1.2"
-dependencies = [
- "axdriver_base",
- "log",
- "poll",
- "spin 0.9.8",
-]
-
-[[package]]
-name = "axdriver_pci"
-version = "0.1.2"
-dependencies = [
- "virtio-drivers",
-]
-
-[[package]]
-name = "axdriver_virtio"
-version = "0.1.2"
-dependencies = [
- "axdriver_base",
- "axdriver_block",
- "axdriver_display",
- "axdriver_net",
- "log",
- "virtio-drivers",
-]
-
-[[package]]
 name = "axerrno"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -398,8 +306,8 @@ dependencies = [
 name = "axfeat"
 version = "0.1.0"
 dependencies = [
- "axdisplay",
- "axdriver",
+ "display",
+ "driver",
  "fs",
  "hal",
  "ipi",
@@ -1088,6 +996,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "display"
+version = "0.1.0"
+dependencies = [
+ "driver",
+ "driver_display",
+ "lazyinit",
+ "log",
+ "sync",
+]
+
+[[package]]
 name = "dma-api"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1100,6 +1019,87 @@ dependencies = [
  "log",
  "mbarrier",
  "thiserror",
+]
+
+[[package]]
+name = "driver"
+version = "0.1.0"
+dependencies = [
+ "cfg-if",
+ "config",
+ "driver_base",
+ "driver_block",
+ "driver_display",
+ "driver_net",
+ "driver_pci",
+ "driver_virtio",
+ "fdt-raw",
+ "hal",
+ "kernel_alloc",
+ "kernel_log",
+ "kspin",
+ "log",
+ "poll",
+ "task",
+ "virtio-drivers",
+]
+
+[[package]]
+name = "driver_base"
+version = "0.1.2"
+
+[[package]]
+name = "driver_block"
+version = "0.1.2"
+dependencies = [
+ "bcm2835-sdhci",
+ "driver_base",
+ "dwmmc-host",
+ "hal",
+ "log",
+ "poll",
+ "rdif-block",
+ "sdio-host2",
+ "sdmmc-protocol",
+ "simple-ahci",
+ "spin 0.10.0",
+ "starfive-jh7110-dwmmc",
+]
+
+[[package]]
+name = "driver_display"
+version = "0.1.2"
+dependencies = [
+ "driver_base",
+]
+
+[[package]]
+name = "driver_net"
+version = "0.1.2"
+dependencies = [
+ "driver_base",
+ "log",
+ "poll",
+ "spin 0.9.8",
+]
+
+[[package]]
+name = "driver_pci"
+version = "0.1.2"
+dependencies = [
+ "virtio-drivers",
+]
+
+[[package]]
+name = "driver_virtio"
+version = "0.1.2"
+dependencies = [
+ "driver_base",
+ "driver_block",
+ "driver_display",
+ "driver_net",
+ "log",
+ "virtio-drivers",
 ]
 
 [[package]]
@@ -1295,12 +1295,12 @@ version = "0.1.0"
 dependencies = [
  "async-lock",
  "async-trait",
- "axdriver",
  "axerrno",
  "bitflags 2.11.1",
  "cfg-if",
  "chrono",
  "config",
+ "driver",
  "env_logger",
  "ext4plus",
  "futures-util",
@@ -2002,10 +2002,10 @@ dependencies = [
 name = "net"
 version = "0.1.0"
 dependencies = [
- "axdriver",
- "axdriver_net",
  "axerrno",
  "cfg-if",
+ "driver",
+ "driver_net",
  "hal",
  "io",
  "lazyinit",
@@ -2450,13 +2450,13 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
- "axdisplay",
- "axdriver",
  "axplat",
  "chrono",
  "config",
  "crate_interface",
  "ctor_bare",
+ "display",
+ "driver",
  "fs",
  "hal",
  "ipi",

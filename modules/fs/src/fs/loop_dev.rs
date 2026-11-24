@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use axdriver::prelude::{
+use driver::prelude::{
     AsyncBlockDriverOps, BaseDriverOps, BlockDriverOps, DevError, DevResult, DeviceType,
 };
 use spin::Mutex;

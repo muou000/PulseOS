@@ -6,7 +6,7 @@ use core::{
     task::{Context, Poll, ready},
 };
 
-use axdriver::prelude::{AsyncBlockDriverOps, DevError, DevResult};
+use driver::prelude::{AsyncBlockDriverOps, DevError, DevResult};
 use vfs::{VfsError, VfsResult};
 use hadris_io::{Error, ErrorKind, ErrorType};
 use hadris_storage::{BlockIndex, BlockSize, async_::BlockDevice};

@@ -17,8 +17,8 @@ use core::{
 };
 
 pub use addr::{from_core_sockaddr, into_core_sockaddr};
-use axdriver::prelude::*;
-use axdriver_net::{DevError, NetBufPtr};
+use driver::prelude::*;
+use driver_net::{DevError, NetBufPtr};
 use axerrno::{AxError, AxResult};
 use hal::time::{
     NANOS_PER_MICROS, TimeValue, monotonic_time, monotonic_time_nanos as current_time_nanos,

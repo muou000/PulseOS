@@ -1,0 +1,85 @@
+[package]
+name = "driver"
+version.workspace = true
+edition.workspace = true
+authors = [
+    "Yuekai Jia <equation618@gmail.com>",
+    "ChengXiang Qi <kuangjux@outlook.com>",
+]
+description = "ArceOS device drivers"
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/arceos-org/arceos/tree/main/modules/axdriver"
+documentation = "https://arceos-org.github.io/arceos/axdriver/index.html"
+
+[features]
+dyn = []
+bus-mmio = []
+bus-pci = ["dep:driver_pci", "dep:hal", "dep:config"]
+net = ["driver_net"]
+block = ["driver_block"]
+display = ["driver_display"]
+
+# Enabled by features `virtio-*`
+virtio = ["driver_virtio", "dep:kernel_alloc", "dep:hal", "dep:config"]
+
+multitask = []
+irq = ["task/irq"]
+
+# Async block I/O interface (AsyncBlockDriverOps trait implementation).
+# Requires `multitask` + `irq` to be effective at runtime.
+# TODO: currently only VirtIoBlkDevWrapper implements AsyncBlockDriverOps.
+#       Other block drivers (ramdisk, bcm2835-sdhci) still use sync-only BlockDriverOps.
+async = ["driver_block/async"]
+
+# various types of drivers
+virtio-blk = ["block", "virtio", "driver_virtio/block", "async"]
+virtio-net = ["net", "virtio", "driver_virtio/net"]
+virtio-gpu = ["display", "virtio", "driver_virtio/gpu"]
+ramdisk = ["block", "driver_block/ramdisk"]
+bcm2835-sdhci = ["block", "driver_block/bcm2835-sdhci"]
+starfive-jh7110-sdmmc = [
+    "block",
+    "async",
+    "driver_block/starfive-jh7110-sdmmc",
+    "dep:kernel_alloc",
+    "dep:hal",
+    "dep:config",
+    "dep:fdt-raw",
+]
+ls2k1000-ahci = [
+    "block",
+    "async",
+    "driver_block/ls2k1000-ahci",
+    "dep:hal",
+    "dep:config",
+]
+starfive-jh7110-dwmac = [
+    "net",
+    "driver_net/starfive-jh7110-dwmac",
+    "dep:kernel_alloc",
+    "dep:hal",
+    "dep:fdt-raw",
+]
+# more devices example: e1000 = ["net", "driver_net/e1000"]
+
+default = ["bus-pci"]
+
+[dependencies]
+log.workspace = true
+cfg-if.workspace = true
+poll.workspace = true
+kspin.workspace = true
+virtio-drivers.workspace = true
+driver_base.workspace = true
+driver_block = { workspace = true, optional = true }
+driver_net = { workspace = true, optional = true }
+driver_display = { workspace = true, optional = true }
+driver_pci = { workspace = true, optional = true }
+driver_virtio = { workspace = true, optional = true }
+kernel_alloc = { workspace = true, optional = true }
+hal = { workspace = true, optional = true }
+config = { workspace = true, optional = true }
+task = { workspace = true }
+kernel_log = { workspace = true }
+fdt-raw = { version = "0.3", optional = true }

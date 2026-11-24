@@ -19,7 +19,7 @@ smp = ["hal/smp", "runtime/smp", "task?/smp", "kernel_alloc?/smp", "kspin/smp"]
 fp-simd = ["hal/fp-simd"]
 
 # Interrupts
-irq = ["hal/irq", "runtime/irq", "task?/irq", "axdriver?/irq"]
+irq = ["hal/irq", "runtime/irq", "task?/irq", "driver?/irq"]
 ipi = ["irq", "dep:ipi", "hal/ipi", "runtime/ipi", "task?/ipi"]
 
 # Custom or default platforms
@@ -44,7 +44,7 @@ multitask = [
     "sync/multitask",
     "runtime/multitask",
     "net?/multitask",
-    "axdriver?/multitask",
+    "driver?/multitask",
 ]
 sched-fifo = ["task/sched-fifo"]
 sched-rr = ["task/sched-rr", "irq"]
@@ -57,37 +57,37 @@ bpf-trace = ["task?/bpf-trace"]
 fs = [
     "alloc",
     "paging",
-    "axdriver/virtio-blk",
-    "axdriver/dyn",
+    "driver/virtio-blk",
+    "driver/dyn",
     "dep:fs",
     "runtime/fs",
 ]
 
 # Networking
-net = ["alloc", "paging", "axdriver/net", "dep:net", "runtime/net"]
+net = ["alloc", "paging", "driver/net", "dep:net", "runtime/net"]
 
 # Display
 display = [
     "alloc",
     "paging",
-    "axdriver/virtio-gpu",
-    "dep:axdisplay",
+    "driver/virtio-gpu",
+    "dep:display",
     "runtime/display",
-    "axdisplay/smoke-test",
+    "display/smoke-test",
 ]
 
 # Real Time Clock (RTC) Driver.
 rtc = ["hal/rtc", "runtime/rtc"]
 
 # Device drivers
-bus-mmio = ["axdriver?/bus-mmio"]
-bus-pci = ["axdriver?/bus-pci"]
-driver-ramdisk = ["axdriver?/ramdisk", "fs?/use-ramdisk"]
-driver-virtio-net = ["axdriver?/virtio-net"]
-driver-starfive-jh7110-dwmac = ["axdriver?/starfive-jh7110-dwmac"]
-driver-bcm2835-sdhci = ["axdriver?/bcm2835-sdhci"]
-driver-starfive-jh7110-sdmmc = ["axdriver?/starfive-jh7110-sdmmc"]
-driver-ls2k1000-ahci = ["axdriver?/ls2k1000-ahci"]
+bus-mmio = ["driver?/bus-mmio"]
+bus-pci = ["driver?/bus-pci"]
+driver-ramdisk = ["driver?/ramdisk", "fs?/use-ramdisk"]
+driver-virtio-net = ["driver?/virtio-net"]
+driver-starfive-jh7110-dwmac = ["driver?/starfive-jh7110-dwmac"]
+driver-bcm2835-sdhci = ["driver?/bcm2835-sdhci"]
+driver-starfive-jh7110-sdmmc = ["driver?/starfive-jh7110-sdmmc"]
+driver-ls2k1000-ahci = ["driver?/ls2k1000-ahci"]
 
 # Logging
 log-level-off = ["kernel_log/log-level-off"]
@@ -102,10 +102,10 @@ runtime = { workspace = true }
 hal = { workspace = true }
 kernel_log = { workspace = true }
 kernel_alloc = { workspace = true, optional = true }
-axdriver = { workspace = true, optional = true }
+driver = { workspace = true, optional = true }
 fs = { workspace = true, optional = true }
 net = { workspace = true, optional = true }
-axdisplay = { workspace = true, optional = true }
+display = { workspace = true, optional = true }
 sync = { workspace = true, optional = true }
 task = { workspace = true, optional = true }
 ipi = { workspace = true, optional = true }

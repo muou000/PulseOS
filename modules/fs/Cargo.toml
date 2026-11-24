@@ -22,7 +22,7 @@ kernel_alloc.workspace = true
 config.workspace = true
 mm.workspace = true
 task.workspace = true
-axdriver = { workspace = true, features = ["block", "async"] }
+driver = { workspace = true, features = ["block", "async"] }
 axerrno.workspace = true
 vfs.workspace = true
 hal.workspace = true
@@ -52,5 +52,5 @@ futures-util.workspace = true
 heapless.workspace = true
 
 [dev-dependencies]
-axdriver = { workspace = true, features = ["block", "ramdisk", "async"] }
+driver = { workspace = true, features = ["block", "ramdisk", "async"] }
 env_logger.workspace = true

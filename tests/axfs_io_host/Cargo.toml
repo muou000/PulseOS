@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dev-dependencies]
-axdriver_block = { path = "../../modules/axdriver_block", features = ["async"] }
+driver_block = { path = "../../modules/driver_block", features = ["async"] }
 vfs = { path = "../../modules/vfs" }
 hadris-io = { version = "=3.0.0-rc.4", default-features = false }
 hadris-storage = { version = "=3.0.0-rc.4", default-features = false, features = ["async"] }

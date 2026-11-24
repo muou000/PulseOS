@@ -11,7 +11,7 @@ pub mod loop_dev;
 pub mod procfs;
 mod tmpfs;
 
-use axdriver::prelude::AsyncBlockDriverOps;
+use driver::prelude::AsyncBlockDriverOps;
 use vfs::{Filesystem, VfsResult};
 use cfg_if::cfg_if;
 pub(crate) use devfs::BlockDeviceSpec;

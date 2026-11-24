@@ -20,14 +20,14 @@ members = [
     "modules/kernel_alloc",
     "modules/config",
     "modules/cpu",
-    "modules/axdisplay",
-    "modules/axdriver",
-    "modules/axdriver_base",
-    "modules/axdriver_block",
-    "modules/axdriver_display",
-    "modules/axdriver_net",
-    "modules/axdriver_pci",
-    "modules/axdriver_virtio",
+    "modules/display",
+    "modules/driver",
+    "modules/driver_base",
+    "modules/driver_block",
+    "modules/driver_display",
+    "modules/driver_net",
+    "modules/driver_pci",
+    "modules/driver_virtio",
     "modules/fs",
     "modules/vfs",
     "modules/hal",
@@ -95,18 +95,18 @@ task = { path = "modules/task" }
 sync = { path = "modules/sync" }
 fs = { path = "modules/fs", features = ["times"] }
 mm = { path = "modules/mm" }
-axdisplay = { path = "modules/axdisplay" }
-axdriver = { path = "modules/axdriver" }
+display = { path = "modules/display" }
+driver = { path = "modules/driver" }
 ipi = { path = "modules/ipi" }
 axerrno = "0.2"
 poll = { path = "modules/poll" }
 
-axdriver_base = { path = "modules/axdriver_base" }
-axdriver_block = { path = "modules/axdriver_block" }
-axdriver_display = { path = "modules/axdriver_display" }
-axdriver_net = { path = "modules/axdriver_net" }
-axdriver_pci = { path = "modules/axdriver_pci" }
-axdriver_virtio = { path = "modules/axdriver_virtio" }
+driver_base = { path = "modules/driver_base" }
+driver_block = { path = "modules/driver_block" }
+driver_display = { path = "modules/driver_display" }
+driver_net = { path = "modules/driver_net" }
+driver_pci = { path = "modules/driver_pci" }
+driver_virtio = { path = "modules/driver_virtio" }
 
 axplat-riscv64-qemu-virt = "0.3.0"
 axplat-riscv64-visionfive2 = "0.3.0"
@@ -200,8 +200,6 @@ axplat = { path = "platforms/axplat" }
 handler_table = { path = "crates/handler_table" }
 dwmmc-host = { path = "crates/dwmmc-host" }
 sdmmc-protocol = { path = "crates/sdmmc-protocol" }
-axdriver_base = { path = "modules/axdriver_base" }
-axdriver_display = { path = "modules/axdriver_display" }
 
 [patch."https://github.com/arceos-org/allocator.git"]
 allocator = { path = "crates/allocator" }
@@ -279,11 +277,3 @@ axplat-loongarch64-ls2k1000 = { workspace = true, optional = true, features = ["
 
 [patch."https://github.com/rcore-os/smoltcp.git"]
 smoltcp = { path = "crates/smoltcp" }
-
-[patch."https://github.com/arceos-org/axdriver_crates.git"]
-axdriver_base = { path = "modules/axdriver_base" }
-axdriver_display = { path = "modules/axdriver_display" }
-axdriver_block = { path = "modules/axdriver_block" }
-axdriver_net = { path = "modules/axdriver_net" }
-axdriver_pci = { path = "modules/axdriver_pci" }
-axdriver_virtio = { path = "modules/axdriver_virtio" }
