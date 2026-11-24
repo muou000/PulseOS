@@ -1,0 +1,210 @@
+{
+  "mode": "dedicated-ring",
+  "arch": "riscv64",
+  "qemu_exit": 0,
+  "kernel_commit": "a8e058af88ba8d0644fe07cf1e4b21a63f03fa7b",
+  "kernel_tree_sha256": "83e8f1d8ffc8221b861f1bb68cd9486dde74d4b56c3065bd6006541fb9992493",
+  "boot_sha256": "2e12b8b5bed8a58e77c592b430396bc7b79756b427be54e8732ff13ac81e46b7",
+  "build": {
+    "arch": "riscv64",
+    "features": "axfeat/defplat axfeat/log-level-info axfeat/bus-mmio smp qemu guest-checks",
+    "mode": "release",
+    "platform": "riscv64-qemu-virt",
+    "target": "riscv64gc-unknown-none-elf"
+  },
+  "qemu": [
+    "/usr/local/bin/qemu-system-riscv64",
+    "-machine",
+    "virt",
+    "-kernel",
+    "/tmp/pulse252/observed/observed_riscv64-qemu-virt.bin",
+    "-m",
+    "8G",
+    "-nographic",
+    "-smp",
+    "8",
+    "-cpu",
+    "max",
+    "-bios",
+    "default",
+    "-drive",
+    "file=/home/muou/PulseOS/tests/bpf_record/runs/252-verified-dedicated-ring-riscv64/disk.img,if=none,format=raw,id=x0,snapshot=on",
+    "-device",
+    "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",
+    "-no-reboot",
+    "-device",
+    "virtio-net-device,netdev=net",
+    "-netdev",
+    "user,id=net",
+    "-rtc",
+    "base=utc"
+  ],
+  "guest": "/opt/io_uring/sqpoll --dedicated-ring",
+  "ring": 3,
+  "reserved_cpu": 7,
+  "user_mask": "0x7f",
+  "submit_to_reap_ns": [
+    3245719900,
+    3340954300
+  ],
+  "producer_cpus": [
+    0,
+    1
+  ],
+  "wake_cpu": 2,
+  "sq_consumptions": [
+    {
+      "user_data": 0,
+      "cpu": 7
+    },
+    {
+      "user_data": 2001,
+      "cpu": 7
+    },
+    {
+      "user_data": 2002,
+      "cpu": 7
+    },
+    {
+      "user_data": 1001,
+      "cpu": 7
+    },
+    {
+      "user_data": 3001,
+      "cpu": 7
+    },
+    {
+      "user_data": 4001,
+      "cpu": 7
+    }
+  ],
+  "inline_read": {
+    "user_data": 2001,
+    "cpu": 7,
+    "bytes": 2
+  },
+  "polls": [
+    {
+      "req": 3,
+      "phase": "first",
+      "cpu": 7,
+      "result": "pending",
+      "task": "async-exec-cpu-7",
+      "seq": 1
+    },
+    {
+      "req": 3,
+      "phase": "resume",
+      "cpu": 7,
+      "result": "ready",
+      "task": "async-exec-cpu-7",
+      "seq": 2
+    }
+  ],
+  "committed": {
+    "0": "1",
+    "2002": "2",
+    "1001": "3",
+    "3001": "4",
+    "4001": "5"
+  },
+  "worker": [
+    {
+      "ring": "3",
+      "req": "2",
+      "phase": "start",
+      "cpu": "7",
+      "task": "61",
+      "key": "None"
+    },
+    {
+      "ring": "3",
+      "req": "2",
+      "phase": "finish",
+      "cpu": "7",
+      "task": "61",
+      "key": "None"
+    }
+  ],
+  "enter_calls": {
+    "warmup": 1,
+    "active": 0,
+    "idle": 1,
+    "witness": 0,
+    "lifetime": 2
+  },
+  "active_request_placement": {
+    "sq": {
+      "per_cpu": {
+        "7": 3
+      },
+      "outside": 0
+    },
+    "inline": {
+      "per_cpu": {
+        "7": 1
+      },
+      "outside": 0
+    },
+    "first_poll": {
+      "per_cpu": {
+        "7": 1
+      },
+      "outside": 0
+    },
+    "resumed_poll": {
+      "per_cpu": {
+        "7": 1
+      },
+      "outside": 0
+    },
+    "worker_start": {
+      "per_cpu": {
+        "7": 1
+      },
+      "outside": 0
+    },
+    "worker_finish": {
+      "per_cpu": {
+        "7": 1
+      },
+      "outside": 0
+    }
+  },
+  "user_dispatch": {
+    "setup": {
+      "0": 26,
+      "1": 7,
+      "2": 0,
+      "3": 2,
+      "4": 3,
+      "5": 17,
+      "6": 0,
+      "7": 0
+    },
+    "teardown": {
+      "0": 58,
+      "1": 9,
+      "2": 3,
+      "3": 2,
+      "4": 3,
+      "5": 17,
+      "6": 0,
+      "7": 0
+    },
+    "delta": {
+      "0": 32,
+      "1": 2,
+      "2": 3,
+      "3": 0,
+      "4": 0,
+      "5": 0,
+      "6": 0,
+      "7": 0
+    }
+  },
+  "active_unique_cqes": 3,
+  "idle_unique_cqes": 1,
+  "witness_unique_cqes": 1,
+  "passed": true
+}
