@@ -13,6 +13,10 @@ impl Process {
             child_uctx.set_sp(sp);
         }
 
+        // shmat/shmdt hold this registry throughout their mapping changes.
+        // Keep it until the child's snapshot and attachment counts agree.
+        let parent_registry = self.ipc.shared_memory.read().clone();
+        let parent_attachments = parent_registry.attachments.lock();
         let parent_brk_state = self.brk_state_handle();
         let parent_brk_state_guard = parent_brk_state.lock();
         let parent_aspace_handle = self.aspace_handle();
@@ -20,8 +24,6 @@ impl Process {
         let child_brk_state = Arc::new(Mutex::new(*parent_brk_state_guard));
         drop(parent_brk_state_guard);
         let new_aspace = clone_result.complete_after_unlock()?;
-        let _guard = NoPreemptIrqSave::new();
-
         let inner = task::try_new_user_task(
             move || {
                 let thread = task::current_thread().expect("fork child without Thread context");
@@ -41,13 +43,17 @@ impl Process {
         )?;
 
         let child_tid = inner.id().as_u64();
+        // The registry owns these counts even if later child setup fails.
+        let inherited = SharedMemoryRegistry::inherit(&parent_attachments, child_tid);
+        drop(parent_attachments);
+        drop(parent_registry);
         let new_aspace_arc = Arc::new(AddressSpaceLock::new(new_aspace));
         let child_proc = Self::new_child_process(
             child_tid,
             self.clone(),
             new_aspace_arc,
             child_brk_state,
-            false,
+            inherited,
             params.is_vfork,
             params.share_fs,
             params.share_files,
@@ -64,6 +70,7 @@ impl Process {
             let child_tid = child_tid as u32;
             self.write_user_u32(addr, child_tid)?;
         }
+        let _guard = NoPreemptIrqSave::new();
         let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id());
         task::register_thread_global(child_tid, child_thread.clone());
         if let Ok(parent_thread) = current_thread() {
@@ -122,7 +129,7 @@ impl Process {
                 self.clone(),
                 parent_aspace_handle.clone(),
                 brk_state,
-                true,
+                self.ipc.shared_memory.read().clone(),
                 params.is_vfork,
                 params.share_fs,
                 params.share_files,

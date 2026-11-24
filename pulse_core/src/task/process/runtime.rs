@@ -140,18 +140,11 @@ impl Process {
     }
 
     pub fn detach_all_shared_memory(&self) {
-        let mut shm = self.ipc.shared_memory.write();
-        for inner_arc in shm.values() {
-            let mut inner = inner_arc.lock();
-            inner.detach_process(self.pid());
-            if inner.rmid && inner.attach_count() == 0 {
-                let shmid = inner.shmid;
-                drop(inner);
-                let mut manager = crate::ipc::shm::SHM_MANAGER.lock();
-                manager.remove_shmid(shmid);
-            }
-        }
-        shm.clear();
+        // Exec and exit run after the process has retired its other threads.
+        // CLONE_VM peers can still own the old registry and its mappings.
+        let old = core::mem::take(&mut *self.ipc.shared_memory.write());
+        old.release_pid.store(self.pid(), Ordering::Relaxed);
+        drop(old);
     }
 
     fn release_zombie_resources(&self, switch_current_aspace: bool) -> AxResult<()> {
@@ -181,13 +174,7 @@ impl Process {
 
         self.detach_all_shared_memory();
 
-        {
-            let undos = {
-                let mut guard = self.ipc.sem_undos.lock();
-                core::mem::take(&mut *guard)
-            };
-            crate::ipc::sem::exit_sem_undos(self.pid() as i32, undos);
-        }
+        self.ipc.sem_undos.apply_on_exit(self.pid() as i32);
 
         self.close_all_files();
         self.futex_table.clear();

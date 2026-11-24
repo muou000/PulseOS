@@ -305,12 +305,51 @@ pub struct UtsNamespace {
     pub hostname: Arc<RwLock<[u8; 65]>>,
 }
 
+type ShmAttachments = BTreeMap<VirtAddr, Arc<Mutex<ipc::shm::ShmInner>>>;
+/// One address space's attachment records. The last process or in-flight
+/// mapping operation to release the registry completes its IPC cleanup.
+#[derive(Default)]
+struct SharedMemoryRegistry {
+    attachments: axsync::Mutex<ShmAttachments>,
+    release_pid: AtomicU64,
+}
+
+impl SharedMemoryRegistry {
+    fn inherit(attachments: &ShmAttachments, pid: u64) -> Arc<Self> {
+        let inherited = attachments.clone();
+        for segment in inherited.values() {
+            segment.lock().attach_process(pid);
+        }
+        Arc::new(Self {
+            attachments: axsync::Mutex::new(inherited),
+            release_pid: AtomicU64::new(pid),
+        })
+    }
+}
+
+impl Drop for SharedMemoryRegistry {
+    fn drop(&mut self) {
+        for segment in self.attachments.get_mut().values() {
+            ipc::shm::detach(segment, *self.release_pid.get_mut());
+        }
+    }
+}
+
 /// IPC 资源上下文
 pub struct IpcContext {
-    /// 共享内存注册表
-    pub shared_memory: Arc<RwLock<BTreeMap<VirtAddr, Arc<Mutex<crate::ipc::shm::ShmInner>>>>>,
+    /// Processes sharing an address space hold the same attachment registry.
+    shared_memory: RwLock<Arc<SharedMemoryRegistry>>,
     /// 信号量退出撤销记录
-    pub sem_undos: Mutex<Vec<crate::ipc::sem::SemUndoEntry>>,
+    pub sem_undos: ipc::sem::SemUndo,
+}
+
+impl IpcContext {
+    /// Serialize mapping changes with private forks in the same address space.
+    pub fn with_shared_memory<R>(&self, update: impl FnOnce(&mut ShmAttachments) -> R) -> R {
+        let registry = self.shared_memory.read().clone();
+        let mut attachments = registry.attachments.lock();
+        update(&mut attachments)
+    }
 }
 
 /// vfork 挂起同步控制上下文

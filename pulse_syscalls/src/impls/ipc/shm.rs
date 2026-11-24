@@ -2,11 +2,13 @@
 
 use axerrno::LinuxError;
 use axhal::mem::virt_to_phys;
-use memory_addr::{PAGE_SIZE_4K, VirtAddr};
-use pulse_core::ipc::shm::{
-    IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, SHM_INFO, SHM_MANAGER, SHM_RDONLY,
-    SHM_REMAP, SHM_RND, SHM_STAT, ShmidDs,
+use ipc::{
+    IPC_CREAT, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT,
+    shm::{
+        self, IPC_INFO, SHM_INFO, SHM_MANAGER, SHM_RDONLY, SHM_REMAP, SHM_RND, SHM_STAT, ShmidDs,
+    },
 };
+use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 
 /// shmget: create or get a shared memory segment.
 ///
@@ -24,8 +26,6 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> isize {
     if size == 0 && key != IPC_PRIVATE {
         return -LinuxError::EINVAL.code() as isize;
     }
-
-    const IPC_CREAT: i32 = 0o1000;
 
     let proc = match pulse_core::task::current_process() {
         Ok(proc) => proc,
@@ -47,7 +47,13 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> isize {
                 let inner = manager.get_inner_by_shmid(shmid).unwrap();
                 let inner_guard = inner.lock();
                 let req_mode = (shmflg & 0o777) as u32;
-                if !pulse_core::ipc::shm::ipc_has_permission(&inner_guard.shmid_ds.shm_perm, req_mode, euid, egid, &groups) {
+                if !shm::ipc_has_permission(
+                    &inner_guard.stat().shm_perm,
+                    req_mode,
+                    euid,
+                    egid,
+                    &groups,
+                ) {
                     return -LinuxError::EACCES.code() as isize;
                 }
                 return shmid as isize;
@@ -82,105 +88,111 @@ pub fn sys_shmat(shmid: i32, shmaddr: usize, shmflg: i32) -> isize {
     };
     let pid = proc.pid();
 
-    // Get the ShmInner.
-    let shm_inner = {
-        let manager = SHM_MANAGER.lock();
-        match manager.get_inner_by_shmid(shmid) {
-            Some(inner) => inner,
-            None => return -LinuxError::EINVAL.code() as isize,
-        }
-    };
-
     let credentials = proc.credentials.read();
     let euid = credentials.euid;
     let egid = credentials.egid;
     let groups = credentials.groups.clone();
     drop(credentials);
 
-    let mut inner = shm_inner.lock();
-
-    // Permission check:
-    let req_mode = if (shmflg as u32) & SHM_RDONLY != 0 { 0o400 } else { 0o600 };
-    if !pulse_core::ipc::shm::ipc_has_permission(&inner.shmid_ds.shm_perm, req_mode, euid, egid, &groups) {
-        return -LinuxError::EACCES.code() as isize;
-    }
-
-    // Allocate physical pages on first attach.
-    if let Err(e) = inner.alloc_pages() {
-        return -LinuxError::from(e).code() as isize;
-    }
-
-    let length = inner.page_num * PAGE_SIZE_4K;
-    let mut mapping_flags = inner.mapping_flags;
-    if (shmflg as u32) & SHM_RDONLY != 0 {
-        mapping_flags.remove(axhal::paging::MappingFlags::WRITE);
-    }
-
-    // Determine the virtual address to map at.
-    let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.write();
-    let mut pending_shootdown = None;
-
-    let map_addr = if shmaddr != 0 && (shmflg as u32) & SHM_RND != 0 {
-        // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
-        shmaddr & !(PAGE_SIZE_4K - 1)
-    } else if shmaddr != 0 {
-        if shmaddr & (PAGE_SIZE_4K - 1) != 0 {
+    proc.ipc.with_shared_memory(|registry| {
+        let manager = SHM_MANAGER.lock();
+        let Some(shm_inner) = manager.get_inner_by_shmid(shmid) else {
             return -LinuxError::EINVAL.code() as isize;
+        };
+        // Acquire the segment before releasing the manager so the last detach or
+        // IPC_RMID cannot reap it between lookup and attachment.
+        let mut inner = shm_inner.lock();
+        drop(manager);
+
+        // Permission check:
+        let req_mode = if (shmflg as u32) & SHM_RDONLY != 0 {
+            0o400
+        } else {
+            0o600
+        };
+        if !shm::ipc_has_permission(&inner.stat().shm_perm, req_mode, euid, egid, &groups) {
+            return -LinuxError::EACCES.code() as isize;
         }
-        shmaddr
-    } else {
-        // Let the kernel choose an address.
-        let limit = memory_addr::VirtAddrRange::from_start_size(
-            VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
-            pulse_core::config::USER_SPACE_SIZE,
-        );
-        match aspace.find_free_area(
-            VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
-            length,
-            limit,
-        ) {
-            Some(vaddr) => vaddr.as_usize(),
-            None => {
-                axlog::debug!("sys_shmat: no free area found");
-                return -LinuxError::ENOMEM.code() as isize;
+
+        // Allocate physical pages on first attach.
+        let page_addr = match inner.alloc_pages() {
+            Ok(addr) => addr,
+            Err(e) => return -LinuxError::from(e).code() as isize,
+        };
+
+        let length = inner.mapping_size();
+        let mut mapping_flags = inner.mapping_flags;
+        if (shmflg as u32) & SHM_RDONLY != 0 {
+            mapping_flags.remove(axhal::paging::MappingFlags::WRITE);
+        }
+
+        // Determine the virtual address to map at.
+        let aspace_handle = proc.aspace_handle();
+        let mut aspace = aspace_handle.write();
+        let mut pending_shootdown = None;
+
+        let map_addr = if shmaddr != 0 && (shmflg as u32) & SHM_RND != 0 {
+            // SHM_RND: round down to SHMLBA (use PAGE_SIZE_4K for now)
+            shmaddr & !(PAGE_SIZE_4K - 1)
+        } else if shmaddr != 0 {
+            if shmaddr & (PAGE_SIZE_4K - 1) != 0 {
+                return -LinuxError::EINVAL.code() as isize;
+            }
+            shmaddr
+        } else {
+            // Let the kernel choose an address.
+            let limit = memory_addr::VirtAddrRange::from_start_size(
+                VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
+                pulse_core::config::USER_SPACE_SIZE,
+            );
+            match aspace.find_free_area(
+                VirtAddr::from(pulse_core::config::USER_SPACE_BASE),
+                length,
+                limit,
+            ) {
+                Some(vaddr) => vaddr.as_usize(),
+                None => {
+                    axlog::debug!("sys_shmat: no free area found");
+                    return -LinuxError::ENOMEM.code() as isize;
+                }
+            }
+        };
+
+        if (shmflg as u32) & SHM_REMAP != 0 {
+            // Unmap existing mapping at the target address if SHM_REMAP is set.
+            let (unmap_result, shootdown) =
+                aspace.unmap(VirtAddr::from(map_addr), length).into_parts();
+            pending_shootdown = shootdown;
+            if let Err(error) = unmap_result {
+                axlog::warn!("sys_shmat: SHM_REMAP pre-unmap failed: {error:?}");
             }
         }
-    };
 
-    if (shmflg as u32) & SHM_REMAP != 0 {
-        // Unmap existing mapping at the target address if SHM_REMAP is set.
-        let (unmap_result, shootdown) = aspace.unmap(VirtAddr::from(map_addr), length).into_parts();
-        pending_shootdown = shootdown;
-        if let Err(error) = unmap_result {
-            axlog::warn!("sys_shmat: SHM_REMAP pre-unmap failed: {error:?}");
+        // Map the shared physical pages into this process's address space.
+        let paddr = virt_to_phys(page_addr);
+        let map_result = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags);
+        drop(aspace);
+        // Once map_linear succeeds the mapping owns a reference even if a prior
+        // SHM_REMAP invalidation subsequently reports a shootdown error.
+        if map_result.is_ok() {
+            inner.attach_process(pid);
+            registry.insert(VirtAddr::from(map_addr), shm_inner.clone());
         }
-    }
+        drop(inner);
+        if let Some(shootdown) = pending_shootdown
+            && let Err(error) = shootdown.complete_after_unlock()
+        {
+            axlog::error!("sys_shmat: SHM_REMAP TLB shootdown failed: {error:?}");
+            return -LinuxError::EIO.code() as isize;
+        }
+        if let Err(e) = map_result {
+            axlog::debug!("sys_shmat: map_linear failed: {:?}", e);
+            return -LinuxError::from(e).code() as isize;
+        }
 
-    // Map the shared physical pages into this process's address space.
-    let paddr = virt_to_phys(VirtAddr::from(inner.addr));
-    let map_result = aspace.map_linear(VirtAddr::from(map_addr), paddr, length, mapping_flags);
-    drop(aspace);
-    if let Some(shootdown) = pending_shootdown
-        && let Err(error) = shootdown.complete_after_unlock()
-    {
-        axlog::error!("sys_shmat: SHM_REMAP TLB shootdown failed: {error:?}");
-        return -LinuxError::EIO.code() as isize;
-    }
-    if let Err(e) = map_result {
-        axlog::debug!("sys_shmat: map_linear failed: {:?}", e);
-        return -LinuxError::from(e).code() as isize;
-    }
-
-    // Record the attachment.
-    inner.attach_process(pid);
-    drop(inner);
-    proc.ipc.shared_memory
-        .write()
-        .insert(VirtAddr::from(map_addr), shm_inner.clone());
-
-    axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
-    map_addr as isize
+        axlog::debug!("sys_shmat: mapped at {:#x}, size={}", map_addr, length);
+        map_addr as isize
+    })
 }
 
 /// shmdt: detach a shared memory segment from the calling process's address space.
@@ -195,46 +207,27 @@ pub fn sys_shmdt(shmaddr: usize) -> isize {
     };
     let pid = proc.pid();
 
-    // Find the ShmInner for this address in the process's registry.
-    let shm_inner_arc = {
-        let mut shm_registry = proc.ipc.shared_memory.write();
-        match shm_registry.remove(&VirtAddr::from(shmaddr)) {
-            Some(inner) => inner,
-            None => return -LinuxError::EINVAL.code() as isize,
+    let addr = VirtAddr::from(shmaddr);
+    proc.ipc.with_shared_memory(|registry| {
+        let Some(segment) = registry.remove(&addr) else {
+            return -LinuxError::EINVAL.code() as isize;
+        };
+        let length = segment.lock().mapping_size();
+
+        // Unmap the virtual address range.
+        let aspace_handle = proc.aspace_handle();
+        let mut aspace = aspace_handle.write();
+        let mutation = aspace.unmap(addr, length);
+        drop(aspace);
+        if let Err(e) = mutation.complete_after_unlock() {
+            axlog::warn!("sys_shmdt: unmap or TLB shootdown failed: {:?}", e);
+            registry.insert(addr, segment);
+            return -LinuxError::from(e).code() as isize;
         }
-    };
 
-    let mut inner = shm_inner_arc.lock();
-    let length = inner.page_num * PAGE_SIZE_4K;
-    let shmid = inner.shmid;
-
-    // Unmap the virtual address range.
-    let aspace_handle = proc.aspace_handle();
-    let mut aspace = aspace_handle.write();
-    let mutation = aspace.unmap(VirtAddr::from(shmaddr), length);
-    drop(aspace);
-    if let Err(e) = mutation.complete_after_unlock() {
-        axlog::warn!("sys_shmdt: unmap or TLB shootdown failed: {:?}", e);
-        drop(inner);
-        proc.ipc
-            .shared_memory
-            .write()
-            .insert(VirtAddr::from(shmaddr), shm_inner_arc);
-        return -LinuxError::from(e).code() as isize;
-    }
-
-    // Detach the process from the ShmInner.
-    inner.detach_process(pid);
-
-    // If IPC_RMID was set and no more attachers, remove from global manager.
-    // Note: The memory will be freed when the last Arc is dropped.
-    if inner.rmid && inner.attach_count() == 0 {
-        drop(inner);
-        let mut manager = SHM_MANAGER.lock();
-        manager.remove_shmid(shmid);
-    }
-
-    0
+        shm::detach(&segment, pid);
+        0
+    })
 }
 
 /// shmctl: shared memory control operations.
@@ -256,13 +249,12 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
     let groups = credentials.groups.clone();
     drop(credentials);
 
-    // 1. Handle non-shmid queries (IPC_INFO, SHM_INFO, SHM_STAT)
     match cmd {
         IPC_INFO => {
             if buf == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
-            let info = pulse_core::ipc::shm::IpcInfo::new();
+            let info = shm::IpcInfo::new();
             return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &info) {
                 Ok(()) => {
                     let manager = SHM_MANAGER.lock();
@@ -279,7 +271,7 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 let manager = SHM_MANAGER.lock();
                 manager.get_total_resources()
             };
-            let info = pulse_core::ipc::shm::ShmInfo {
+            let info = shm::ShmInfo {
                 used_ids: {
                     let manager = SHM_MANAGER.lock();
                     manager.len() as i32
@@ -310,19 +302,25 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                 }
             };
             let inner = inner_arc.lock();
-            if !pulse_core::ipc::shm::ipc_has_permission(&inner.shmid_ds.shm_perm, 0o400, euid, egid, &groups) {
+            if !shm::ipc_has_permission(&inner.stat().shm_perm, 0o400, euid, egid, &groups) {
                 return -LinuxError::EACCES.code() as isize;
             }
-            let ds = inner.shmid_ds;
+            let ds = inner.stat();
+            drop(inner);
             return match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
                 Ok(()) => actual_shmid as isize,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             };
         }
+        IPC_RMID => {
+            return match SHM_MANAGER.lock().mark_for_removal(shmid, euid) {
+                Ok(()) => 0,
+                Err(e) => -e.code() as isize,
+            };
+        }
         _ => {}
     }
 
-    // 2. Handle queries requiring exact shmid (IPC_STAT, IPC_SET, IPC_RMID, SHM_LOCK, SHM_UNLOCK)
     let inner_arc = {
         let manager = SHM_MANAGER.lock();
         match manager.get_inner_by_shmid(shmid) {
@@ -335,22 +333,24 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
 
     match cmd {
         IPC_STAT => {
-            if !pulse_core::ipc::shm::ipc_has_permission(&inner.shmid_ds.shm_perm, 0o400, euid, egid, &groups) {
+            if !shm::ipc_has_permission(&inner.stat().shm_perm, 0o400, euid, egid, &groups) {
                 return -LinuxError::EACCES.code() as isize;
             }
             if buf == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
-            let ds = inner.shmid_ds;
+            let ds = inner.stat();
+            drop(inner);
             match pulse_core::task::uaccess::write_user_value(proc.as_ref(), buf, &ds) {
                 Ok(()) => 0,
                 Err(_) => -LinuxError::EFAULT.code() as isize,
             }
         }
         IPC_SET => {
-            if euid != 0 && euid != inner.shmid_ds.shm_perm.uid && euid != inner.shmid_ds.shm_perm.cuid {
+            if !inner.stat().shm_perm.is_owner(euid) {
                 return -LinuxError::EPERM.code() as isize;
             }
+            drop(inner);
             if buf == 0 {
                 return -LinuxError::EFAULT.code() as isize;
             }
@@ -359,36 +359,29 @@ pub fn sys_shmctl(shmid: i32, cmd: i32, buf: usize) -> isize {
                     Ok(v) => v,
                     Err(_) => return -LinuxError::EFAULT.code() as isize,
                 };
-            // Only uid, gid, and mode can be changed.
-            inner.shmid_ds.shm_perm.uid = new_ds.shm_perm.uid;
-            inner.shmid_ds.shm_perm.gid = new_ds.shm_perm.gid;
-            inner.shmid_ds.shm_perm.mode = new_ds.shm_perm.mode;
-            0
-        }
-        IPC_RMID => {
-            if euid != 0 && euid != inner.shmid_ds.shm_perm.uid && euid != inner.shmid_ds.shm_perm.cuid {
+            // Ownership can change while the user copy faults.
+            let mut inner = inner_arc.lock();
+            let perm = inner.permissions_mut();
+            if !perm.is_owner(euid) {
                 return -LinuxError::EPERM.code() as isize;
             }
-            inner.rmid = true;
-            if inner.attach_count() == 0 {
-                drop(inner);
-                let mut manager = SHM_MANAGER.lock();
-                manager.remove_shmid(shmid);
-            }
+            perm.uid = new_ds.shm_perm.uid;
+            perm.gid = new_ds.shm_perm.gid;
+            perm.mode = new_ds.shm_perm.mode;
             0
         }
-        pulse_core::ipc::shm::SHM_LOCK => {
+        shm::SHM_LOCK => {
             if euid != 0 {
                 return -LinuxError::EPERM.code() as isize;
             }
-            inner.shmid_ds.shm_perm.mode |= pulse_core::ipc::shm::SHM_LOCKED;
+            inner.permissions_mut().mode |= shm::SHM_LOCKED;
             0
         }
-        pulse_core::ipc::shm::SHM_UNLOCK => {
+        shm::SHM_UNLOCK => {
             if euid != 0 {
                 return -LinuxError::EPERM.code() as isize;
             }
-            inner.shmid_ds.shm_perm.mode &= !pulse_core::ipc::shm::SHM_LOCKED;
+            inner.permissions_mut().mode &= !shm::SHM_LOCKED;
             0
         }
         _ => -LinuxError::EINVAL.code() as isize,

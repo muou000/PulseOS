@@ -1,0 +1,18 @@
+--- a/modules/axmm/src/aspace.rs
++++ b/modules/axmm/src/aspace.rs
+@@ -1188,5 +1188,15 @@
+     /// Returns an error if the address range is out of the address space or not
+     /// aligned.
+     pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AddrSpaceMutation<()> {
++        // Validation fixture for tests/sysv_ipc/lifecycle.c --reservation.
++        static FIRST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
++        if start.as_usize() == 0x2800_0000 && size == PAGE_SIZE_4K
++            && FIRST.swap(false, core::sync::atomic::Ordering::Relaxed)
++        {
++            let reservation = self.reserve_unmap(start, size, MappingWait::new()).unwrap();
++            let result = self.unmap_prepared(start, size, AddrSpaceUnmapPreparation::default());
++            self.finish_mapping(reservation, true);
++            return result;
++        }
+         self.unmap_prepared(start, size, AddrSpaceUnmapPreparation::default())
+     }

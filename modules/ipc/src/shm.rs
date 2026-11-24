@@ -1,24 +1,17 @@
 //! System V shared memory implementation.
 
-extern crate alloc;
-
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use axalloc::global_allocator;
-use axerrno::{AxError, AxResult, ax_err};
+use axalloc::GlobalPage;
+use axerrno::{AxError, AxResult, LinuxError, ax_err};
 use axhal::paging::MappingFlags;
-use memory_addr::PAGE_SIZE_4K;
+use memory_addr::{PAGE_SIZE_4K, VirtAddr};
 use spin::{Lazy, Mutex};
 
-// IPC constants (from linux-raw-sys / Linux ABI)
-pub const IPC_PRIVATE: i32 = 0;
-pub const IPC_SET: i32 = 1;
-pub const IPC_STAT: i32 = 2;
-pub const IPC_RMID: i32 = 0;
+use crate::{IPC_EXCL, IPC_PRIVATE, IpcPerm};
+
 pub const IPC_INFO: i32 = 3;
-pub const IPC_CREAT: i32 = 0o1000;
-pub const IPC_EXCL: i32 = 0o2000;
 pub const SHM_INFO: i32 = 14;
 pub const SHM_STAT: i32 = 13;
 pub const SHM_RDONLY: u32 = 0o10000;
@@ -85,7 +78,6 @@ pulse_user_abi::impl_user_abi_struct! {
     }
 }
 
-
 /// Linux-compatible `shmid_ds` structure (C ABI).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -123,67 +115,18 @@ pulse_user_abi::impl_user_abi_struct! {
     }
 }
 
-/// Linux-compatible `ipc_perm` structure (C ABI).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct IpcPerm {
-    /// key supplied to shmget
-    pub key: i32,
-    /// effective UID of owner
-    pub uid: u32,
-    /// effective GID of owner
-    pub gid: u32,
-    /// effective UID of creator
-    pub cuid: u32,
-    /// effective GID of creator
-    pub cgid: u32,
-    /// permissions + SHM_DEST and SHM_LOCKED flags
-    pub mode: u16,
-    _pad: [u8; 2],
-    _seq: u16,
-    _pad2: u16,
-    _pad3: u32,
-    _pad4: u32,
-}
-
-pulse_user_abi::impl_user_abi_struct! {
-    for IpcPerm, size = 36 => {
-        key: i32,
-        uid: u32,
-        gid: u32,
-        cuid: u32,
-        cgid: u32,
-        mode: u16,
-        _pad: [u8; 2],
-        _seq: u16,
-        _pad2: u16,
-        _pad3: u32,
-        _pad4: u32,
-    }
-}
-
-impl IpcPerm {
-    pub fn new(key: i32, mode: u16, uid: u32, gid: u32) -> Self {
-        Self {
-            key,
-            uid,
-            gid,
-            cuid: uid,
-            cgid: gid,
-            mode,
-            _pad: [0; 2],
-            _seq: 0,
-            _pad2: 0,
-            _pad3: 0,
-            _pad4: 0,
-        }
-    }
-}
-
 impl ShmidDs {
     pub fn new(key: i32, size: usize, mode: u16, uid: u32, gid: u32, pid: i32) -> Self {
         Self {
-            shm_perm: IpcPerm::new(key, mode, uid, gid),
+            shm_perm: IpcPerm {
+                key,
+                uid,
+                gid,
+                cuid: uid,
+                cgid: gid,
+                mode,
+                ..Default::default()
+            },
             shm_segsz: size,
             shm_atime: 0,
             shm_dtime: 0,
@@ -199,25 +142,33 @@ impl ShmidDs {
 /// Internal state for a single shared memory segment.
 pub struct ShmInner {
     /// Shared memory segment identifier.
-    pub shmid: i32,
+    shmid: i32,
     /// Number of pages in the segment.
-    pub page_num: usize,
-    /// Virtual kernel address of the shared memory segment.
-    pub addr: usize,
+    page_num: usize,
+    /// Backing pages allocated on first attach and kept alive by the segment.
+    pages: Option<GlobalPage>,
     /// Whether to remove on last detach (set by IPC_RMID).
-    pub rmid: bool,
+    rmid: bool,
     /// Mapping flags for this segment.
     pub mapping_flags: MappingFlags,
     /// C-compatible metadata.
-    pub shmid_ds: ShmidDs,
+    shmid_ds: ShmidDs,
 }
 
 impl ShmInner {
-    pub fn new(key: i32, shmid: i32, size: usize, mapping_flags: MappingFlags, uid: u32, gid: u32, pid: i32) -> Self {
+    fn new(
+        key: i32,
+        shmid: i32,
+        size: usize,
+        mapping_flags: MappingFlags,
+        uid: u32,
+        gid: u32,
+        pid: i32,
+    ) -> Self {
         Self {
             shmid,
             page_num: align_up_4k(size) / PAGE_SIZE_4K,
-            addr: 0,
+            pages: None,
             rmid: false,
             mapping_flags,
             shmid_ds: ShmidDs::new(key, size, mapping_flags.bits() as u16, uid, gid, pid),
@@ -238,7 +189,11 @@ pub fn ipc_has_permission(
     }
     let granted_mode = if euid == perm.uid || euid == perm.cuid {
         perm.mode as u32
-    } else if egid == perm.gid || egid == perm.cgid || groups.contains(&perm.gid) || groups.contains(&perm.cgid) {
+    } else if egid == perm.gid
+        || egid == perm.cgid
+        || groups.contains(&perm.gid)
+        || groups.contains(&perm.cgid)
+    {
         (perm.mode as u32) << 3
     } else {
         (perm.mode as u32) << 6
@@ -247,29 +202,31 @@ pub fn ipc_has_permission(
 }
 
 impl ShmInner {
-    /// Allocate physical pages for this segment (first attach).
-    pub fn alloc_pages(&mut self) -> AxResult<()> {
-        if self.addr != 0 {
-            return Ok(());
+    /// Allocate zeroed backing pages on first attach and return their kernel address.
+    pub fn alloc_pages(&mut self) -> AxResult<VirtAddr> {
+        if let Some(pages) = &self.pages {
+            return Ok(pages.start_vaddr());
         }
-        let vaddr = global_allocator()
-            .alloc_pages(self.page_num, PAGE_SIZE_4K)
+        let mut pages = GlobalPage::alloc_contiguous(self.page_num, PAGE_SIZE_4K)
             .map_err(|_| AxError::NoMemory)?;
-        // Zero the pages
-        unsafe {
-            core::ptr::write_bytes(vaddr as *mut u8, 0, self.page_num * PAGE_SIZE_4K);
-        }
-        self.addr = vaddr;
-        Ok(())
+        pages.zero();
+        Ok(self.pages.insert(pages).start_vaddr())
+    }
+
+    pub fn mapping_size(&self) -> usize {
+        self.page_num * PAGE_SIZE_4K
+    }
+
+    pub fn stat(&self) -> ShmidDs {
+        self.shmid_ds
+    }
+
+    pub fn permissions_mut(&mut self) -> &mut IpcPerm {
+        &mut self.shmid_ds.shm_perm
     }
 
     /// Try to update the segment if a matching key exists.
-    pub fn try_update(
-        &mut self,
-        size: usize,
-        mapping_flags: MappingFlags,
-        pid: i32,
-    ) -> AxResult<i32> {
+    fn try_update(&mut self, size: usize, mapping_flags: MappingFlags, pid: i32) -> AxResult<i32> {
         if align_up_4k(size) / PAGE_SIZE_4K != self.page_num {
             return ax_err!(InvalidInput, "shm: size mismatch for existing key");
         }
@@ -285,36 +242,7 @@ impl ShmInner {
         self.shmid_ds.shm_nattch += 1;
         self.shmid_ds.shm_lpid = pid as i32;
     }
-
-    /// Detach a process from this segment.
-    pub fn detach_process(&mut self, pid: u64) {
-        self.shmid_ds.shm_nattch = self.shmid_ds.shm_nattch.saturating_sub(1);
-        self.shmid_ds.shm_lpid = pid as i32;
-    }
-
-    /// Current attach count.
-    pub fn attach_count(&self) -> u16 {
-        self.shmid_ds.shm_nattch
-    }
 }
-
-impl Drop for ShmInner {
-    fn drop(&mut self) {
-        if self.addr != 0 {
-            global_allocator().dealloc_pages(self.addr, self.page_num);
-            axlog::debug!(
-                "[SharedMemory] dealloc pages: addr: {:#x}, page_count: {}, shmid: {}",
-                self.addr,
-                self.page_num,
-                self.shmid
-            );
-        }
-    }
-}
-
-// ShmInner is not Send+Sync because of kernel virtual address, but we wrap it in Arc<Mutex<>>
-unsafe impl Send for ShmInner {}
-unsafe impl Sync for ShmInner {}
 
 /// Bi-directional BTreeMap for key <-> shmid mapping.
 struct BiBTreeMap<K: Ord, V: Ord> {
@@ -380,19 +308,33 @@ impl ShmManager {
     }
 
     /// Insert key -> shmid mapping.
-    pub fn insert_key_shmid(&mut self, key: i32, shmid: i32) {
+    fn insert_key_shmid(&mut self, key: i32, shmid: i32) {
         self.key_shmid.insert(key, shmid);
     }
 
     /// Insert shmid -> ShmInner mapping.
-    pub fn insert_shmid_inner(&mut self, shmid: i32, shm_inner: Arc<Mutex<ShmInner>>) {
+    fn insert_shmid_inner(&mut self, shmid: i32, shm_inner: Arc<Mutex<ShmInner>>) {
         self.shmid_inner.insert(shmid, shm_inner);
     }
 
-    /// Remove a shmid from the manager.
-    pub fn remove_shmid(&mut self, shmid: i32) {
-        self.key_shmid.remove_by_value(&shmid);
-        self.shmid_inner.remove(&shmid);
+    /// Mark a segment for removal. Its identifier remains usable while attached.
+    pub fn mark_for_removal(&mut self, shmid: i32, euid: u32) -> Result<(), LinuxError> {
+        let segment = self.get_inner_by_shmid(shmid).ok_or(LinuxError::EINVAL)?;
+        let mut inner = segment.lock();
+        let perm = &inner.shmid_ds.shm_perm;
+        if !perm.is_owner(euid) {
+            return Err(LinuxError::EPERM);
+        }
+        inner.rmid = true;
+        self.reap_if_unattached(&inner);
+        Ok(())
+    }
+
+    fn reap_if_unattached(&mut self, inner: &ShmInner) {
+        if inner.rmid && inner.shmid_ds.shm_nattch == 0 {
+            self.key_shmid.remove_by_value(&inner.shmid);
+            self.shmid_inner.remove(&inner.shmid);
+        }
     }
 
     /// Get the highest index of the shared memory segments.
@@ -402,7 +344,10 @@ impl ShmManager {
 
     /// Get the shared memory inner state by index.
     pub fn get_inner_by_index(&self, index: usize) -> Option<(i32, Arc<Mutex<ShmInner>>)> {
-        self.shmid_inner.iter().nth(index).map(|(&shmid, inner)| (shmid, inner.clone()))
+        self.shmid_inner
+            .iter()
+            .nth(index)
+            .map(|(&shmid, inner)| (shmid, inner.clone()))
     }
 
     /// Get total resources (total bytes, total allocated resident pages).
@@ -412,7 +357,7 @@ impl ShmManager {
         for inner in self.shmid_inner.values() {
             let guard = inner.lock();
             tot += guard.shmid_ds.shm_segsz;
-            if guard.addr != 0 {
+            if guard.pages.is_some() {
                 rss += guard.page_num;
             }
         }
@@ -457,7 +402,8 @@ impl ShmManager {
                 let mut inner_guard = inner.lock();
 
                 let req_mode = (shmflg & 0o777) as u32;
-                if !ipc_has_permission(&inner_guard.shmid_ds.shm_perm, req_mode, euid, egid, groups) {
+                if !ipc_has_permission(&inner_guard.shmid_ds.shm_perm, req_mode, euid, egid, groups)
+                {
                     return ax_err!(PermissionDenied, "shmget: permission denied");
                 }
 
@@ -466,15 +412,7 @@ impl ShmManager {
         }
 
         let shmid = self.next_id();
-        let inner = ShmInner::new(
-            key,
-            shmid,
-            size,
-            mapping_flags,
-            euid,
-            egid,
-            pid,
-        );
+        let inner = ShmInner::new(key, shmid, size, mapping_flags, euid, egid, pid);
         let inner = Arc::new(Mutex::new(inner));
         self.insert_key_shmid(key, shmid);
         self.insert_shmid_inner(shmid, inner);
@@ -484,6 +422,16 @@ impl ShmManager {
 
 /// Global shared memory manager instance.
 pub static SHM_MANAGER: Lazy<Mutex<ShmManager>> = Lazy::new(|| Mutex::new(ShmManager::new()));
+
+/// Release one attachment and reap a marked segment at its last detach.
+/// The manager precedes the segment lock, as in lookup for a new attachment.
+pub fn detach(segment: &Mutex<ShmInner>, pid: u64) {
+    let mut manager = SHM_MANAGER.lock();
+    let mut inner = segment.lock();
+    inner.shmid_ds.shm_nattch = inner.shmid_ds.shm_nattch.saturating_sub(1);
+    inner.shmid_ds.shm_lpid = pid as i32;
+    manager.reap_if_unattached(&inner);
+}
 
 fn align_up_4k(size: usize) -> usize {
     (size + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1)

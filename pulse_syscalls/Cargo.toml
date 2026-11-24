@@ -26,6 +26,7 @@ pulse_user_abi.workspace = true
 spin.workspace = true
 
 [target.'cfg(target_os = "none")'.dependencies]
+ipc.workspace = true
 axcpu.workspace = true
 axalloc.workspace = true
 axmm.workspace = true

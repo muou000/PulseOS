@@ -402,7 +402,7 @@ impl Process {
 
         self.detach_all_shared_memory();
 
-        self.ipc.sem_undos.lock().clear();
+        self.ipc.sem_undos.clear();
 
         let cloexec_entries = {
             let binding = self.fd_table();
