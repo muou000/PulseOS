@@ -42,6 +42,8 @@ pub use signal::{
 };
 use spin::Lazy;
 pub use thread::{SignalMaskGuard, Thread, ThreadHandle};
+#[cfg(feature = "guest-checks")]
+pub(crate) use thread::user_dispatches;
 
 static PROCESS_REGISTRY: Lazy<ShardedProcessRegistry<Arc<Process>>> =
     Lazy::new(ShardedProcessRegistry::new);

@@ -77,12 +77,24 @@ pub(crate) fn sys_io_uring_enter(
     argp: usize,
     argsz: usize,
 ) -> isize {
+    // Resolve the FD once in the observation build, even if argument validation
+    // rejects the call. Keep the ABI's original error precedence in both builds.
+    #[cfg(feature = "guest-checks")]
+    let ring = {
+        let ring = get_io_uring_object(fd);
+        if let Ok(handle) = &ring {
+            handle.state().observe_enter_call();
+        }
+        ring
+    };
     let arg_kind = match validate_enter_args(flags, argp, argsz) {
         Ok(k) => k,
         Err(e) => return -e.code() as isize,
     };
 
-    let ring = match get_io_uring_object(fd) {
+    #[cfg(not(feature = "guest-checks"))]
+    let ring = get_io_uring_object(fd);
+    let ring = match ring {
         Ok(r) => r,
         Err(e) => return -e.code() as isize,
     };

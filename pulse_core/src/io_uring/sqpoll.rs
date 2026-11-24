@@ -1,6 +1,8 @@
 //! Per-ring SQ consumer, shared-memory sleep handshake and SQ space waiters.
 
 use alloc::sync::{Arc, Weak};
+#[cfg(feature = "guest-checks")]
+use core::sync::atomic::AtomicU64;
 use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::Duration,
@@ -53,6 +55,8 @@ impl SqPollTarget {
 pub(super) struct SqPoll {
     owner_pid: u64,
     target: SqPollTarget,
+    #[cfg(feature = "guest-checks")]
+    enter_calls: AtomicU64,
     stopping: AtomicBool,
     // Wait predicates must see the consumer's head without acquiring its sleeping submit lock.
     consumed_head: AtomicU32,
@@ -72,6 +76,8 @@ impl SqPoll {
         Ok(Self {
             owner_pid,
             target: SqPollTarget::from_params(params)?,
+            #[cfg(feature = "guest-checks")]
+            enter_calls: AtomicU64::new(0),
             stopping: AtomicBool::new(false),
             consumed_head: AtomicU32::new(0),
             kicks: AtomicU32::new(0),
@@ -83,6 +89,36 @@ impl SqPoll {
 }
 
 impl IoUringState {
+    /// Counts every enter syscall resolving this ring, including argument errors.
+    #[cfg(feature = "guest-checks")]
+    pub fn observe_enter_call(&self) {
+        if let Some(poll) = &self.sqpoll {
+            poll.enter_calls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "guest-checks")]
+    pub(super) fn report_user_dispatches(&self, phase: &str) {
+        let Some(poll) = self.sqpoll.as_ref() else {
+            return;
+        };
+        if !matches!(poll.target, SqPollTarget::ReservedService(_)) {
+            return;
+        }
+        for cpu in (0..axhal::cpu_num()).filter(|&cpu| axhal::is_cpu_online(cpu)) {
+            axlog::info!(
+                "SQPOLL observe ring={} phase={phase} cpu={cpu} user_dispatch={}",
+                self.ring_id,
+                crate::task::user_dispatches(cpu)
+            );
+        }
+        axlog::info!(
+            "SQPOLL {phase} ring={} enter_calls={}",
+            self.ring_id,
+            poll.enter_calls.load(Ordering::Relaxed)
+        );
+    }
+
     /// Reserved CPU explicitly selected by this ring for SQPOLL service.
     pub fn sqpoll_service_cpu(&self) -> Option<usize> {
         self.service_executor().map(CpuExecutor::cpu)
