@@ -1,0 +1,28 @@
+# Debian forky 2026-06-10. Digests from the matching binary-{riscv64,loong64}/Packages.xz.
+# PulseOS architecture	SHA256	Debian snapshot URL
+riscv64	bbb5a5ec919d10f56a1fbd50f47c5835f4275c963f49cd303abe6a8131697810	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gcc-16/gcc-16-base_16.1.0-1_riscv64.deb
+riscv64	55054966e2767b0a07f0f391a1a48a7b735e49205c3916e0f2c75f8556859693	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/b/bzip2/libbz2-1.0_1.0.8-6+b2_riscv64.deb
+riscv64	a1521e89d6b42bae9ef69a063fe99842e335fc12861b4e32cf8161c2b25b6aa5	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/glibc/libc6_2.42-16_riscv64.deb
+riscv64	1f7e91b1686ffa9c51ae54e43d2ed6cbb27e80aa84bb7b416a4135697dad3f9a	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gcc-16/libgcc-s1_16.1.0-1_riscv64.deb
+riscv64	1a75d2d99466d5ac288881134830e9dbc7679290c9119cec703a05f06e52d09c	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gflags/libgflags2.2_2.2.2-3_riscv64.deb
+riscv64	8c0f566dd1a285552d612db022ef7c582a4cb842756afa2ea3f6b8688bb9650b	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/l/lz4/liblz4-1_1.10.0-10_riscv64.deb
+riscv64	59924f69bef16dd972afeeb3019cf66c540941eb7b01f6dbbda6b34578ba2a2f	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/r/rocksdb/librocksdb9.11_9.11.2-1_riscv64.deb
+riscv64	48ef004787d4f304fd692f27dfe1e2bc5c04adab01b3b18d7c0623f2c43165e4	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/s/snappy/libsnappy1v5_1.2.2-2+b2_riscv64.deb
+riscv64	7c4e1c6bed61d75cb6623a852fdd270c5f429e69b712a4d0bf3af92259338022	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gcc-16/libstdc++6_16.1.0-1_riscv64.deb
+riscv64	d1d0d7b3a2a26cab367803d543d8ecdb46b8e7d246b5723c7c08b41db3e4967a	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/x/xxhash/libxxhash0_0.8.3-2+b2_riscv64.deb
+riscv64	6d860c21d804b1fdc016077fa20539538a066f4bcd3cb0e29dc9778bba7b0606	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-3+b2_riscv64.deb
+riscv64	e5d178557e0bb1f83e6460b91e90aa6cd991f507b1e4304a5fe50bd98b698650	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/r/rocksdb/rocksdb-tools_9.11.2-1_riscv64.deb
+riscv64	424608ef83a7d7fc4b8b7b2ee4325c325ee48f1bf3232249da77f52910a33357	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.2-3_riscv64.deb
+loongarch64	c9f88f895c0ce62e0d70bca6c5c118a5f37e7873a17cd1db96042afefe288163	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gcc-16/gcc-16-base_16.1.0-1_loong64.deb
+loongarch64	2ee74162f81529128c51b994538c02656bfaf94b85fb74a8532bc72186dcdce8	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/b/bzip2/libbz2-1.0_1.0.8-6+b2_loong64.deb
+loongarch64	c3231d63d5a4a0b2eb860d29837f2318081256f00f90b782744fdbc6d76fce6e	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/glibc/libc6_2.42-16_loong64.deb
+loongarch64	552b716c53f01f358b789ffdb34d79df38982e6d4a4b2f6640613a3e49b70806	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gcc-16/libgcc-s1_16.1.0-1_loong64.deb
+loongarch64	490669f3391993308033a8cdfdea1c5a6a8efda43011e633dd6b245acf6d088a	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gflags/libgflags2.2_2.2.2-3+b1_loong64.deb
+loongarch64	4b8a01049a84a3a9ab2ccbe5db5b6184b9e7804be0175a8559f80085ee80e1eb	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/l/lz4/liblz4-1_1.10.0-10_loong64.deb
+loongarch64	0f10a383a1499d6808ffea2156a96e76f09e0a7d3bc05670ce2261efcc71cbee	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/r/rocksdb/librocksdb9.11_9.11.2-1+b1_loong64.deb
+loongarch64	ae63c4a6a71ef988b7440c938c44aee672109f8f42e1ef1ba1a2ec666a9b8b06	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/s/snappy/libsnappy1v5_1.2.2-2+b2_loong64.deb
+loongarch64	eb639f0cd0638fcd5d99a55276488a81a4fed220ff6c02a1db317052d12aea25	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/g/gcc-16/libstdc++6_16.1.0-1_loong64.deb
+loongarch64	7a2247b5e49aa0284c0d078ba9aa277a82952cb2d4e615bb9d69102dde79f727	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/x/xxhash/libxxhash0_0.8.3-2+b2_loong64.deb
+loongarch64	7c1dff8e4f21bb67567a8fd2e9972c5550b5b31f7f46a47b939e8f274c7d5356	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-3+b2_loong64.deb
+loongarch64	0ffd58b82b5ba70e4ce4be3a890334b9e84e7ee3c8545595bf8d6aa9d92d1b77	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/r/rocksdb/rocksdb-tools_9.11.2-1+b1_loong64.deb
+loongarch64	314ca38a5e138c4efe93c63a88a758f8f432dc0b440537ffe0e4eb1b071be411	https://snapshot.debian.org/archive/debian/20260610T000000Z/pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.2-3_loong64.deb

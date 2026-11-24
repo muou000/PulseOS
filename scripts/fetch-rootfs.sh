@@ -25,8 +25,8 @@ Usage:
   scripts/fetch-rootfs.sh [--tests|--base] [--arch all|riscv64|loongarch64]
 
 Options:
-  --tests          Fetch Ubuntu/Loongnix rootfs tarballs bundled with lmbench,
-                   ltp, sysbench, unixbench, fio, and liburing-tests (default).
+  --tests          Fetch the test rootfs, bundled benchmark suites and
+                   RocksDB tools (default).
   --base           Fetch minimal base rootfs tarballs without bundled tests.
   --arch ARCH      Target architecture to fetch: all (default), riscv64, loongarch64.
   -h, --help       Show this help message.
@@ -113,11 +113,13 @@ if [[ "${VARIANT}" == "tests" ]]; then
         else
             fetch_one "${rv_tests_asset}" "${rv_tests_cache}" "${rv_tests_sha}" "${TESTS_URL}"
         fi
+        "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch riscv64
     fi
     if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "loongarch64" ]]; then
         fetch_one "rootfs-tests-loongarch64.tar.xz" "rootfs-tests-loongarch64.tar.xz" \
             "e530f99e806cea640df12c482b63128af3131c304cdfd0d5053e661e2efbac1e" \
             "${TESTS_URL}"
+        "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch loongarch64
     fi
 else
     if [[ "${ARCH_FILTER}" != loongarch64 && "${RISCV_PLATFORM}" == visionfive2 ]]; then

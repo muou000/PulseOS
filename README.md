@@ -167,6 +167,22 @@ QEMU virt 的默认启动参数为 `-cpu max`。内核确认所有可调度 hart
 
 RISC-V QEMU 测试镜像使用 Ubuntu 官方的 `ubuntu-base-26.10-base-riscv64.tar.gz`。lmbench、LTP、sysbench、UnixBench、fio 和 liburing 测试程序取自 PulseOS 发布的 `rootfs-tests-riscv64.tar.xz`。VisionFive 2 直接使用这份完整的测试包。两份归档均可缓存在 `rootfs/base/`，分别用 `./scripts/fetch-rootfs.sh --arch riscv64` 和 `RISCV_PLATFORM=visionfive2 ./scripts/fetch-rootfs.sh --arch riscv64` 下载并校验。[Ubuntu Base 26.10](https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release/) · [PulseOS 测试制品及校验和](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261120)
 
+### 在来宾里测试 RocksDB
+
+上表的测试镜像均预装 RocksDB 9.11.2。`db_bench` 可测数据库读写和压实，`cache_bench` 可单独测块缓存，`ldb` 可检查键值，`sst_dump` 可校验 SST 文件。四条命令均在 `/usr/bin`，对应的 ELF 和运行库位于 `/opt/rocksdb/{bin,lib}`。制盘主机需要 `dpkg-deb`（Debian/Ubuntu 的 `dpkg` 包）。`make img` 会按架构下载并校验固定版本的包，也可以先用 `./scripts/fetch-rootfs.sh --tests` 准备缓存，再离线运行 `./scripts/build_img.sh all`。[包版本及 SHA256](scripts/rocksdb-packages.tsv)
+
+这组命令在根文件系统的 ext4 上创建独立数据库，顺序写入并刷出 SST，再由另一个进程重新打开，报告随机读的命中数、吞吐和延迟分布。来宾的 `/tmp` 是 tmpfs，数据库路径会影响测到的 I/O。
+
+```sh
+db=$(mktemp -d /root/rocksdb.XXXXXX)
+db_bench --db="$db" --benchmarks=fillseq,flush --num=10000 --value_size=256 --compression_type=none
+db_bench --db="$db" --use_existing_db=1 --benchmarks=readrandom --num=10000 --reads=10000 --histogram=1 --compression_type=none
+ldb --db="$db" --hex scan --max_keys=1
+sst_dump --file="$db" --command=verify
+```
+
+比较优化前后的结果时，固定键数、值大小、线程数和压缩方式。`--benchmarks=readwhilewriting` 可用于并发读写，`--benchmarks=compact` 可单独触发手动压实。[RocksDB 基准工具说明](https://github.com/facebook/rocksdb/wiki/Benchmarking-tools)
+
 ### 运行测试 (QEMU)
 
 在新检出的仓库根目录运行 `make test` 后，给两种架构的启动文件各建一个链接。下面的 QEMU 命令和来宾测试脚本使用这两个名字。执行 `make clean` 后需重新建立链接。

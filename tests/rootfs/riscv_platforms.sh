@@ -8,7 +8,7 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "${scratch}"' EXIT
 cd "${scratch}"
 mkdir -p scripts rootfs/base qemu/etc vf2/etc fixture-bin
-cp "${repo}"/scripts/{build_img,fetch-rootfs,rootfs-riscv64}.sh scripts/
+cp "${repo}"/scripts/{build_img,fetch-rootfs,rootfs-riscv64,rootfs-rocksdb}.sh scripts/
 export ROOTFS_VARIANT=tests IMG_SIZE=8M RISCV_PLATFORM=qemu-virt
 echo 'Ubuntu 26.10' > qemu/etc/issue
 echo 'Ubuntu 24.04.5' > vf2/etc/issue
@@ -21,6 +21,30 @@ mkdir -p vf2/usr/{bin,local/bin,local/share/sysbench}
 touch vf2/usr/bin/{lat_syscall,bw_pipe,lat_pipe,sysbench,fio} vf2/usr/local/bin/sysbench
 echo suite > vf2/opt/io_uring/liburing-tests/MANIFEST.txt
 tar -cJf tests-20261120.tar.xz -C vf2 .
+
+# Supply a tiny RV64GC Debian package through the real downloader and installer.
+tools=(db_bench cache_bench ldb sst_dump)
+libdir=deb/usr/lib/riscv64-linux-gnu
+loader=ld-linux-riscv64-lp64d.so.1
+mkdir -p deb/{DEBIAN,usr/bin,usr/share/doc/fixture} "${libdir}"
+cat > deb/DEBIAN/control <<'CONTROL'
+Package: fixture
+Version: 1
+Architecture: riscv64
+Maintainer: PulseOS
+Description: RocksDB packaging fixture
+CONTROL
+echo 'fixture license' > deb/usr/share/doc/fixture/copyright
+echo '.global _start; _start: ret' | riscv64-linux-gnu-as -march=rv64gc -mabi=lp64d -o tool.o
+riscv64-linux-gnu-ld -o tool tool.o
+for name in "${tools[@]}"; do
+    cp tool "deb/usr/bin/${name}"
+done
+riscv64-linux-gnu-ld -shared -o "${libdir}/libfixture.so.1" tool.o
+cp "${libdir}/libfixture.so.1" "${libdir}/${loader}"
+dpkg-deb --build deb rocksdb.deb
+printf 'riscv64\t%s\thttps://fixture.invalid/rocksdb.deb\n' \
+    "$(sha256sum rocksdb.deb | cut -d' ' -f1)" > scripts/rocksdb-packages.tsv
 
 # Substitute only the two release digests for the fixture archives.
 base_sha="$(sha256sum "${base}" | cut -d' ' -f1)"
@@ -36,13 +60,17 @@ if scripts/build_img.sh riscv64 > build.log 2>&1; then
 fi
 grep -F 'Missing tests rootfs input' build.log
 
-# Serve only the newer release asset requested by the fetcher.
+# Serve the pinned rootfs and RocksDB fixtures.
 cat > fixture-bin/curl <<'CURL'
 #!/usr/bin/env bash
 set -eu
 while [[ $# -gt 0 && "$1" != -o ]]; do shift; done
-[[ "$3" == https://github.com/muou000/PulseOS/releases/download/rootfs-tests-20261120/rootfs-tests-riscv64.tar.xz ]]
-cp tests-20261120.tar.xz "$2"
+case "$3" in
+    https://github.com/muou000/PulseOS/releases/download/rootfs-tests-20261120/rootfs-tests-riscv64.tar.xz)
+        cp tests-20261120.tar.xz "$2" ;;
+    https://fixture.invalid/rocksdb.deb) cp rocksdb.deb "$2" ;;
+    *) exit 1 ;;
+esac
 CURL
 chmod +x fixture-bin/curl
 export PATH="${PWD}/fixture-bin:${PATH}"
@@ -55,6 +83,16 @@ printf '#!/bin/sh\nexit 1\n' > fixture-bin/curl
 RISCV_PLATFORM=visionfive2 scripts/build_img.sh --fetch riscv64
 for image in rootfs-riscv64.img rootfs-visionfive2.img; do
     debugfs -R 'cat /opt/io_uring/liburing-tests/MANIFEST.txt' "${image}" 2>/dev/null | grep -Fx suite
+    for name in "${tools[@]}"; do
+        debugfs -R "stat /usr/bin/${name}" "${image}" 2>/dev/null | grep -F 'Mode:  0755'
+        debugfs -R "cat /usr/bin/${name}" "${image}" 2>/dev/null | \
+            grep -Fx "exec /opt/rocksdb/lib/${loader} --library-path /opt/rocksdb/lib /opt/rocksdb/bin/${name} \"\$@\""
+        debugfs -R "cat /opt/rocksdb/bin/${name}" "${image}" 2>/dev/null | cmp - tool
+    done
+    for name in "${loader}" libfixture.so.1; do
+        debugfs -R "cat /opt/rocksdb/lib/${name}" "${image}" 2>/dev/null | cmp - "${libdir}/${name}"
+    done
+    debugfs -R 'cat /opt/rocksdb/licenses/fixture' "${image}" 2>/dev/null | grep -Fx 'fixture license'
 done
 debugfs -R 'cat /etc/issue' rootfs-riscv64.img 2>/dev/null | grep -Fx 'Ubuntu 26.10'
 debugfs -R 'cat /etc/issue' rootfs-visionfive2.img 2>/dev/null | grep -Fx 'Ubuntu 24.04.5'
@@ -62,6 +100,26 @@ debugfs -R 'cat /etc/issue' rootfs-visionfive2.img 2>/dev/null | grep -Fx 'Ubunt
 # A legacy-named cache with the right digest can be reused without fetching.
 mv rootfs/base/rootfs-tests-20261120-riscv64.tar.xz "${old}"
 scripts/build_img.sh --fetch riscv64
+
+# Builds without --fetch reject both corrupt and missing cached packages.
+cache=rootfs/base/rocksdb/riscv64/rocksdb.deb
+for fault in corrupt missing; do
+    if [[ "${fault}" == corrupt ]]; then
+        echo 'truncated' > "${cache}"
+    else
+        rm "${cache}"
+    fi
+    if scripts/build_img.sh riscv64 > build.log 2>&1; then
+        echo "Image builder accepted a ${fault} RocksDB package" >&2
+        exit 1
+    fi
+    grep -F 'Missing or corrupt rocksdb.deb' build.log
+done
+
+# Base skips even a cached test archive; auto falls back when that archive is absent.
+ROOTFS_VARIANT=base scripts/build_img.sh --fetch riscv64
+mv "${old}" saved-tests.tar.xz
+ROOTFS_VARIANT=auto scripts/build_img.sh --fetch riscv64
 
 # Verify ELF ISA rejection independently of the archive digest checks.
 cp "${base}" rootfs/base/alpine-minirootfs-riscv64.tar.gz

@@ -27,8 +27,8 @@ usage() {
 Usage:
   scripts/build_img.sh [--fetch] [all|riscv64|loongarch64]   (default: \${ARCH:-riscv64})
 
-Base tarballs are expected under rootfs/base; run scripts/fetch-rootfs.sh
-if they are missing, or pass --fetch to download missing inputs.
+Run scripts/fetch-rootfs.sh to cache the rootfs archives and test tools
+before building offline, or pass --fetch to download missing inputs.
 
 Env:
   OUTPUT_DIR          image output directory (default: repo root)
@@ -152,7 +152,7 @@ ensure_loongarch64_gnu_libdir_compat() {
 
 build_one_arch() (
     local arch="$1" name="$1" variant="${ROOTFS_VARIANT:-auto}"
-    local inputs
+    local inputs fetch_rocksdb="${fetch}"
     if [[ "${arch}" == riscv64 && "${RISCV_PLATFORM}" == visionfive2 ]]; then
         name=visionfive2
     fi
@@ -161,6 +161,8 @@ build_one_arch() (
         local fetch_variant="${variant}"
         [[ "${fetch_variant}" != auto ]] || fetch_variant=tests
         "${REPO_ROOT}/scripts/fetch-rootfs.sh" "--${fetch_variant}" --arch "${arch}"
+        # Fetching the test bundle also fetches its RocksDB packages.
+        fetch_rocksdb=no
         inputs="$(rootfs_archives "${arch}" "${variant}")" || die "Missing archives for ${name} after fetch"
     fi
     local archives=()
@@ -186,6 +188,14 @@ build_one_arch() (
     # /etc/gshadow); normalize owner rwx so patches, mkfs -d population and
     # cleanup can always access the stage. Exec bits are preserved.
     chmod -R u+rwX "${stage_dir}"
+
+    # The selected test archive is last for both the overlay and full-rootfs layouts.
+    if [[ "${archives[-1]}" == */rootfs-tests-* ]]; then
+        if [[ "${fetch_rocksdb}" == yes ]]; then
+            "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch "${arch}"
+        fi
+        "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" install "${arch}" "${stage_dir}"
+    fi
 
     if [[ "${arch}" == "loongarch64" ]]; then
         patch_loongarch64_musl_sched_stubs "${stage_dir}"

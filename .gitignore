@@ -17,6 +17,7 @@ kernel-*
 vendor/**/target/
 rootfs/base/*.tar.xz
 rootfs/base/*.tar.gz
+/rootfs/base/rocksdb/
 *.o
 *.bpf.o
 __pycache__/
