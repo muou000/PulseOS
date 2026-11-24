@@ -29,7 +29,7 @@ To exercise unmap rollback deterministically, use a separate kernel checkout:
 ```sh
 git worktree add --detach "$scratch/reserved" HEAD
 git -C "$scratch/reserved" apply "$PWD/tests/sysv_ipc/shmdt-reservation.patch"
-make -C "$scratch/reserved" test
+(cd "$scratch/reserved" && make test)
 ```
 
 Boot the resulting RV64 `.bin` or LA64 `.elf` with the same private image
