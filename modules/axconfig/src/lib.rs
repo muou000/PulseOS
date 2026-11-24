@@ -8,6 +8,8 @@
 
 #![no_std]
 
+pub mod user;
+
 axconfig_macros::include_configs!(
     path_env = "AX_CONFIG_PATH",
     fallback = "../../configs/defconfig.toml"

@@ -8,11 +8,9 @@ use core::sync::atomic::Ordering;
 use axerrno::{AxError, AxResult};
 use axfs::FsContext;
 use axfs_ng_vfs::{Location, NodePermission, NodeType};
-use axhal::paging::MappingFlags;
 use memory_addr::va;
 
 use super::{AddressSpaceLock, Process, Thread};
-use crate::config::*;
 
 const SHEBANG_MAX_DEPTH: usize = 4;
 const SHEBANG_PROBE_LEN: usize = 256;
@@ -165,7 +163,7 @@ pub fn resolve_exec_path_and_args(
 }
 
 impl Process {
-    pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
+    fn prepare_exec(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<PreparedExec> {
         let mut fs_ctx = self.fs_context_handle().lock().clone();
         fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
         let ResolvedExec {
@@ -186,14 +184,7 @@ impl Process {
             )
         };
 
-        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
-        let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-        new_aspace.map_alloc(
-            va!(stack_bottom),
-            USER_STACK_SIZE,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            false,
-        )?;
+        let mut new_aspace = elf_loader::new_user_aspace()?;
         let load_info = crate::mm::load_user_app(
             &mut new_aspace,
             &fs_ctx,
@@ -205,7 +196,21 @@ impl Process {
             &argv_refs,
             envs,
         )?;
-        let new_aspace_handle = Arc::new(AddressSpaceLock::new(new_aspace));
+        Ok(PreparedExec {
+            aspace: Arc::new(AddressSpaceLock::new(new_aspace)),
+            load_info,
+            path,
+            argv,
+        })
+    }
+
+    pub fn load_elf(&self, path: &str, args: &[&str], envs: &[&str]) -> AxResult<()> {
+        let PreparedExec {
+            aspace: new_aspace_handle,
+            load_info,
+            path,
+            argv,
+        } = self.prepare_exec(path, args, envs)?;
         let new_pt_root = new_aspace_handle.read().page_table_root();
         let new_asid = new_aspace_handle.read().asid();
         #[cfg(feature = "bpf-trace")]
@@ -298,54 +303,8 @@ impl Process {
             axtask::yield_now();
         };
 
-        let mut fs_ctx = self.fs_context_handle().lock().clone();
-        fs_ctx.credentials = Some((self.fsuid(), self.fsgid()));
-        let ResolvedExec {
-            location,
-            exec_access,
-            path,
-            execfn_path,
-            argv,
-        } = resolve_exec_target_and_args(&fs_ctx, path, args)?;
-        let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-        let exec_credentials = {
-            let credentials = self.credentials.read();
-            crate::mm::ExecCredentials::new(
-                credentials.ruid,
-                credentials.euid,
-                credentials.rgid,
-                credentials.egid,
-            )
-        };
-
-        // Complete every fallible load step before changing the old image or
-        // terminating sibling threads.
-        let mut new_aspace = axmm::new_user_aspace(va!(USER_SPACE_BASE), USER_SPACE_SIZE)?;
-        let stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-        new_aspace.map_alloc(
-            va!(stack_bottom),
-            USER_STACK_SIZE,
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-            false,
-        )?;
-        let load_info = crate::mm::load_user_app(
-            &mut new_aspace,
-            &fs_ctx,
-            exec_credentials,
-            location,
-            exec_access,
-            &path,
-            &execfn_path,
-            &argv_refs,
-            envs,
-        )?;
-        drop(argv_refs);
-        let prepared = PreparedExec {
-            aspace: Arc::new(AddressSpaceLock::new(new_aspace)),
-            load_info,
-            path,
-            argv,
-        };
+        // Prepare the entire replacement while the old image and its threads are live.
+        let prepared = self.prepare_exec(path, args, envs)?;
 
         if self.group_exiting() {
             return Err(AxError::Interrupted);
