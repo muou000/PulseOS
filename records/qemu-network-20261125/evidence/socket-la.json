@@ -1,0 +1,220 @@
+{
+  "architecture": "loongarch64",
+  "environment": "../environment.json",
+  "source": "../socket_probe.c",
+  "executed_elf_sha256": "ffc6d4abe313bb2294a5bcc14c514da719a19462c08e6bcfc899ee9cd0dfbe6e",
+  "exit_codes": {
+    "abi": 0,
+    "footprint": 0,
+    "ready": 0
+  },
+  "modes": [
+    "./probe",
+    "./probe footprint",
+    "./probe ready"
+  ],
+  "options_guest": [
+    "buffer proto=tcp opt=tx default=65536 req=16384 set=0 got=65536 req=131072 set=0 got=65536",
+    "buffer proto=tcp opt=rx default=65536 req=16384 set=0 got=65536 req=131072 set=0 got=65536",
+    "buffer proto=udp opt=tx default=65536 req=16384 set=0 got=65536 req=131072 set=0 got=65536",
+    "buffer proto=udp opt=rx default=65536 req=16384 set=0 got=65536 req=131072 set=0 got=65536",
+    "nodelay listener_set=0 listener=1 child_before_set=0 child_set=0 child_after_set=1",
+    "rcvtimeo set=0 get=0 sec=0 usec=0",
+    "tcp_info tx_bytes=2048 get=0 len=104 state=0 mss=0 cwnd_segs=0 rtt_us=0 total_retrans=0 congestion='cubic' congestion_rc=0",
+    "linger set=-92 get=-92 onoff=-1 seconds=-1 dup_send=1 peer_recv=1 final_peer_poll=1 final_peer_recv=0"
+  ],
+  "options_reference_host_linux": [
+    "buffer proto=tcp opt=tx default=16384 req=16384 set=0 got=32768 req=131072 set=0 got=262144",
+    "buffer proto=tcp opt=rx default=131072 req=16384 set=0 got=32768 req=131072 set=0 got=262144",
+    "buffer proto=udp opt=tx default=212992 req=16384 set=0 got=32768 req=131072 set=0 got=262144",
+    "buffer proto=udp opt=rx default=212992 req=16384 set=0 got=32768 req=131072 set=0 got=262144",
+    "nodelay listener_set=0 listener=1 child_before_set=1 child_set=0 child_after_set=1",
+    "rcvtimeo set=0 get=0 sec=0 usec=100000",
+    "tcp_info tx_bytes=2048 get=0 len=248 state=1 mss=1448 cwnd_segs=10 rtt_us=584 total_retrans=0 congestion='cubic' congestion_rc=0",
+    "linger set=0 get=0 onoff=1 seconds=0 dup_send=1 peer_recv=1 final_peer_poll=1 final_peer_recv=-104"
+  ],
+  "timeout_wrapper_warnings_by_mode": {
+    "abi": [
+      "timeout: warning: sigprocmask: Invalid argument",
+      "timeout: warning: sigprocmask: Invalid argument",
+      "timeout: warning: sigprocmask: Invalid argument"
+    ],
+    "footprint": [
+      "timeout: warning: sigprocmask: Invalid argument",
+      "timeout: warning: sigprocmask: Invalid argument",
+      "timeout: warning: sigprocmask: Invalid argument"
+    ],
+    "ready": [
+      "timeout: warning: sigprocmask: Invalid argument",
+      "timeout: warning: sigprocmask: Invalid argument",
+      "timeout: warning: sigprocmask: Invalid argument"
+    ]
+  },
+  "footprint_measurement": "Guest-wide /proc/meminfo MemFree around opening all sockets and then closing them. The delta includes system activity.",
+  "footprint": [
+    {
+      "protocol": "tcp",
+      "sockets": 16,
+      "free_before_KiB": 8293864,
+      "free_while_open_KiB": 8285656,
+      "free_after_close_KiB": 8293848,
+      "free_decrease_per_socket_KiB": 513.0
+    },
+    {
+      "protocol": "udp",
+      "sockets": 4,
+      "free_before_KiB": 8293848,
+      "free_while_open_KiB": 8259544,
+      "free_after_close_KiB": 8293848,
+      "free_decrease_per_socket_KiB": 8576.0
+    }
+  ],
+  "readiness_measurement": "1 readable fd plus idle peers; level-triggered POLLIN/EPOLLIN, timeout 0. The same byte remained readable for all calls. All 64 calls in each of three windows for each configuration returned exactly the expected active fd. median_us is the median per call across windows.",
+  "ready": [
+    {
+      "kind": "pipe",
+      "api": "epoll_wait",
+      "idle": 1,
+      "samples": 3,
+      "median_us": 20.63,
+      "elapsed_ns_per_64_calls": [
+        1388850,
+        1320530,
+        776190
+      ]
+    },
+    {
+      "kind": "pipe",
+      "api": "epoll_wait",
+      "idle": 16,
+      "samples": 3,
+      "median_us": 27.34,
+      "elapsed_ns_per_64_calls": [
+        1749440,
+        1596440,
+        2067740
+      ]
+    },
+    {
+      "kind": "pipe",
+      "api": "epoll_wait",
+      "idle": 64,
+      "samples": 3,
+      "median_us": 68.41,
+      "elapsed_ns_per_64_calls": [
+        4378470,
+        5144130,
+        3369040
+      ]
+    },
+    {
+      "kind": "pipe",
+      "api": "poll",
+      "idle": 1,
+      "samples": 3,
+      "median_us": 9.55,
+      "elapsed_ns_per_64_calls": [
+        611030,
+        720620,
+        469240
+      ]
+    },
+    {
+      "kind": "pipe",
+      "api": "poll",
+      "idle": 16,
+      "samples": 3,
+      "median_us": 27.28,
+      "elapsed_ns_per_64_calls": [
+        2404160,
+        1462240,
+        1745680
+      ]
+    },
+    {
+      "kind": "pipe",
+      "api": "poll",
+      "idle": 64,
+      "samples": 3,
+      "median_us": 72.22,
+      "elapsed_ns_per_64_calls": [
+        4622240,
+        5138310,
+        4367190
+      ]
+    },
+    {
+      "kind": "tcp",
+      "api": "epoll_wait",
+      "idle": 1,
+      "samples": 3,
+      "median_us": 69.62,
+      "elapsed_ns_per_64_calls": [
+        4050530,
+        4455960,
+        5317330
+      ]
+    },
+    {
+      "kind": "tcp",
+      "api": "epoll_wait",
+      "idle": 16,
+      "samples": 3,
+      "median_us": 1683.16,
+      "elapsed_ns_per_64_calls": [
+        107722540,
+        118032590,
+        106187580
+      ]
+    },
+    {
+      "kind": "tcp",
+      "api": "epoll_wait",
+      "idle": 64,
+      "samples": 3,
+      "median_us": 23396.89,
+      "elapsed_ns_per_64_calls": [
+        1497400800,
+        1437462380,
+        1528246430
+      ]
+    },
+    {
+      "kind": "tcp",
+      "api": "poll",
+      "idle": 1,
+      "samples": 3,
+      "median_us": 52.28,
+      "elapsed_ns_per_64_calls": [
+        3184850,
+        3346240,
+        3902470
+      ]
+    },
+    {
+      "kind": "tcp",
+      "api": "poll",
+      "idle": 16,
+      "samples": 3,
+      "median_us": 1883.65,
+      "elapsed_ns_per_64_calls": [
+        107410470,
+        124828350,
+        120553380
+      ]
+    },
+    {
+      "kind": "tcp",
+      "api": "poll",
+      "idle": 64,
+      "samples": 3,
+      "median_us": 23397.48,
+      "elapsed_ns_per_64_calls": [
+        1474964920,
+        1526943880,
+        1497438960
+      ]
+    }
+  ],
+  "raw_retention": "Guest textual observations were archived locally by the run operator; this file preserves option values, all elapsed_ns windows, memory readings and tool exit codes."
+}

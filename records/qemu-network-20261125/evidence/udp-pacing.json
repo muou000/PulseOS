@@ -1,0 +1,346 @@
+{
+  "method": {
+    "environment": "../environment.json",
+    "guest_vcpus": 8,
+    "guest_memory_gib": 8,
+    "network": "QEMU virt, snapshot=on, user networking; RISC-V MMIO with -cpu max, LoongArch PCI",
+    "tool": "iperf3 3.22.1 at both endpoints",
+    "ipv4": true,
+    "streams_default": 1,
+    "duration_seconds": 2,
+    "interval_seconds": 1,
+    "client_connect_timeout_ms": 3000,
+    "guest_watchdog_seconds": 18,
+    "command": "iperf3 -4 -c PEER -p PORT -t 2 -i 1 -J --connect-timeout 3000 [case options]",
+    "server": "iperf3 -s -1 -B 127.0.0.1 -p PORT -J",
+    "peer": "Loopback uses 127.0.0.1 inside the guest. VirtIO uses 10.0.2.2 with the host listener on 127.0.0.1. Both parties use the same port.",
+    "unit": "Decimal Mbit/s, receiver end.sum_received.bits_per_second / 1e6; each reported run includes startup and shutdown. Reverse (-R) changes the sender.",
+    "schedule": "One boot per architecture for this matrix. Interleave scenarios once per repetition. Architectures run serially on a shared 12-logical-CPU host.",
+    "purpose": "Small-datagram pacing controls; fresh VM, one stream, 512 B, target 40 Mbit/s = 9765.625 payload datagrams/s."
+  },
+  "cases": {
+    "nic-udp-40m-default": {
+      "route": "virtio-user",
+      "options": [
+        "-u",
+        "-b",
+        "40M",
+        "-l",
+        "512"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-udp-40m-timer10ms": {
+      "route": "virtio-user",
+      "options": [
+        "-u",
+        "-b",
+        "40M",
+        "-l",
+        "512",
+        "--pacing-timer",
+        "10000"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-udp-unpaced": {
+      "route": "virtio-user",
+      "options": [
+        "-u",
+        "-b",
+        "0",
+        "-l",
+        "512"
+      ],
+      "planned_repeats": 3
+    }
+  },
+  "architectures": {
+    "riscv64": {
+      "completed": 9,
+      "failed": 0,
+      "other_host_qemu_range": [
+        1,
+        1
+      ],
+      "samples": {
+        "nic-udp-40m-default": {
+          "runs": [
+            [
+              1,
+              2.023574,
+              2.069385,
+              4.785,
+              4.679,
+              1210368,
+              1210368,
+              2364,
+              2364,
+              0
+            ],
+            [
+              2,
+              2.037597,
+              2.048466,
+              5.492,
+              5.463,
+              1398784,
+              1398784,
+              2733,
+              2732,
+              0
+            ],
+            [
+              3,
+              2.012795,
+              2.020023,
+              5.073,
+              5.055,
+              1276416,
+              1276416,
+              2494,
+              2493,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 5.055,
+          "sender_pps_median": 1239.1
+        },
+        "nic-udp-40m-timer10ms": {
+          "runs": [
+            [
+              1,
+              2.044836,
+              2.054535,
+              4.567,
+              4.545,
+              1167360,
+              1167360,
+              2280,
+              2280,
+              0
+            ],
+            [
+              2,
+              2.011711,
+              2.020928,
+              4.805,
+              4.783,
+              1208320,
+              1208320,
+              2361,
+              2360,
+              0
+            ],
+            [
+              3,
+              2.007037,
+              2.017543,
+              5.078,
+              5.051,
+              1273856,
+              1273856,
+              2488,
+              2488,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 4.783,
+          "sender_pps_median": 1173.6
+        },
+        "nic-udp-unpaced": {
+          "runs": [
+            [
+              1,
+              2.094248,
+              2.105275,
+              5.42,
+              5.393,
+              1418752,
+              1419264,
+              2772,
+              2772,
+              0
+            ],
+            [
+              2,
+              2.034891,
+              2.043355,
+              5.622,
+              5.601,
+              1430016,
+              1430528,
+              2794,
+              2794,
+              0
+            ],
+            [
+              3,
+              2.023277,
+              2.031625,
+              5.132,
+              5.113,
+              1297920,
+              1298432,
+              2536,
+              2536,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 5.393,
+          "sender_pps_median": 1323.6
+        }
+      }
+    },
+    "loongarch64": {
+      "completed": 9,
+      "failed": 0,
+      "other_host_qemu_range": [
+        1,
+        1
+      ],
+      "samples": {
+        "nic-udp-40m-default": {
+          "runs": [
+            [
+              1,
+              2.013802,
+              2.029249,
+              9.344,
+              9.271,
+              2352128,
+              2351616,
+              4594,
+              4593,
+              0
+            ],
+            [
+              2,
+              2.032199,
+              2.05136,
+              8.032,
+              7.957,
+              2040320,
+              2040320,
+              3985,
+              3985,
+              0
+            ],
+            [
+              3,
+              2.018383,
+              2.030626,
+              7.375,
+              7.332,
+              1860608,
+              1861120,
+              3635,
+              3635,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 7.957,
+          "sender_pps_median": 1960.9
+        },
+        "nic-udp-40m-timer10ms": {
+          "runs": [
+            [
+              1,
+              2.007841,
+              2.019171,
+              7.581,
+              7.538,
+              1902592,
+              1902592,
+              3716,
+              3716,
+              0
+            ],
+            [
+              2,
+              2.0078,
+              2.023257,
+              8.538,
+              8.474,
+              2142720,
+              2143232,
+              4186,
+              4186,
+              0
+            ],
+            [
+              3,
+              2.009435,
+              2.02494,
+              6.231,
+              6.186,
+              1565184,
+              1565696,
+              3058,
+              3058,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 7.538,
+          "sender_pps_median": 1850.7
+        },
+        "nic-udp-unpaced": {
+          "runs": [
+            [
+              1,
+              2.082936,
+              2.090915,
+              7.211,
+              7.183,
+              1877504,
+              1877504,
+              3668,
+              3667,
+              0
+            ],
+            [
+              2,
+              2.027145,
+              2.03606,
+              7.929,
+              7.894,
+              2009088,
+              2009088,
+              3925,
+              3924,
+              0
+            ],
+            [
+              3,
+              2.016429,
+              2.028098,
+              7.575,
+              7.531,
+              1909248,
+              1909248,
+              3730,
+              3729,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 7.531,
+          "sender_pps_median": 1849.8
+        }
+      }
+    }
+  },
+  "retention": "Per-endpoint JSON, stderr and guest serial streams were saved locally during this run. The individual measurements below were extracted from those files. The raw files have no public archive or retention guarantee.",
+  "udp_counts": "receiver_packets is the iperf3 receiver sequence count including inferred losses; observed datagrams = receiver_packets - reported_lost. Compare with sender_packets separately. A final datagram can be absent from the receiver count even with no reported sequence gap.",
+  "run_columns": [
+    "repeat",
+    "sender_seconds",
+    "receiver_seconds",
+    "sender_Mbit_s",
+    "receiver_Mbit_s",
+    "sender_bytes",
+    "receiver_bytes",
+    "sender_packets",
+    "receiver_packets",
+    "reported_lost"
+  ]
+}

@@ -1,0 +1,1207 @@
+{
+  "identity": {
+    "boot_sha256": "8b13b18226b0037ec10ae3f85338d15cfe6c9a31653c675220e4f618b0dd58a4",
+    "kernel_elf_sha256": "46731cbdc7d8ee58b09f4d03c4ec8c1f3491ad5a94f65de513eb60eb21b70210",
+    "kernel_build_id": "b80f9d52e9aa5040f1509007cb1e8cf5283bda78",
+    "kernel_reference": "0xffffffc080201000",
+    "source_commit": "39e61bab5903b773666d54123b51f66aa2ab8101",
+    "source_tree_sha256": "9cb46dd5e21ea929356d397b047545f0ad270b0047e70c17ce15351ec179b5af",
+    "source_dirty": false,
+    "recorder": "056834ae23e66c9488d5f0c657086889e4d20280c76da6b06705e8163cbe0a71",
+    "analyzer": "17a9db16f288909c345822ba5a99318b1c12379d9c8c74354ac0401ef30484e4",
+    "profiling_image_sha256": "defaacfccad14167a01a17c83402622ee9f86aecf28bf7b337ddb21087654ded",
+    "addr2line": "GNU addr2line (GNU Binutils for Ubuntu) 2.42"
+  },
+  "unit": "CPU-clock period_ns",
+  "denominator": "all retained kernel-mode stacks on CPUs 0..7; not busy time",
+  "cases": {
+    "idle": {
+      "capture_sha256": "6bef00cf5139790516615c335178416cc4dbee312d97849ea104ad5d47a4b49e",
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "workload": null,
+      "recorder_rc": 0,
+      "stop": "duration",
+      "partial": 1,
+      "sample_modes": {
+        "all": 2142,
+        "kernel": 2132,
+        "user": 10
+      },
+      "kernel_weight_ns": 21320000000,
+      "src_columns": [
+        "source_id",
+        "cpu",
+        "retained_samples",
+        "period_ns_total",
+        "observed",
+        "skipped",
+        "cancelled"
+      ],
+      "sources": [
+        [
+          1,
+          0,
+          286,
+          2860000000,
+          470,
+          15,
+          0
+        ],
+        [
+          2,
+          1,
+          254,
+          2540000000,
+          475,
+          46,
+          0
+        ],
+        [
+          3,
+          2,
+          254,
+          2540000000,
+          319,
+          47,
+          0
+        ],
+        [
+          4,
+          3,
+          253,
+          2530000000,
+          429,
+          47,
+          0
+        ],
+        [
+          5,
+          4,
+          287,
+          2870000000,
+          476,
+          14,
+          0
+        ],
+        [
+          6,
+          5,
+          283,
+          2830000000,
+          431,
+          17,
+          0
+        ],
+        [
+          7,
+          6,
+          246,
+          2460000000,
+          436,
+          54,
+          1
+        ],
+        [
+          8,
+          7,
+          279,
+          2790000000,
+          441,
+          20,
+          0
+        ]
+      ],
+      "consumer": {
+        "delivered": 2142,
+        "observed_perf_lost": 0,
+        "ringbuf_lost": 0,
+        "discarded_records": 0,
+        "consumer_corrupt_records": 0,
+        "consumer_out_of_bounds": 0
+      },
+      "legacy_loss_counters": null,
+      "runtime_loss_or_error_nonzero": {
+        "system/timer_busy": 141
+      },
+      "unknown_artifacts": 13,
+      "journal_dropped": 0,
+      "producer_skipped": 260,
+      "producer_cancelled": 1,
+      "mode_kernel_termination": {
+        "complete_at_terminator": 229,
+        "unavailable": 1897,
+        "nonmonotonic_frame": 5,
+        "invalid_frame": 1
+      },
+      "mode_user_termination": {
+        "invalid_frame": 6,
+        "invalid_return_address": 2,
+        "read_fault": 1,
+        "no_frame_pointer": 1
+      },
+      "stack_status": {
+        "complete": 229,
+        "unavailable": 1897,
+        "partial": 6
+      },
+      "tags": {
+        "after_csrs_sstatus": 2087,
+        "idle_leaf": 1830,
+        "memcpy_leaf": 3,
+        "memset_leaf": 2
+      },
+      "kernel_top_leaf": [
+        [
+          "task::api::run_idle",
+          1830
+        ],
+        [
+          "task::api::yield_now",
+          199
+        ],
+        [
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          65
+        ],
+        [
+          "main",
+          6
+        ],
+        [
+          "<bpf::perf_event::PerfEvent>::run_observation",
+          5
+        ],
+        [
+          "process::timers::timer_work_loop",
+          4
+        ],
+        [
+          "compiler_builtins::mem::memcpy",
+          2
+        ],
+        [
+          "<fs::fs::ext4::Ext4Disk<fs::disk::SharedBlockDevice>>::flush_offset_batch::{closure#0}",
+          2
+        ]
+      ],
+      "hotspot_pcs": [
+        [
+          "0xffffffc080595fb4",
+          "task::api::run_idle",
+          1829,
+          true
+        ],
+        [
+          "0xffffffc0805967d0",
+          "task::api::yield_now",
+          77,
+          true
+        ],
+        [
+          "0xffffffc0805966e4",
+          "task::api::yield_now",
+          71,
+          true
+        ],
+        [
+          "0xffffffc080592284",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          52,
+          true
+        ],
+        [
+          "0xffffffc0805967e4",
+          "task::api::yield_now",
+          41,
+          true
+        ],
+        [
+          "0xffffffc0805923fa",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          7,
+          true
+        ],
+        [
+          "0xffffffc0802156a8",
+          "main",
+          6,
+          false
+        ],
+        [
+          "0xffffffc080592260",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          5,
+          false
+        ],
+        [
+          "0xffffffc0805966c6",
+          "task::api::yield_now",
+          5,
+          false
+        ],
+        [
+          "0xffffffc08048a85c",
+          "process::timers::timer_work_loop",
+          3,
+          false
+        ]
+      ],
+      "example_chains": {},
+      "capture_bytes": 1641433
+    },
+    "loop": {
+      "capture_sha256": "e70f55a6dcb7399cc43cb71ac1247aa2ff04c1791af77ce3f6a4df0b69949f1f",
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "workload": "iperf3 -4 -c 127.0.0.1 -t 16 -i 1 --forceflush",
+      "recorder_rc": 0,
+      "stop": "duration",
+      "partial": 1,
+      "sample_modes": {
+        "all": 2018,
+        "kernel": 2013,
+        "user": 5
+      },
+      "kernel_weight_ns": 20130000000,
+      "src_columns": [
+        "source_id",
+        "cpu",
+        "retained_samples",
+        "period_ns_total",
+        "observed",
+        "skipped",
+        "cancelled"
+      ],
+      "sources": [
+        [
+          1,
+          0,
+          258,
+          2580000000,
+          480,
+          40,
+          1
+        ],
+        [
+          2,
+          1,
+          273,
+          2730000000,
+          447,
+          25,
+          1
+        ],
+        [
+          3,
+          2,
+          266,
+          2660000000,
+          360,
+          32,
+          1
+        ],
+        [
+          4,
+          3,
+          264,
+          2640000000,
+          374,
+          34,
+          1
+        ],
+        [
+          5,
+          4,
+          246,
+          2460000000,
+          484,
+          52,
+          1
+        ],
+        [
+          6,
+          5,
+          228,
+          2280000000,
+          421,
+          69,
+          1
+        ],
+        [
+          7,
+          6,
+          255,
+          2550000000,
+          438,
+          43,
+          2
+        ],
+        [
+          8,
+          7,
+          228,
+          2280000000,
+          382,
+          69,
+          1
+        ]
+      ],
+      "consumer": {
+        "delivered": 2018,
+        "observed_perf_lost": 0,
+        "ringbuf_lost": 0,
+        "discarded_records": 0,
+        "consumer_corrupt_records": 0,
+        "consumer_out_of_bounds": 0
+      },
+      "legacy_loss_counters": null,
+      "runtime_loss_or_error_nonzero": {
+        "system/timer_busy": 144
+      },
+      "unknown_artifacts": 37,
+      "journal_dropped": 0,
+      "producer_skipped": 364,
+      "producer_cancelled": 9,
+      "mode_kernel_termination": {
+        "unavailable": 1566,
+        "complete_at_terminator": 264,
+        "nonmonotonic_frame": 183
+      },
+      "mode_user_termination": {
+        "invalid_frame": 4,
+        "nonmonotonic_frame": 1
+      },
+      "stack_status": {
+        "unavailable": 1566,
+        "complete": 264,
+        "partial": 183
+      },
+      "tags": {
+        "after_csrs_sstatus": 1841,
+        "idle_leaf": 1457,
+        "inclusive_poll": 154,
+        "inclusive_network": 228,
+        "network_leaf_to_root_with_poll": 154,
+        "rx_or_write_net_with_poll": 92,
+        "poll_wake": 47,
+        "checksum_leaf": 33,
+        "checksum_tx_leaf": 21,
+        "memcpy_leaf": 26,
+        "poll_mutex": 15,
+        "checksum_rx_leaf": 12,
+        "memset_leaf": 5,
+        "driver_leaf": 4,
+        "driver_leaf_after_irq_restore": 3,
+        "driver_tx_recycle_leaf": 1
+      },
+      "kernel_top_leaf": [
+        [
+          "task::api::run_idle",
+          1457
+        ],
+        [
+          "task::api::yield_now",
+          197
+        ],
+        [
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          97
+        ],
+        [
+          "WaitQueue::notify_one_with_context",
+          39
+        ],
+        [
+          "smoltcp::wire::ip::checksum::data",
+          33
+        ],
+        [
+          "compiler_builtins::mem::memcpy",
+          26
+        ],
+        [
+          "net::SocketSetWrapper::poll_interfaces",
+          23
+        ],
+        [
+          "WaitQueue::wait_until_with_context::<RawMutex::lock::{closure#1}>",
+          22
+        ]
+      ],
+      "hotspot_pcs": [
+        [
+          "0xffffffc080595fb4",
+          "task::api::run_idle",
+          1457,
+          true
+        ],
+        [
+          "0xffffffc0805967d0",
+          "task::api::yield_now",
+          78,
+          true
+        ],
+        [
+          "0xffffffc0805966e4",
+          "task::api::yield_now",
+          67,
+          true
+        ],
+        [
+          "0xffffffc080592284",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          64,
+          true
+        ],
+        [
+          "0xffffffc0805967e4",
+          "task::api::yield_now",
+          40,
+          true
+        ],
+        [
+          "0xffffffc0805923fa",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          24,
+          true
+        ],
+        [
+          "0xffffffc080572fba",
+          "smoltcp::wire::ip::checksum::data",
+          24,
+          false
+        ],
+        [
+          "0xffffffc080585b2a",
+          "WaitQueue::notify_one_with_context",
+          22,
+          true
+        ],
+        [
+          "0xffffffc0805a6e92",
+          "compiler_builtins::mem::memcpy",
+          17,
+          false
+        ],
+        [
+          "0xffffffc0803b4054",
+          "WaitQueue::wait_until_with_context::<RawMutex::lock::{closure#1}>",
+          15,
+          true
+        ]
+      ],
+      "example_chains": {
+        "poll_wake": {
+          "source": 7,
+          "cpu": 6,
+          "timestamp_ns": 34673542400,
+          "leaf": "0xffffffc0805923fa",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "<task::task::TaskInner>::current_check_preempt_pending",
+            "WaitQueue::notify_one_with_context",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::send",
+            "<process::socket::Socket as process::fd::FdObject>::write",
+            "pulse_syscalls::impls::fs::io::write_path::write_to_object",
+            "pulse_syscalls::impls::fs::io::scalar::sys_write",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "checksum_leaf": {
+          "source": 8,
+          "cpu": 7,
+          "timestamp_ns": 34359985400,
+          "leaf": "0xffffffc080573000",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "smoltcp::wire::ip::checksum::data",
+            "<smoltcp::iface::interface::InterfaceInner>::process_tcp",
+            "<smoltcp::iface::interface::InterfaceInner>::process_ipv4",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::send",
+            "<process::socket::Socket as process::fd::FdObject>::write",
+            "pulse_syscalls::impls::fs::io::write_path::write_to_object",
+            "pulse_syscalls::impls::fs::io::scalar::sys_write",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "poll_mutex": {
+          "source": 3,
+          "cpu": 2,
+          "timestamp_ns": 34746572200,
+          "leaf": "0xffffffc0803b4054",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "WaitQueue::wait_until_with_context::<RawMutex::lock::{closure#1}>",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::send",
+            "<process::socket::Socket as process::fd::FdObject>::write",
+            "pulse_syscalls::impls::fs::io::write_path::write_to_object",
+            "pulse_syscalls::impls::fs::io::scalar::sys_write",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        }
+      },
+      "capture_bytes": 1932610
+    },
+    "virtio": {
+      "capture_sha256": "efa130a568af95eee80d2f0e658373e1736bad4e20063e11eadfcac324e24539",
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "workload": "iperf3 -4 -c 10.0.2.2 -p 52631 -t 16 -i 1 --forceflush",
+      "recorder_rc": 0,
+      "stop": "duration",
+      "partial": 1,
+      "sample_modes": {
+        "all": 2137,
+        "kernel": 2125,
+        "user": 12
+      },
+      "kernel_weight_ns": 21250000000,
+      "src_columns": [
+        "source_id",
+        "cpu",
+        "retained_samples",
+        "period_ns_total",
+        "observed",
+        "skipped",
+        "cancelled"
+      ],
+      "sources": [
+        [
+          1,
+          0,
+          264,
+          2640000000,
+          534,
+          36,
+          0
+        ],
+        [
+          2,
+          1,
+          276,
+          2760000000,
+          445,
+          23,
+          0
+        ],
+        [
+          3,
+          2,
+          280,
+          2800000000,
+          454,
+          19,
+          0
+        ],
+        [
+          4,
+          3,
+          276,
+          2760000000,
+          420,
+          23,
+          1
+        ],
+        [
+          5,
+          4,
+          260,
+          2600000000,
+          386,
+          39,
+          1
+        ],
+        [
+          6,
+          5,
+          256,
+          2560000000,
+          418,
+          43,
+          1
+        ],
+        [
+          7,
+          6,
+          284,
+          2840000000,
+          470,
+          15,
+          0
+        ],
+        [
+          8,
+          7,
+          241,
+          2410000000,
+          421,
+          57,
+          1
+        ]
+      ],
+      "consumer": {
+        "delivered": 2137,
+        "observed_perf_lost": 0,
+        "ringbuf_lost": 0,
+        "discarded_records": 0,
+        "consumer_corrupt_records": 0,
+        "consumer_out_of_bounds": 0
+      },
+      "legacy_loss_counters": null,
+      "runtime_loss_or_error_nonzero": {
+        "system/timer_busy": 124
+      },
+      "unknown_artifacts": 71,
+      "journal_dropped": 0,
+      "producer_skipped": 255,
+      "producer_cancelled": 4,
+      "mode_kernel_termination": {
+        "complete_at_terminator": 367,
+        "unavailable": 1628,
+        "nonmonotonic_frame": 130
+      },
+      "mode_user_termination": {
+        "invalid_frame": 6,
+        "invalid_return_address": 4,
+        "nonmonotonic_frame": 2
+      },
+      "stack_status": {
+        "complete": 367,
+        "unavailable": 1628,
+        "partial": 130
+      },
+      "tags": {
+        "after_csrs_sstatus": 2039,
+        "idle_leaf": 1583,
+        "inclusive_poll": 217,
+        "inclusive_network": 237,
+        "network_leaf_to_root_with_poll": 217,
+        "driver_leaf": 139,
+        "driver_leaf_after_irq_restore": 135,
+        "driver_transmit_leaf": 68,
+        "driver_rx_recycle_leaf": 47,
+        "memcpy_leaf": 5,
+        "rx_or_write_net_with_poll": 83,
+        "poll_wake": 23,
+        "driver_tx_recycle_leaf": 13,
+        "checksum_leaf": 8,
+        "checksum_tx_leaf": 7,
+        "poll_mutex": 3
+      },
+      "kernel_top_leaf": [
+        [
+          "task::api::run_idle",
+          1583
+        ],
+        [
+          "task::api::yield_now",
+          193
+        ],
+        [
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          93
+        ],
+        [
+          "VirtIoNetDevWrapper::transmit",
+          68
+        ],
+        [
+          "VirtIoNetDevWrapper::recycle_rx_buffer",
+          47
+        ],
+        [
+          "WaitQueue::notify_one_with_context",
+          17
+        ],
+        [
+          "net::SocketSetWrapper::poll_interfaces",
+          16
+        ],
+        [
+          "VirtIoNetDevWrapper::recycle_tx_buffers",
+          13
+        ]
+      ],
+      "hotspot_pcs": [
+        [
+          "0xffffffc080595fb4",
+          "task::api::run_idle",
+          1583,
+          true
+        ],
+        [
+          "0xffffffc0805966e4",
+          "task::api::yield_now",
+          78,
+          true
+        ],
+        [
+          "0xffffffc080592284",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          70,
+          true
+        ],
+        [
+          "0xffffffc080233e5e",
+          "VirtIoNetDevWrapper::transmit",
+          66,
+          true
+        ],
+        [
+          "0xffffffc0805967e4",
+          "task::api::yield_now",
+          61,
+          true
+        ],
+        [
+          "0xffffffc0805967d0",
+          "task::api::yield_now",
+          47,
+          true
+        ],
+        [
+          "0xffffffc0802338ba",
+          "VirtIoNetDevWrapper::recycle_rx_buffer",
+          45,
+          true
+        ],
+        [
+          "0xffffffc0805923fa",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          20,
+          true
+        ],
+        [
+          "0xffffffc080585b2a",
+          "WaitQueue::notify_one_with_context",
+          12,
+          true
+        ],
+        [
+          "0xffffffc080233afc",
+          "VirtIoNetDevWrapper::recycle_tx_buffers",
+          11,
+          true
+        ]
+      ],
+      "example_chains": {
+        "driver_transmit_leaf": {
+          "source": 4,
+          "cpu": 3,
+          "timestamp_ns": 56983957600,
+          "leaf": "0xffffffc080233e5e",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "VirtIoNetDevWrapper::transmit",
+            "<smoltcp::iface::interface::InterfaceInner>::dispatch_ip::<net::smoltcp_impl::AxNetTxToken>",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::send",
+            "<process::socket::Socket as process::fd::FdObject>::write",
+            "pulse_syscalls::impls::fs::io::write_path::write_to_object",
+            "pulse_syscalls::impls::fs::io::scalar::sys_write",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "poll_wake": {
+          "source": 2,
+          "cpu": 1,
+          "timestamp_ns": 57029566900,
+          "leaf": "0xffffffc080592284",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "<task::task::TaskInner>::current_check_preempt_pending",
+            "WaitQueue::notify_one_with_context",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::send",
+            "<process::socket::Socket as process::fd::FdObject>::write",
+            "pulse_syscalls::impls::fs::io::write_path::write_to_object",
+            "pulse_syscalls::impls::fs::io::scalar::sys_write",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "checksum_leaf": {
+          "source": 5,
+          "cpu": 4,
+          "timestamp_ns": 57664575500,
+          "leaf": "0xffffffc080573000",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "smoltcp::wire::ip::checksum::data",
+            "<smoltcp::iface::packet::Packet>::emit_payload",
+            "<smoltcp::iface::interface::InterfaceInner>::dispatch_ip::<net::smoltcp_impl::AxNetTxToken>",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::send",
+            "<process::socket::Socket as process::fd::FdObject>::write",
+            "pulse_syscalls::impls::fs::io::write_path::write_to_object",
+            "pulse_syscalls::impls::fs::io::scalar::sys_write",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "poll_mutex": {
+          "source": 8,
+          "cpu": 7,
+          "timestamp_ns": 59113787700,
+          "leaf": "0xffffffc080584c70",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "WaitQueue::cancel_events",
+            "WaitQueue::wait_until_with_context::<RawMutex::lock::{closure#1}>",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::send",
+            "<process::socket::Socket as process::fd::FdObject>::write",
+            "pulse_syscalls::impls::fs::io::write_path::write_to_object",
+            "pulse_syscalls::impls::fs::io::scalar::sys_write",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        }
+      },
+      "capture_bytes": 2562309
+    },
+    "http": {
+      "capture_sha256": "87aa2f9357ec9b842c626456214318e76fa4374242dc3ea8f115151223c33dd1",
+      "status": "IncompleteError",
+      "attribution_claim_allowed": false,
+      "workload": "weighttp -q -n 1500 -c 4 -a 50 http://127.0.0.1:8080/index.html",
+      "recorder_rc": 0,
+      "stop": "duration",
+      "partial": 1,
+      "sample_modes": {
+        "all": 1954,
+        "kernel": 1922,
+        "user": 32
+      },
+      "kernel_weight_ns": 19220000000,
+      "src_columns": [
+        "source_id",
+        "cpu",
+        "retained_samples",
+        "period_ns_total",
+        "observed",
+        "skipped",
+        "cancelled"
+      ],
+      "sources": [
+        [
+          1,
+          0,
+          236,
+          2360000000,
+          388,
+          65,
+          0
+        ],
+        [
+          2,
+          1,
+          247,
+          2470000000,
+          366,
+          52,
+          2
+        ],
+        [
+          3,
+          2,
+          255,
+          2550000000,
+          379,
+          44,
+          0
+        ],
+        [
+          4,
+          3,
+          260,
+          2600000000,
+          302,
+          39,
+          0
+        ],
+        [
+          5,
+          4,
+          239,
+          2390000000,
+          378,
+          58,
+          1
+        ],
+        [
+          6,
+          5,
+          239,
+          2390000000,
+          423,
+          60,
+          0
+        ],
+        [
+          7,
+          6,
+          258,
+          2580000000,
+          403,
+          40,
+          1
+        ],
+        [
+          8,
+          7,
+          220,
+          2200000000,
+          361,
+          78,
+          0
+        ]
+      ],
+      "consumer": {
+        "delivered": 1954,
+        "observed_perf_lost": 0,
+        "ringbuf_lost": 0,
+        "discarded_records": 0,
+        "consumer_corrupt_records": 0,
+        "consumer_out_of_bounds": 0
+      },
+      "legacy_loss_counters": null,
+      "runtime_loss_or_error_nonzero": {
+        "system/timer_busy": 120
+      },
+      "unknown_artifacts": 104,
+      "journal_dropped": 0,
+      "producer_skipped": 436,
+      "producer_cancelled": 4,
+      "mode_kernel_termination": {
+        "complete_at_terminator": 272,
+        "unavailable": 1399,
+        "nonmonotonic_frame": 251
+      },
+      "mode_user_termination": {
+        "invalid_frame": 18,
+        "nonmonotonic_frame": 10,
+        "invalid_return_address": 4
+      },
+      "stack_status": {
+        "complete": 272,
+        "unavailable": 1399,
+        "partial": 251
+      },
+      "tags": {
+        "after_csrs_sstatus": 1722,
+        "idle_leaf": 1308,
+        "inclusive_poll": 145,
+        "inclusive_network": 225,
+        "network_leaf_to_root_with_poll": 145,
+        "poll_mutex": 22,
+        "poll_wake": 54,
+        "rx_or_write_net_with_poll": 14,
+        "memcpy_leaf": 13,
+        "memset_leaf": 16,
+        "tcp_alloc_memset": 14,
+        "driver_leaf": 4,
+        "checksum_leaf": 1,
+        "checksum_tx_leaf": 1,
+        "driver_leaf_after_irq_restore": 1
+      },
+      "kernel_top_leaf": [
+        [
+          "task::api::run_idle",
+          1308
+        ],
+        [
+          "task::api::yield_now",
+          193
+        ],
+        [
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          103
+        ],
+        [
+          "WaitQueue::notify_one_with_context",
+          46
+        ],
+        [
+          "WaitQueue::wait_until_with_context::<RawMutex::lock::{closure#1}>",
+          28
+        ],
+        [
+          "net::SocketSetWrapper::poll_interfaces",
+          25
+        ],
+        [
+          "WaitQueue::notify_all_with_context",
+          19
+        ],
+        [
+          "memset",
+          16
+        ]
+      ],
+      "hotspot_pcs": [
+        [
+          "0xffffffc080595fb4",
+          "task::api::run_idle",
+          1307,
+          true
+        ],
+        [
+          "0xffffffc0805967d0",
+          "task::api::yield_now",
+          66,
+          true
+        ],
+        [
+          "0xffffffc0805966e4",
+          "task::api::yield_now",
+          65,
+          true
+        ],
+        [
+          "0xffffffc080592284",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          53,
+          true
+        ],
+        [
+          "0xffffffc0805967e4",
+          "task::api::yield_now",
+          50,
+          true
+        ],
+        [
+          "0xffffffc0805923fa",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          28,
+          true
+        ],
+        [
+          "0xffffffc080585b2a",
+          "WaitQueue::notify_one_with_context",
+          25,
+          true
+        ],
+        [
+          "0xffffffc0803b4054",
+          "WaitQueue::wait_until_with_context::<RawMutex::lock::{closure#1}>",
+          24,
+          true
+        ],
+        [
+          "0xffffffc0805a732a",
+          "memset",
+          16,
+          false
+        ],
+        [
+          "0xffffffc080592260",
+          "<task::task::TaskInner>::current_check_preempt_pending",
+          13,
+          false
+        ]
+      ],
+      "example_chains": {
+        "poll_mutex": {
+          "source": 8,
+          "cpu": 7,
+          "timestamp_ns": 78534016900,
+          "leaf": "0xffffffc0803b4054",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "WaitQueue::wait_until_with_context::<RawMutex::lock::{closure#1}>",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::shutdown",
+            "core::ptr::drop_glue::<process::socket::Socket>",
+            "<alloc::sync::Arc<dyn process::fd::FdObject>>::drop_slow",
+            "pulse_syscalls::impls::fs::fd::sys_close",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "poll_wake": {
+          "source": 6,
+          "cpu": 5,
+          "timestamp_ns": 78611189200,
+          "leaf": "0xffffffc080585b2a",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "WaitQueue::notify_one_with_context",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::shutdown",
+            "core::ptr::drop_glue::<process::socket::Socket>",
+            "<alloc::sync::Arc<dyn process::fd::FdObject>>::drop_slow",
+            "pulse_syscalls::impls::fs::fd::sys_close",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "tcp_alloc_memset": {
+          "source": 7,
+          "cpu": 6,
+          "timestamp_ns": 81344080100,
+          "leaf": "0xffffffc0805a732a",
+          "termination": "nonmonotonic_frame",
+          "leaf_to_root": [
+            "memset",
+            "net::listen_table::ListenTable::incoming_tcp_packet",
+            "net::SocketSetWrapper::poll_interfaces",
+            "net::tcp::TcpSocket::shutdown",
+            "core::ptr::drop_glue::<process::socket::Socket>",
+            "<alloc::sync::Arc<dyn process::fd::FdObject>>::drop_slow",
+            "pulse_syscalls::impls::fs::fd::sys_close",
+            "pulse_syscalls::handler::syscall_handler",
+            "riscv_trap_handler",
+            "trap_vector_base"
+          ]
+        },
+        "checksum_leaf": {
+          "source": 6,
+          "cpu": 5,
+          "timestamp_ns": 80641896600,
+          "leaf": "0xffffffc080572fa6",
+          "termination": "complete_at_terminator",
+          "leaf_to_root": [
+            "smoltcp::wire::ip::checksum::data",
+            "<smoltcp::iface::interface::InterfaceInner>::dispatch_ip::<net::smoltcp_impl::loopback::TxToken>",
+            "net::SocketSetWrapper::poll_interfaces",
+            "<net::smoltcp_impl::init::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+            "task::task::task_entry",
+            "core::ptr::drop_glue::<task::task::TaskInner>"
+          ]
+        }
+      },
+      "capture_bytes": 2998276
+    }
+  },
+  "method": {
+    "environment": "../environment.json",
+    "report": "bpf.md",
+    "event": "cpu",
+    "cpus": "all (0..7)",
+    "callchain": "fp",
+    "period_ns": 10000000,
+    "duration_ms": 3000,
+    "buffer_pages": 64,
+    "time_filter": null,
+    "tid_filter": null,
+    "case_upload": "Raw capture bytes and per-source diagnostics were kept locally without a public archive or retention guarantee. The summary retains digests and counts; byte-for-byte replay requires the corresponding capture and ELF."
+  }
+}

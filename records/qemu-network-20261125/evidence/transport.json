@@ -1,0 +1,1114 @@
+{
+  "method": {
+    "environment": "../environment.json",
+    "guest_vcpus": 8,
+    "guest_memory_gib": 8,
+    "network": "QEMU virt, snapshot=on, user networking; RISC-V MMIO with -cpu max, LoongArch PCI",
+    "tool": "iperf3 3.22.1 at both endpoints",
+    "ipv4": true,
+    "streams_default": 1,
+    "duration_seconds": 2,
+    "interval_seconds": 1,
+    "client_connect_timeout_ms": 3000,
+    "guest_watchdog_seconds": 18,
+    "command": "iperf3 -4 -c PEER -p PORT -t 2 -i 1 -J --connect-timeout 3000 [case options]",
+    "server": "iperf3 -s -1 -B 127.0.0.1 -p PORT -J",
+    "peer": "Loopback uses 127.0.0.1 inside the guest. VirtIO uses 10.0.2.2 with the host listener on 127.0.0.1. Both parties use the same port.",
+    "unit": "Decimal Mbit/s, receiver end.sum_received.bits_per_second / 1e6; each reported run includes startup and shutdown. Reverse (-R) changes the sender.",
+    "schedule": "One boot per architecture for this matrix. Interleave scenarios once per repetition. Architectures run serially on a shared 12-logical-CPU host.",
+    "purpose": "TCP direction, parallelism and socket-window behavior; UDP payload size, offered rate and received datagrams."
+  },
+  "cases": {
+    "lo-tcp-p1": {
+      "route": "loopback",
+      "options": [],
+      "planned_repeats": 3
+    },
+    "lo-tcp-p1-reverse": {
+      "route": "loopback",
+      "options": [
+        "-R"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-tcp-p1": {
+      "route": "virtio-user",
+      "options": [],
+      "planned_repeats": 3
+    },
+    "nic-tcp-p1-reverse": {
+      "route": "virtio-user",
+      "options": [
+        "-R"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-tcp-p4": {
+      "route": "virtio-user",
+      "options": [
+        "-P",
+        "4"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-tcp-p4-reverse": {
+      "route": "virtio-user",
+      "options": [
+        "-P",
+        "4",
+        "-R"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-udp-1m-512": {
+      "route": "virtio-user",
+      "options": [
+        "-u",
+        "-b",
+        "1M",
+        "-l",
+        "512"
+      ],
+      "planned_repeats": 1
+    },
+    "nic-udp-10m-512": {
+      "route": "virtio-user",
+      "options": [
+        "-u",
+        "-b",
+        "10M",
+        "-l",
+        "512"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-udp-40m-512": {
+      "route": "virtio-user",
+      "options": [
+        "-u",
+        "-b",
+        "40M",
+        "-l",
+        "512"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-udp-40m-1200": {
+      "route": "virtio-user",
+      "options": [
+        "-u",
+        "-b",
+        "40M",
+        "-l",
+        "1200"
+      ],
+      "planned_repeats": 3
+    },
+    "nic-tcp-w128k": {
+      "route": "virtio-user",
+      "options": [
+        "-w",
+        "128K"
+      ],
+      "planned_repeats": 1
+    }
+  },
+  "architectures": {
+    "riscv64": {
+      "completed": 28,
+      "failed": 1,
+      "other_host_qemu_range": [
+        2,
+        3
+      ],
+      "samples": {
+        "lo-tcp-p1": {
+          "runs": [
+            [
+              1,
+              2.098592,
+              2.10305,
+              146.899,
+              146.588,
+              38535168,
+              38535168,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.026841,
+              2.031396,
+              150.547,
+              150.726,
+              38141952,
+              38273024,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.011786,
+              2.019712,
+              142.813,
+              142.253,
+              35913728,
+              35913728,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 146.588,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "lo-tcp-p1-reverse": {
+          "runs": [
+            [
+              1,
+              2.00589,
+              2.002071,
+              151.074,
+              150.315,
+              37879808,
+              37617664,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.012767,
+              2.003724,
+              157.331,
+              156.471,
+              39583744,
+              39190528,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.029868,
+              2.021384,
+              142.574,
+              141.616,
+              36175872,
+              35782656,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 150.315,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "nic-tcp-p1": {
+          "runs": [
+            [
+              1,
+              2.065047,
+              2.074064,
+              56.363,
+              56.623,
+              14548992,
+              14680064,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.023565,
+              2.029308,
+              60.109,
+              60.456,
+              15204352,
+              15335424,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.02738,
+              2.051954,
+              55.341,
+              54.167,
+              14024704,
+              13893632,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 56.623,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "nic-tcp-p1-reverse": {
+          "runs": [
+            [
+              1,
+              2.043408,
+              2.000922,
+              122.13,
+              114.766,
+              31195136,
+              28704768,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.020115,
+              2.005057,
+              173.888,
+              166.826,
+              43909120,
+              41811968,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.022853,
+              2.007384,
+              90.195,
+              79.921,
+              22806528,
+              20054016,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 114.766,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              196928,
+              211408
+            ],
+            "mean_rtt": [
+              2968,
+              10096
+            ],
+            "retransmits": [
+              4,
+              6
+            ]
+          }
+        },
+        "nic-tcp-p4": {
+          "runs": [
+            [
+              1,
+              2.101073,
+              2.111276,
+              63.381,
+              62.082,
+              16646144,
+              16384000,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.132902,
+              2.142879,
+              63.911,
+              63.613,
+              17039360,
+              17039360,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.225405,
+              2.242356,
+              60.312,
+              60.323,
+              16777216,
+              16908288,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 62.082,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "nic-tcp-p4-reverse": {
+          "runs": [
+            [
+              1,
+              2.052102,
+              2.020874,
+              148.694,
+              121.416,
+              38141952,
+              30670848,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.042598,
+              2.021872,
+              167.867,
+              135.359,
+              42860544,
+              34209792,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.030708,
+              2.019421,
+              159.039,
+              114.753,
+              40370176,
+              28966912,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 121.416,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              144800,
+              516936
+            ],
+            "mean_rtt": [
+              1556,
+              21730
+            ],
+            "retransmits": [
+              2,
+              41
+            ]
+          }
+        },
+        "nic-udp-1m-512": {
+          "runs": [
+            [
+              1,
+              2.011347,
+              2.02288,
+              0.996,
+              0.992,
+              250368,
+              250880,
+              490,
+              490,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 0.992
+        },
+        "nic-udp-10m-512": {
+          "runs": [
+            [
+              1,
+              2.005103,
+              2.011737,
+              4.792,
+              4.777,
+              1201152,
+              1201152,
+              2346,
+              2346,
+              0
+            ],
+            [
+              2,
+              2.006293,
+              2.012412,
+              5.259,
+              5.243,
+              1318912,
+              1318912,
+              2576,
+              2576,
+              0
+            ],
+            [
+              3,
+              2.009205,
+              2.038234,
+              5.182,
+              5.108,
+              1301504,
+              1301504,
+              2542,
+              2542,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 5.108
+        },
+        "nic-udp-40m-512": {
+          "runs": [
+            [
+              1,
+              2.008114,
+              2.013403,
+              4.459,
+              4.447,
+              1119232,
+              1119232,
+              2186,
+              2186,
+              0
+            ],
+            [
+              2,
+              2.008017,
+              2.013992,
+              6.154,
+              6.138,
+              1544704,
+              1545216,
+              3018,
+              3018,
+              0
+            ],
+            [
+              3,
+              2.022834,
+              2.035016,
+              4.73,
+              4.704,
+              1196032,
+              1196544,
+              2337,
+              2337,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 4.704
+        },
+        "nic-udp-40m-1200": {
+          "runs": [
+            [
+              1,
+              2.007648,
+              2.015866,
+              12.566,
+              12.52,
+              3153600,
+              3154800,
+              2629,
+              2629,
+              0
+            ],
+            [
+              2,
+              2.008509,
+              2.014885,
+              12.91,
+              12.874,
+              3241200,
+              3242400,
+              2702,
+              2702,
+              0
+            ],
+            [
+              3,
+              2.023706,
+              2.052457,
+              9.032,
+              8.91,
+              2284800,
+              2286000,
+              1905,
+              1905,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 12.52
+        },
+        "nic-tcp-w128k": {
+          "runs": [],
+          "errors": [
+            {
+              "repeat": 1,
+              "guest_exit": 1,
+              "message": "socket buffer size not set correctly"
+            }
+          ]
+        }
+      },
+      "server_result_recheck": "For six loopback runs interactive dash reaped the successful one-shot server before a later wait returned 127. Guest clients exited 0. The completed peer JSON was fetched from that same running snapshot and checked against the negotiated workload and actual received bytes."
+    },
+    "loongarch64": {
+      "completed": 28,
+      "failed": 1,
+      "other_host_qemu_range": [
+        1,
+        4
+      ],
+      "samples": {
+        "lo-tcp-p1": {
+          "runs": [
+            [
+              1,
+              2.098027,
+              2.109006,
+              105.456,
+              104.907,
+              27656192,
+              27656192,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.011732,
+              2.027979,
+              109.458,
+              108.581,
+              27525120,
+              27525120,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.005454,
+              2.01387,
+              174.113,
+              172.865,
+              43646976,
+              43515904,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 108.581,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "lo-tcp-p1-reverse": {
+          "runs": [
+            [
+              1,
+              2.044083,
+              2.017471,
+              97.466,
+              96.673,
+              24903680,
+              24379392,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.022715,
+              2.01121,
+              118.195,
+              118.35,
+              29884416,
+              29753344,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.005067,
+              2.001125,
+              201.864,
+              200.689,
+              50593792,
+              50200576,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 118.35,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "nic-tcp-p1": {
+          "runs": [
+            [
+              1,
+              2.024968,
+              2.03978,
+              33.141,
+              32.386,
+              8388608,
+              8257536,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.042891,
+              2.091635,
+              42.602,
+              41.609,
+              10878976,
+              10878976,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.014984,
+              2.02253,
+              60.365,
+              60.14,
+              15204352,
+              15204352,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 41.609,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "nic-tcp-p1-reverse": {
+          "runs": [
+            [
+              1,
+              2.047704,
+              2.010564,
+              53.768,
+              35.464,
+              13762560,
+              8912896,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.025828,
+              2.009807,
+              95.239,
+              86.607,
+              24117248,
+              21757952,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.025078,
+              2.007193,
+              84.918,
+              74.705,
+              21495808,
+              18743296,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 74.705,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              154936,
+              957128
+            ],
+            "mean_rtt": [
+              8576,
+              18097
+            ],
+            "retransmits": [
+              4,
+              12
+            ]
+          }
+        },
+        "nic-tcp-p4": {
+          "runs": [
+            [
+              1,
+              2.13166,
+              2.149894,
+              51.158,
+              48.773,
+              13631488,
+              13107200,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.018452,
+              2.043239,
+              99.743,
+              95.967,
+              25165824,
+              24510464,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.087858,
+              2.106409,
+              67.298,
+              65.71,
+              17563648,
+              17301504,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 65.71,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              0,
+              0
+            ],
+            "mean_rtt": [
+              0,
+              0
+            ],
+            "retransmits": [
+              0,
+              0
+            ]
+          }
+        },
+        "nic-tcp-p4-reverse": {
+          "runs": [
+            [
+              1,
+              2.067465,
+              2.03173,
+              100.929,
+              75.351,
+              26083328,
+              19136512,
+              null,
+              null,
+              null
+            ],
+            [
+              2,
+              2.023902,
+              2.014417,
+              136.777,
+              117.641,
+              34603008,
+              29622272,
+              null,
+              null,
+              null
+            ],
+            [
+              3,
+              2.068015,
+              2.038733,
+              189.128,
+              144.012,
+              48889856,
+              36700160,
+              null,
+              null,
+              null
+            ]
+          ],
+          "receiver_mbps_median": 117.641,
+          "sender_telemetry_range": {
+            "max_snd_cwnd": [
+              79640,
+              920928
+            ],
+            "mean_rtt": [
+              449,
+              30151
+            ],
+            "retransmits": [
+              0,
+              54
+            ]
+          }
+        },
+        "nic-udp-1m-512": {
+          "runs": [
+            [
+              1,
+              2.06054,
+              2.085934,
+              0.978,
+              0.968,
+              251904,
+              252416,
+              493,
+              493,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 0.968
+        },
+        "nic-udp-10m-512": {
+          "runs": [
+            [
+              1,
+              2.006736,
+              2.015245,
+              8.967,
+              8.929,
+              2249216,
+              2249216,
+              4393,
+              4393,
+              0
+            ],
+            [
+              2,
+              2.009112,
+              2.017699,
+              7.568,
+              7.535,
+              1900544,
+              1900544,
+              3712,
+              3712,
+              0
+            ],
+            [
+              3,
+              2.004334,
+              2.0089,
+              9.95,
+              9.928,
+              2492928,
+              2492928,
+              4869,
+              4869,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 8.929
+        },
+        "nic-udp-40m-512": {
+          "runs": [
+            [
+              1,
+              2.015082,
+              2.023002,
+              10.659,
+              10.62,
+              2684928,
+              2685440,
+              5245,
+              5245,
+              0
+            ],
+            [
+              2,
+              2.0172,
+              2.027513,
+              8.697,
+              8.655,
+              2192896,
+              2193408,
+              4284,
+              4284,
+              0
+            ],
+            [
+              3,
+              2.002871,
+              2.008904,
+              8.902,
+              8.875,
+              2228736,
+              2228736,
+              4353,
+              4353,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 8.875
+        },
+        "nic-udp-40m-1200": {
+          "runs": [
+            [
+              1,
+              2.020215,
+              2.026859,
+              27.172,
+              27.083,
+              6861600,
+              6861600,
+              5718,
+              5718,
+              0
+            ],
+            [
+              2,
+              2.013277,
+              2.016985,
+              16.155,
+              16.13,
+              4065600,
+              4066800,
+              3389,
+              3389,
+              0
+            ],
+            [
+              3,
+              2.003415,
+              2.009943,
+              20.552,
+              20.485,
+              5146800,
+              5146800,
+              4289,
+              4289,
+              0
+            ]
+          ],
+          "receiver_mbps_median": 20.485
+        },
+        "nic-tcp-w128k": {
+          "runs": [],
+          "errors": [
+            {
+              "repeat": 1,
+              "guest_exit": 1,
+              "message": "socket buffer size not set correctly"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "retention": "Per-endpoint JSON, stderr and guest serial streams were saved locally during this run. The individual measurements below were extracted from those files. The raw files have no public archive or retention guarantee.",
+  "udp_counts": "receiver_packets is the iperf3 receiver sequence count including inferred losses; observed datagrams = receiver_packets - reported_lost. Compare with sender_packets separately. A final datagram can be absent from the receiver count even with no reported sequence gap.",
+  "tcp_telemetry": "For normal TCP the PulseOS sender reports zero cwnd, RTT and retransmits from the stub TCP_INFO. In VirtIO reverse the Linux host is the sender. Range covers the sending streams across successful attempts.",
+  "run_columns": [
+    "repeat",
+    "sender_seconds",
+    "receiver_seconds",
+    "sender_Mbit_s",
+    "receiver_Mbit_s",
+    "sender_bytes",
+    "receiver_bytes",
+    "sender_packets",
+    "receiver_packets",
+    "reported_lost"
+  ]
+}

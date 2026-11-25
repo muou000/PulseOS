@@ -1,0 +1,27 @@
+--- a/darkhttpd.c
++++ b/darkhttpd.c
+@@ -1314,6 +1314,23 @@
+         return;
+     }
+-
++
++
++    static int observed = 0;
++    static int force_nodelay = 0;
++    if (!observed) {
++        int listener = -1, child = -1;
++        socklen_t n = sizeof(listener);
++        if (getsockopt(sockin, IPPROTO_TCP, TCP_NODELAY, &listener, &n) ||
++            getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &child, &n)) err(1, "getsockopt");
++        force_nodelay = getenv("PULSE_DIAG_REAPPLY") != NULL;
++        fprintf(stderr, "NODELAY listener=%d accepted=%d reapply=%d\n", listener, child, force_nodelay);
++        fflush(stderr);
++        observed = 1;
++    }
++    if (force_nodelay) {
++        int one = 1;
++        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one))) err(1, "setsockopt child TCP_NODELAY");
++    }
+     /* Allocate and initialize struct connection. */
+     conn = new_connection();
+     conn->socket = fd;
