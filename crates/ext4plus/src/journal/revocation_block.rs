@@ -54,12 +54,17 @@ pub(super) fn read_revocation_block_table(
                // OK to unwrap: minimum block length is 1024.
                block.len().checked_sub(4).unwrap()];
 
+    // In jbd2 (`jbd2_journal_revoke_header_t`), `r_count` is the byte offset
+    // from block start to the end of the revoke table, covering only the
+    // 12-byte journal block header and the 4-byte `r_count` field (16 bytes),
+    // not the trailing 4-byte checksum.
+    const HEADER_SIZE: usize = JournalBlockHeader::SIZE + size_of::<u32>();
+
     // Get the size (in bytes) of the block-index array.
     let r_count = usize_from_u32(read_u32be(data, 0));
 
-    // Subtract the on-disk overhead (12-byte header + 4-byte size field + 4-byte checksum tail).
     let num_bytes = r_count
-        .checked_sub(JournalBlockHeader::SIZE + 4 + 4)
+        .checked_sub(HEADER_SIZE)
         .ok_or(CorruptKind::JournalRevocationBlockInvalidTableSize(r_count))?;
 
     // Ensure that the table size is an even multiple of the index size.
@@ -127,8 +132,8 @@ mod tests {
         // Add header data (all zeros since only the length matters for this test).
         block.extend([0; JournalBlockHeader::SIZE]);
 
-        // Add size field (three 8-byte entries + 20 bytes overhead = 44).
-        block.extend(44u32.to_be_bytes());
+        // Add size field (three 8-byte entries + 16-byte revocation header = 40).
+        block.extend(40u32.to_be_bytes());
 
         // Add three entries.
         block.extend(100u64.to_be_bytes());
@@ -160,11 +165,11 @@ mod tests {
         let mut block = create_test_revocation_block();
         block[JournalBlockHeader::SIZE
             ..JournalBlockHeader::SIZE + size_of::<u32>()]
-            .copy_from_slice(&27u32.to_be_bytes());
+            .copy_from_slice(&23u32.to_be_bytes());
         let mut table = Vec::new();
         assert_eq!(
             read_revocation_block_table(&block, &mut table).unwrap_err(),
-            CorruptKind::JournalRevocationBlockInvalidTableSize(27)
+            CorruptKind::JournalRevocationBlockInvalidTableSize(23)
         );
     }
 
@@ -175,11 +180,11 @@ mod tests {
         let mut block = create_test_revocation_block();
         block[JournalBlockHeader::SIZE
             ..JournalBlockHeader::SIZE + size_of::<u32>()]
-            .copy_from_slice(&1028u32.to_be_bytes());
+            .copy_from_slice(&1024u32.to_be_bytes());
         let mut table = Vec::new();
         assert_eq!(
             read_revocation_block_table(&block, &mut table).unwrap_err(),
-            CorruptKind::JournalRevocationBlockInvalidTableSize(1028)
+            CorruptKind::JournalRevocationBlockInvalidTableSize(1024)
         );
     }
 }
