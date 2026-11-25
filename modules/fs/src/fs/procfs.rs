@@ -300,6 +300,14 @@ fn inode_as_dir(inode: &Inode) -> VfsResult<&DirContent> {
     }
 }
 
+fn snapshot_dir_entries(inode: &Inode) -> VfsResult<Vec<(String, InodeRef)>> {
+    let entries = inode_as_dir(inode)?.entries.read();
+    Ok(entries
+        .iter()
+        .map(|(name, &ino)| (name.0.clone(), ino))
+        .collect())
+}
+
 fn inode_as_file(inode: &Inode) -> VfsResult<&FileContent> {
     match &inode.content {
         NodeContent::File(content) => Ok(content),
@@ -1243,10 +1251,7 @@ impl DirNodeOps for ProcNode {
                 }
 
                 if sub == SUB_INO_DIR {
-                    let entries = inode_as_dir(&inode)?.entries.read();
-                    for (name, &ino) in entries.iter() {
-                        all_entries.push((name.0.clone(), ino));
-                    }
+                    all_entries = snapshot_dir_entries(&inode)?;
                 } else if sub == SUB_INO_TASK_DIR {
                     all_entries.push((".".to_owned(), self.ino));
                     all_entries.push((
@@ -1353,10 +1358,7 @@ impl DirNodeOps for ProcNode {
                 }
             }
         } else {
-            let entries = inode_as_dir(&inode)?.entries.read();
-            for (name, &entry) in entries.iter() {
-                all_entries.push((name.0.clone(), entry));
-            }
+            all_entries = snapshot_dir_entries(&inode)?;
 
             if self.ino == ROOT_INO {
                 if let Some(provider) = PROCESS_PROVIDER.get() {
