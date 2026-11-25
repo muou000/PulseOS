@@ -167,9 +167,8 @@ build_one_arch() (
     local archives=()
     mapfile -t archives <<< "${inputs}"
     local netbench=""
-    if [[ "${archives[-1]}" == */rootfs-tests-* ]]; then
+    if [[ "${archives[-1]}" == */rootfs-tests-* && "${name}" != visionfive2 ]]; then
         if [[ "${fetch_tools}" == yes ]]; then
-            "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch "${arch}"
             fetch_netbench "${arch}"
         fi
         netbench="$(verified_archive "${netbench_sha[${arch}]}" "${BASE_DIR}/netbench-${arch}.tar.xz")" \
@@ -197,8 +196,13 @@ build_one_arch() (
     # cleanup can always access the stage. Exec bits are preserved.
     chmod -R u+rwX "${stage_dir}"
 
-    if [[ -n "${netbench}" ]]; then
+    if [[ "${archives[-1]}" == */rootfs-tests-* ]]; then
+        if [[ "${fetch_tools}" == yes ]]; then
+            "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch "${arch}"
+        fi
         "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" install "${arch}" "${stage_dir}"
+    fi
+    if [[ -n "${netbench}" ]]; then
         echo "[${name}] Installing network tools from: ${netbench}"
         tar --no-same-owner -xaf "${netbench}" -C "${stage_dir}" ./opt/netbench
         local tool

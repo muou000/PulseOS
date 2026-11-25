@@ -104,7 +104,7 @@ for tool in iperf3 darkhttpd weighttp; do
         exit 1
     fi
     if [[ "${arch}" == riscv64 ]] && readelf -A "${elf}" | grep -E 'Tag_RISCV_arch:.*_(v[0-9]|zv)' >/dev/null; then
-        echo "Unsupported vector extension for VisionFive 2: ${elf}" >&2
+        echo "Unexpected vector extension in an rv64gc build: ${elf}" >&2
         exit 1
     fi
 done

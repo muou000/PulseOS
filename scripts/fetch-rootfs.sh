@@ -24,8 +24,8 @@ Usage:
   scripts/fetch-rootfs.sh [--tests|--base] [--arch all|riscv64|loongarch64]
 
 Options:
-  --tests          Fetch the test rootfs, bundled benchmark suites,
-                   network tools and RocksDB tools (default).
+  --tests          Fetch the test rootfs, bundled benchmark suites, RocksDB
+                   tools and (for QEMU targets) network tools (default).
   --base           Fetch minimal base rootfs tarballs without bundled tests.
   --arch ARCH      Target architecture to fetch: all (default), riscv64, loongarch64.
   -h, --help       Show this help message.
@@ -98,7 +98,9 @@ if [[ "${VARIANT}" == "tests" ]]; then
             fetch_one "${rv_tests_asset}" "${rv_tests_cache}" "${rv_tests_sha}" "${TESTS_URL}"
         fi
         "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch riscv64
-        fetch_netbench riscv64
+        if [[ "${RISCV_PLATFORM}" == qemu-virt ]]; then
+            fetch_netbench riscv64
+        fi
     fi
     if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "loongarch64" ]]; then
         fetch_one "rootfs-tests-loongarch64.tar.xz" "rootfs-tests-loongarch64.tar.xz" \

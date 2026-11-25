@@ -167,7 +167,7 @@ QEMU virt 的默认启动参数为 `-cpu max`。内核确认所有可调度 hart
 
 RISC-V QEMU 测试镜像使用 Ubuntu 官方的 `ubuntu-base-26.10-base-riscv64.tar.gz`。lmbench、LTP、sysbench、UnixBench、fio 和 liburing 测试程序取自 PulseOS 发布的 `rootfs-tests-riscv64.tar.xz`。VisionFive 2 直接使用这份完整的测试包。两份归档均可缓存在 `rootfs/base/`，分别用 `./scripts/fetch-rootfs.sh --arch riscv64` 和 `RISCV_PLATFORM=visionfive2 ./scripts/fetch-rootfs.sh --arch riscv64` 下载并校验。[Ubuntu Base 26.10](https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release/) · [PulseOS 测试制品及校验和](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261120)
 
-也可从 Release 直接下载已制好的 ext4 测试盘。RISC-V QEMU、LoongArch64 QEMU、VisionFive 2 分别对应 `disk.img.zst`、`disk-la.img.zst`、`disk-vf2.img.zst`。例如在空目录中下载 RISC-V QEMU 测试盘，校验后解压即可用于下方的 QEMU 命令。[测试镜像和 SHA256SUMS](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261125)
+Release 提供两份已预装网络工具的 QEMU ext4 测试盘。RISC-V 64 使用 `disk.img.zst`，LoongArch64 使用 `disk-la.img.zst`。以下示例在空目录中下载、校验并解压 RISC-V 64 测试盘。[测试镜像和 SHA256SUMS](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261125)
 
 ```sh
 gh release download rootfs-tests-20261125 -R muou000/PulseOS -p disk.img.zst -p SHA256SUMS
@@ -176,13 +176,13 @@ sha256sum --ignore-missing -c SHA256SUMS && zstd -d --sparse disk.img.zst -o dis
 
 ### 在来宾里测试网络
 
-| 工作负载 | 镜像内的工具 | 主要观察量 |
+| 工作负载 | 两种 QEMU 测试镜像预装的工具 | 主要观察量 |
 | --- | --- | --- |
 | TCP / UDP 传输 | `iperf3` 3.22.1 | TCP 收发吞吐，UDP 接收速率、丢包数与抖动 |
 | HTTP 静态文件服务 | `darkhttpd` 1.17 | GET 的状态码、正文和字节数 |
 | 并发 HTTP 客户端 | `weighttp` 0.5-pulse1 | 成功响应数、每秒请求数、延迟分布、连接复用次数 |
 
-三条命令均在 `/usr/bin`。测试镜像还提供 lmbench 的 `/opt/lmbench/bin/{lat_tcp,lat_udp,lat_connect,bw_tcp}`。常规制盘会下载并校验对应架构的网络工具包。提前运行 `./scripts/fetch-rootfs.sh --tests` 后可离线制盘。要从源代码重建工具包，在安装相应 Linux GNU 交叉工具链的主机运行 `./scripts/build_netbench.sh riscv64` 或 `./scripts/build_netbench.sh loongarch64`，产物位于 `target/netbench/`。[iperf3 用法](https://software.es.net/iperf/invoking.html) · [darkhttpd](https://unix4lyfe.org/darkhttpd/) · [weighttp](https://github.com/lighttpd/weighttp/tree/weighttp-0.5)
+三条命令均在 `/usr/bin`。两份测试镜像还提供 lmbench 的 `/opt/lmbench/bin/{lat_tcp,lat_udp,lat_connect,bw_tcp}`。构建 QEMU 测试盘时，`make img` 会下载并校验对应架构的网络工具包。提前运行 `./scripts/fetch-rootfs.sh --tests` 后可离线制盘。要从源代码重建工具包，在安装相应 Linux GNU 交叉工具链的主机运行 `./scripts/build_netbench.sh riscv64` 或 `./scripts/build_netbench.sh loongarch64`，产物位于 `target/netbench/`。[iperf3 用法](https://software.es.net/iperf/invoking.html) · [darkhttpd](https://unix4lyfe.org/darkhttpd/) · [weighttp](https://github.com/lighttpd/weighttp/tree/weighttp-0.5)
 
 在同一个来宾 shell 中运行以下命令即可测 IPv4 回环。iperf3 的 `receiver` 行给出接收端实际结果，添加 `-J` 可保存 JSON。
 

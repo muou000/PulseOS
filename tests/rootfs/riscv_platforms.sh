@@ -96,17 +96,25 @@ echo 'truncated overlay' > "${net_cache}"
 scripts/build_img.sh --fetch riscv64
 cmp netbench-riscv64.tar.xz "${net_cache}"
 
-# Both images build with only the cached archives available.
+# VF2 can fetch its own inputs and build with the QEMU-only overlay absent.
 printf '#!/bin/sh\nexit 1\n' > fixture-bin/curl
-RISCV_PLATFORM=visionfive2 scripts/build_img.sh --fetch riscv64
+rm "${net_cache}"
+RISCV_PLATFORM=visionfive2 scripts/fetch-rootfs.sh --tests --arch riscv64
+RISCV_PLATFORM=visionfive2 make --no-print-directory -C "${repo}" img ARCH=riscv64 \
+    A="${scratch}" APP="${repo}" OUTPUT_DIR="${scratch}"
+cmp disk-vf2.img rootfs-visionfive2.img
+cp netbench-riscv64.tar.xz "${net_cache}"
+RISCV_PLATFORM=visionfive2 scripts/build_img.sh riscv64
+debugfs -R 'stat /opt/netbench' rootfs-visionfive2.img 2>&1 | grep -F 'File not found'
+for name in "${net_tools[@]}"; do
+    debugfs -R "stat /usr/bin/${name}" rootfs-visionfive2.img 2>&1 | grep -F 'File not found'
+    debugfs -R "cat /opt/netbench/bin/${name}" rootfs-riscv64.img 2>/dev/null | cmp - tool
+    debugfs -R "stat /usr/bin/${name}" rootfs-riscv64.img 2>/dev/null | grep -F "Fast link dest: \"/opt/netbench/bin/${name}\""
+done
+debugfs -R 'cat /opt/netbench/www/index.html' rootfs-riscv64.img 2>/dev/null | grep -Fx 'network test fixture'
+debugfs -R 'cat /opt/netbench/licenses/fixture' rootfs-riscv64.img 2>/dev/null | grep -Fx 'network tool license'
 for image in rootfs-riscv64.img rootfs-visionfive2.img; do
     debugfs -R 'cat /opt/io_uring/liburing-tests/MANIFEST.txt' "${image}" 2>/dev/null | grep -Fx suite
-    for name in "${net_tools[@]}"; do
-        debugfs -R "cat /opt/netbench/bin/${name}" "${image}" 2>/dev/null | cmp - tool
-        debugfs -R "stat /usr/bin/${name}" "${image}" 2>/dev/null | grep -F "Fast link dest: \"/opt/netbench/bin/${name}\""
-    done
-    debugfs -R 'cat /opt/netbench/www/index.html' "${image}" 2>/dev/null | grep -Fx 'network test fixture'
-    debugfs -R 'cat /opt/netbench/licenses/fixture' "${image}" 2>/dev/null | grep -Fx 'network tool license'
     for name in "${tools[@]}"; do
         debugfs -R "stat /usr/bin/${name}" "${image}" 2>/dev/null | grep -F 'Mode:  0755'
         debugfs -R "cat /usr/bin/${name}" "${image}" 2>/dev/null | \
@@ -125,7 +133,7 @@ debugfs -R 'cat /etc/issue' rootfs-visionfive2.img 2>/dev/null | grep -Fx 'Ubunt
 mv rootfs/base/rootfs-tests-20261120-riscv64.tar.xz "${old}"
 scripts/build_img.sh --fetch riscv64
 
-# A test image always needs a verified network overlay, even with auto selection.
+# A QEMU test image needs a verified network overlay, even with auto selection.
 echo 'truncated overlay' > "${net_cache}"
 for fault in corrupt missing; do
     [[ "${fault}" != missing ]] || rm "${net_cache}"

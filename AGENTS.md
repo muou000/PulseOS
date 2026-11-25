@@ -32,7 +32,7 @@
 
 - **测试镜像**：优先使用包含预装测试套件的测试 rootfs 镜像（通过 `./scripts/fetch-rootfs.sh` 与 `./scripts/build_img.sh all`，或 `make img ARCH=riscv64` / `make img ARCH=loongarch64` 生成 `disk.img` / `disk-la.img`）。镜像内已包含 `lmbench`（`/opt/lmbench/bin` 及 `/bin/{bw_pipe,lat_pipe,lat_syscall}`）、`LTP`（`/opt/ltp`）、`sysbench`（`/usr/bin/sysbench`）、`UnixBench`（`/opt/unixbench`）、`fio`（`/usr/bin/fio`）、`liburing` 核心测试子集（`/opt/io_uring/liburing-tests`）和 RocksDB（[来宾基准命令](README.md#在来宾里测试-rocksdb)）。
 - **测试选型**：验证功能与性能指标时，优先选用上述预装的第三方标准测试套件（`UnixBench`、`lmbench`、`LTP`、`sysbench`、`fio`、`liburing`、RocksDB）；仅当第三方套件中没有能够针对性展示当前优化点或功能行为的用例时，才编写自定义测试。
-- **网络测试**：TCP/UDP 吞吐与丢包使用 iperf3，并发 HTTP 使用 darkhttpd 和 weighttp。回环与 VirtIO 两种路径的命令和成功判据见[来宾网络测试](README.md#在来宾里测试网络)。
+- **QEMU 网络测试** 在 RISC-V 64 和 LoongArch64 测试镜像中，使用 `iperf3` 测 TCP/UDP 吞吐与 UDP 丢包，使用 `darkhttpd` 和 `weighttp` 测并发 HTTP。回环与 VirtIO 路径的命令和成功判据见[来宾网络测试](README.md#在来宾里测试网络)。
 
 新工作树先按 [README 的 QEMU 运行步骤](README.md#运行测试-qemu) 建立 `kernel-rv` 和 `kernel-la` 链接。使用以下命令启动来宾。
 
