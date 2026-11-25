@@ -1,0 +1,116 @@
+{
+  "date": "2026-11-25",
+  "question": "Does a timed access loop using the direct monotonic syscall preserve the resident-page and latency observations made with libc clock_gettime?",
+  "related_issue": "https://github.com/muou000/PulseOS/issues/299",
+  "protocol": "One boot per variant, one full warmup followed by three measured invocations. The four boots ran sequentially on a shared host. Warmup results are excluded from timing medians.",
+  "guest_command": "/opt/mmbench/bin/anon_sysclock",
+  "source": {
+    "release_tag": "rootfs-mm-tests-20261125",
+    "path": "tests/mmbench/anon_residency.c",
+    "original_sha256": "af9107bd16d2afdcfa3558363788a98f58ceb2a38e4bd08cb9762feb06c3a798",
+    "test_source_sha256": "f18c61fc16dd4d5b124d1af610970d4dd7ce5578c67d33eca1b9cb6b54dd96c6",
+    "diff": ["--- released/anon_residency.c", "+++ syscall/anon_residency.c", "@@ -5,6 +5,7 @@", " #include <stdlib.h>", " #include <string.h>", " #include <sys/mman.h>", "+#include <sys/syscall.h>", " #include <sys/resource.h>", " #include <time.h>", " #include <unistd.h>", "@@ -20,7 +21,7 @@", " static uint64_t monotonic_ns(void)", " {", "     struct timespec now;", "-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)", "+    if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &now) != 0)", "         fail(\"clock_gettime(CLOCK_MONOTONIC)\");", "     return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;", " }"],
+    "cc_flags": "-O2 -march=<rv64gc|loongarch64> -mabi=lp64d -static -s -Wall -Wextra",
+    "disk_preparation": "cp --reflink=auto --sparse=always original.img copy.img; debugfs -w -R 'write anon_sysclock /opt/mmbench/bin/anon_sysclock' copy.img"
+  },
+  "sample_columns": ["sparse_ns", "dense_after_sparse_ns", "zero_readback_ns", "host_load_1min", "host_qemu_processes_including_guest"],
+  "phase_order": ["warmup", "baseline", "reserved", "sparse", "dense", "discarded", "zero_readback", "unmapped"],
+  "residency_scope": "mincore bit 0 within the private 16 MiB mapping; all four invocations per boot must return success after explicit zero-readback validation",
+  "new_disks": {
+    "riscv64": {
+      "original_raw_sha256": "59b2a88a709a1dec82e50392b52ec392ac217a03f9c8a51e66be935038e114b0",
+      "copy_after_injection_sha256": "9f263397eae751a390bbac8d0e49fcd3beb5e67787f622e1a8d4cbab8c2a76a8",
+      "bytes": 4087349248,
+      "injected_executable_sha256": "e2610b9c93bae23c983ca2bc25036bda1d3fde886322d4c2a337c3036de7ceb9",
+      "cc_version": "riscv64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+    },
+    "loongarch64": {
+      "original_raw_sha256": "2ea74c39c441ea02ce41090456eab892cb3852272ded3bc41b15cdd249761d1c",
+      "copy_after_injection_sha256": "837d2b2854f523caa6e1868da84a489ba11ccddc9e8654147810f2ae5bdf65b4",
+      "bytes": 4708106240,
+      "injected_executable_sha256": "378512a5e22f63665a6069eacc6ba1100b255f587308f4cc41125ae61872f1e0",
+      "cc_version": "loongarch64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0"
+    }
+  },
+  "boots": {
+    "rv-default": {
+      "arch": "riscv64",
+      "batch_pages": 4,
+      "start_utc": "2026-11-25T14:08:30.309163+00:00",
+      "kernel_sha256": "58a3a18d2af7b25c7f77068dddd351b07ebafa4bedd83c996e5ce51cb73151ef",
+      "kernel_manifest_sha256": "1da1b011896e89475c376af0cb90957fbabf84aa41ea587f910982ee394bf62c",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "guest_exit_codes_warmup_then_measured": [0, 0, 0, 0],
+      "resident_pages_all_four_runs": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+      "samples": [
+        [11489500, 38503700, 49904300, 3.373, 2],
+        [14471300, 48834200, 59804900, 3.373, 2],
+        [12017300, 35132900, 47135400, 3.373, 2]
+      ],
+      "syscall_median_ns": [12017300, 38503700, 49904300],
+      "libc_reversed_order_six_run_median_ns": [28635150.0, 87041550.0, 143158100.0]
+    },
+    "rv-batch1": {
+      "arch": "riscv64",
+      "batch_pages": 1,
+      "start_utc": "2026-11-25T14:08:34.963887+00:00",
+      "kernel_sha256": "af2b128e9fc3b939040717be6ac207f6eb85af95b390ccadc7b9a08a840da0ff",
+      "kernel_manifest_sha256": "c0299e76dbc8aa907cbc41fd6767f795e2bfd77b859a21c9236b6d08ca588142",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "guest_exit_codes_warmup_then_measured": [0, 0, 0, 0],
+      "resident_pages_all_four_runs": [0, 0, 0, 256, 4096, 0, 4096, 0],
+      "samples": [
+        [7393200, 102695100, 108379700, 3.583, 2],
+        [6553200, 104392800, 106800400, 3.583, 2],
+        [6540800, 96450800, 106722100, 3.583, 2]
+      ],
+      "syscall_median_ns": [6553200, 102695100, 106800400],
+      "libc_reversed_order_six_run_median_ns": [17954650.0, 216706750.0, 229790850.0]
+    },
+    "la-batch1": {
+      "arch": "loongarch64",
+      "batch_pages": 1,
+      "start_utc": "2026-11-25T14:08:39.985672+00:00",
+      "kernel_sha256": "60027022f9b79efa53df0c7af7526383246ba675067fb1e1e8c61e945ce5c549",
+      "kernel_manifest_sha256": "b0fee1b173f2b4c5fb7f5864476bb8d61f3b0c60c772d58f11c3cade18cfb179",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "guest_exit_codes_warmup_then_measured": [0, 0, 0, 0],
+      "resident_pages_all_four_runs": [0, 0, 0, 256, 4096, 0, 4096, 0],
+      "samples": [
+        [1641040, 27421830, 42166880, 3.583, 2],
+        [1563880, 42037020, 40937840, 3.583, 2],
+        [3303290, 40105560, 31228940, 3.583, 2]
+      ],
+      "syscall_median_ns": [1641040, 40105560, 40937840],
+      "libc_reversed_order_six_run_median_ns": [3597590.0, 97181330.0, 85706335.0]
+    },
+    "la-default": {
+      "arch": "loongarch64",
+      "batch_pages": 4,
+      "start_utc": "2026-11-25T14:08:42.084558+00:00",
+      "kernel_sha256": "845eb9a9198d3fb77ad5d48d072351f878d8b7aeb19f8ccc46ee558509d79465",
+      "kernel_manifest_sha256": "734b115b82cc8dca2ee66f9fef495a2fde48ac084ecf2feea2ebe4605b732285",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "guest_exit_codes_warmup_then_measured": [0, 0, 0, 0],
+      "resident_pages_all_four_runs": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+      "samples": [
+        [3337960, 19368890, 18663650, 4.098, 2],
+        [6247320, 18595560, 27966270, 4.098, 2],
+        [4389220, 18655320, 21475380, 4.098, 2]
+      ],
+      "syscall_median_ns": [4389220, 18655320, 21475380],
+      "libc_reversed_order_six_run_median_ns": [8273605.0, 53055900.0, 64784175.0]
+    }
+  },
+  "comparison": {
+    "riscv64": {
+      "syscall_batch1_vs_4_pct": [-45.5, 166.7, 114.0],
+      "libc_reversed_order_six_run_batch1_vs_4_pct": [-37.3, 149.0, 60.5]
+    },
+    "loongarch64": {
+      "syscall_batch1_vs_4_pct": [-62.6, 115.0, 90.6],
+      "libc_reversed_order_six_run_batch1_vs_4_pct": [-56.5, 83.2, 32.3]
+    }
+  },
+  "interpretation": "Both clocks and both architectures show fewer sparse-write resident pages and shorter sparse-write median time with one-page batches. Dense write after sparse and sequential zero-readback take longer with one-page batches. Boot order, host load, and sample count differ between clock series. These are directional workload comparisons. Per-call clock offsets were outside the measurement."
+}

@@ -1,0 +1,10 @@
+--- a/src/weighttp.c
++++ b/src/weighttp.c
+@@ -843,5 +843,6 @@
+             /*(might not be correct for real clients, but ok for load test)*/
+             struct linger l = { .l_onoff = 1, .l_linger = 0 };
+-            if (0 != setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof(l)))
++            if (0 != setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof(l))
++                && errno != ENOPROTOOPT)
+                 client_perror(client, "setsockopt() SO_LINGER");
+         }

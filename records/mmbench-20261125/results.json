@@ -1,0 +1,828 @@
+{
+  "date": "2026-11-25",
+  "release_tag": "rootfs-mm-tests-20261125",
+  "host": {
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "cpu_model": "AMD Ryzen 7 8845H w/ Radeon 780M Graphics",
+    "logical_cpus": 12
+  },
+  "environment": {
+    "machine": "virt",
+    "memory_GiB": 8,
+    "vcpus": 8,
+    "snapshot": true,
+    "riscv64_cpu": "max",
+    "loongarch64_cpu": "QEMU virt default",
+    "disk_transports": {
+      "riscv64": "virtio-mmio",
+      "loongarch64": "virtio-pci"
+    },
+    "host_isolation": "Shared host. Timing includes scheduling and concurrent workloads; groups executed serially.",
+    "host_samples_order": ["one_minute_loadavg_before_command", "qemu_system_processes_including_guest_before_command"]
+  },
+  "comparison": {
+    "file": "modules/mm/src/backend/alloc.rs",
+    "constant": "MAX_FAULT_BATCH_PAGES",
+    "default": 4,
+    "experimental": 1,
+    "experimental_diff_sha256": "b1fe4c6be5478cd3ed611946ec7250225095b055e99b97862704b92f37fa045f"
+  },
+  "probe": {
+    "command": "/opt/mmbench/bin/anon_residency",
+    "region_bytes": 16777216,
+    "page_bytes": 4096,
+    "stride_bytes": 65536,
+    "phase_order": ["warmup", "baseline", "reserved", "sparse", "dense", "discarded", "zero_readback", "unmapped"],
+    "mapped_pages": [0, 0, 4096, 4096, 4096, 4096, 4096, 0],
+    "accessed_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+    "touch_ns_order": ["sparse", "dense", "zero_readback"],
+    "timing": "CLOCK_MONOTONIC around the access loop only. The dense write follows the sparse write. After discard, one previously written byte per page must read back zero for the probe to exit successfully.",
+    "resident_pages_scope": "mincore bit 0 for the probe mapping; accounting profiles are process-wide",
+    "host_linux_reference": {
+      "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+      "vm_size_kib": [1168, 1168, 17552, 17552, 17552, 17552, 17552, 1168],
+      "vm_rss_kib": [768, 768, 768, 1792, 17152, 824, 824, 824],
+      "maxrss_kib": [1808, 1808, 1808, 1808, 17152, 17152, 17152, 17152],
+      "minflt": [85, 85, 85, 341, 4181, 4181, 8277, 8277],
+      "majflt": [0, 0, 0, 0, 0, 0, 0, 0]
+    }
+  },
+  "sqlite": {
+    "command": "/opt/mmbench/bin/speedtest1 --memdb --testset main --size 5 --verify --stats",
+    "version": "3.54.1",
+    "host_reference": {
+      "total_s": 0.111,
+      "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+      "peak_sqlite_memory_bytes": 3499128,
+      "pager_heap_bytes": 1380664,
+      "page_cache_hits": 187413,
+      "page_cache_misses": 0
+    }
+  },
+  "default_only": {
+    "ltp_version": "20260930",
+    "ltp_commands": ["brk01", "mincore03", "mmap01", "mremap01"],
+    "bw_mem_command": "/opt/lmbench/bin/bw_mem -P 1 -N 5 8M frd"
+  },
+  "disks": {
+    "rootfs-riscv64.img": {
+      "raw_bytes": 4087349248,
+      "raw_sha256": "59b2a88a709a1dec82e50392b52ec392ac217a03f9c8a51e66be935038e114b0",
+      "release_asset": "disk.img.zst",
+      "compressed_sha256": "5cc9d32996eb89e8cecdcc1bdf03ef74f7ec967f9dcbc3880f73880f26efc6f2"
+    },
+    "rootfs-loongarch64.img": {
+      "raw_bytes": 4708106240,
+      "raw_sha256": "2ea74c39c441ea02ce41090456eab892cb3852272ded3bc41b15cdd249761d1c",
+      "release_asset": "disk-la.img.zst",
+      "compressed_sha256": "434aa3f57187a16d679955d69e491bb0c816f09f3547cc98bcccf0b81c432129"
+    }
+  },
+  "groups": {
+    "rv-default": {
+      "arch": "riscv64",
+      "max_fault_batch_pages": 4,
+      "start_utc": "2026-11-25T13:58:12.566818+00:00",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "cpu_ids_initialized": [0, 1, 2, 3, 4, 5, 6, 7],
+      "guest_online_sysfs_readable": false,
+      "kernel": {
+        "boot_format": "bin",
+        "boot_sha256": "58a3a18d2af7b25c7f77068dddd351b07ebafa4bedd83c996e5ce51cb73151ef",
+        "elf_sha256": "2d3b946b7c066533a719741b6cdd884aaf9e3cc6bb0ecf91b5bbb624cba6e93d",
+        "manifest_sha256": "1da1b011896e89475c376af0cb90957fbabf84aa41ea587f910982ee394bf62c",
+        "source_commit": "39e61bab5903b773666d54123b51f66aa2ab8101",
+        "source_tree_sha256": "9cb46dd5e21ea929356d397b047545f0ad270b0047e70c17ce15351ec179b5af",
+        "source_dirty": false,
+        "axconfig_sha256": "7881b7a450e526092a0d0772f2a72ff9e4818b1fe6c31007a5190d33c0b79721"
+      },
+      "raw_disk": "rootfs-riscv64.img",
+      "host_samples": {
+        "brk01": [21.25, 3],
+        "mincore03": [21.25, 3],
+        "mmap01": [21.25, 3],
+        "mremap01": [21.25, 3],
+        "probe1": [21.25, 3],
+        "sqlite1": [21.23, 3],
+        "probe2": [21.612, 3],
+        "sqlite2": [21.612, 3],
+        "probe3": [21.894, 4],
+        "sqlite3": [21.894, 4],
+        "probe4": [22.062, 5],
+        "probe5": [22.062, 5],
+        "bw": [22.062, 5]
+      },
+      "ltp": {
+        "brk01": {
+          "rc": 0,
+          "counts": {
+            "passed": 2,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["libc TPASS brk() works fine", "syscall TPASS brk() works fine"]
+        },
+        "mincore03": {
+          "rc": 0,
+          "counts": {
+            "passed": 2,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["TPASS mincore() reports untouched pages are not resident", "TPASS mincore() reports locked pages are resident"]
+        },
+        "mmap01": {
+          "rc": 0,
+          "counts": {
+            "passed": 1,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["TPASS Specified pattern not found in file"]
+        },
+        "mremap01": {
+          "rc": 0,
+          "counts": {
+            "passed": 1,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["TPASS Functionality of mremap() is correct"]
+        }
+      },
+      "bw_mem": {
+        "rc": 0,
+        "size_MB_reported": 8.39,
+        "MB_per_s": 1599.04
+      },
+      "probe_runs": [
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [28403300, 124487900, 223857900],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [60640900, 108203300, 100606900],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [23615400, 81820500, 112896400],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [60494200, 234065200, 185627300],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [26070100, 152288000, 139508600],
+          "accounting_profile_index": 0
+        }
+      ],
+      "probe_accounting_profiles": [
+        {
+          "vm_size_kib": [8932, 8932, 25316, 25316, 25316, 25316, 25316, 8932],
+          "vm_rss_kib": [8932, 8932, 25316, 25316, 25316, 25316, 25316, 8932],
+          "maxrss_kib": [0, 0, 0, 0, 0, 0, 0, 0],
+          "minflt": [0, 0, 0, 0, 0, 0, 0, 0],
+          "majflt": [0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ],
+      "sqlite_runs": [
+        {
+          "rc": 0,
+          "total_s": 6.69,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 7.019,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 6.776,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        }
+      ]
+    },
+    "rv-batch1": {
+      "arch": "riscv64",
+      "max_fault_batch_pages": 1,
+      "start_utc": "2026-11-25T13:59:39.838934+00:00",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "cpu_ids_initialized": [0, 1, 2, 3, 4, 5, 6, 7],
+      "guest_online_sysfs_readable": false,
+      "kernel": {
+        "boot_format": "bin",
+        "boot_sha256": "af2b128e9fc3b939040717be6ac207f6eb85af95b390ccadc7b9a08a840da0ff",
+        "elf_sha256": "3374f1527cf77c8b40a2f4cdd34e4f9db075af4f4e686d1cc81d3371c8774066",
+        "manifest_sha256": "c0299e76dbc8aa907cbc41fd6767f795e2bfd77b859a21c9236b6d08ca588142",
+        "source_commit": "39e61bab5903b773666d54123b51f66aa2ab8101",
+        "source_tree_sha256": "acd29afd43324a736c3c2c01ffeec57275ee626f60c9252f45aba1d4a4e62f38",
+        "source_dirty": true,
+        "axconfig_sha256": "7881b7a450e526092a0d0772f2a72ff9e4818b1fe6c31007a5190d33c0b79721"
+      },
+      "raw_disk": "rootfs-riscv64.img",
+      "host_samples": {
+        "probe1": [15.301, 3],
+        "sqlite1": [15.301, 3],
+        "probe2": [14.796, 3],
+        "sqlite2": [14.796, 3],
+        "probe3": [14.171, 3],
+        "sqlite3": [14.171, 3],
+        "probe4": [13.917, 3],
+        "probe5": [13.917, 3]
+      },
+      "probe_runs": [
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [11595800, 181934700, 188558900],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [8415700, 178303800, 154739600],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [7616100, 129611400, 139071400],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [10354100, 153479000, 187855200],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [12426500, 178632800, 186534900],
+          "accounting_profile_index": 0
+        }
+      ],
+      "probe_accounting_profiles": [
+        {
+          "vm_size_kib": [8932, 8932, 25316, 25316, 25316, 25316, 25316, 8932],
+          "vm_rss_kib": [8932, 8932, 25316, 25316, 25316, 25316, 25316, 8932],
+          "maxrss_kib": [0, 0, 0, 0, 0, 0, 0, 0],
+          "minflt": [0, 0, 0, 0, 0, 0, 0, 0],
+          "majflt": [0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ],
+      "sqlite_runs": [
+        {
+          "rc": 0,
+          "total_s": 3.893,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 3.22,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 3.728,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        }
+      ]
+    },
+    "la-batch1": {
+      "arch": "loongarch64",
+      "max_fault_batch_pages": 1,
+      "start_utc": "2026-11-25T13:59:59.402617+00:00",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "cpu_ids_initialized": [0, 1, 2, 3, 4, 5, 6, 7],
+      "guest_online_sysfs_readable": false,
+      "kernel": {
+        "boot_format": "elf",
+        "boot_sha256": "60027022f9b79efa53df0c7af7526383246ba675067fb1e1e8c61e945ce5c549",
+        "elf_sha256": "60027022f9b79efa53df0c7af7526383246ba675067fb1e1e8c61e945ce5c549",
+        "manifest_sha256": "b0fee1b173f2b4c5fb7f5864476bb8d61f3b0c60c772d58f11c3cade18cfb179",
+        "source_commit": "39e61bab5903b773666d54123b51f66aa2ab8101",
+        "source_tree_sha256": "acd29afd43324a736c3c2c01ffeec57275ee626f60c9252f45aba1d4a4e62f38",
+        "source_dirty": true,
+        "axconfig_sha256": "f0d2253ca0a0e11f950040dc439d986aedd86fcf7727348737947d1bd57e463a"
+      },
+      "raw_disk": "rootfs-loongarch64.img",
+      "host_samples": {
+        "probe1": [13.917, 3],
+        "sqlite1": [13.917, 3],
+        "probe2": [14.324, 4],
+        "sqlite2": [14.324, 4],
+        "probe3": [14.324, 4],
+        "sqlite3": [14.779, 4],
+        "probe4": [14.779, 4],
+        "probe5": [14.779, 4]
+      },
+      "probe_runs": [
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [8872110, 64792820, 99449580],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [2528940, 69737170, 106583220],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [5150610, 87464850, 65295440],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [2421620, 74997920, 87114170],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 256, 4096, 0, 4096, 0],
+          "touch_ns": [4074620, 84438630, 126029270],
+          "accounting_profile_index": 0
+        }
+      ],
+      "probe_accounting_profiles": [
+        {
+          "vm_size_kib": [9048, 9048, 25432, 25432, 25432, 25432, 25432, 9048],
+          "vm_rss_kib": [9048, 9048, 25432, 25432, 25432, 25432, 25432, 9048],
+          "maxrss_kib": [0, 0, 0, 0, 0, 0, 0, 0],
+          "minflt": [0, 0, 0, 0, 0, 0, 0, 0],
+          "majflt": [0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ],
+      "sqlite_runs": [
+        {
+          "rc": 0,
+          "total_s": 2.408,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 2.209,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 2.211,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        }
+      ]
+    },
+    "la-default": {
+      "arch": "loongarch64",
+      "max_fault_batch_pages": 4,
+      "start_utc": "2026-11-25T14:00:10.955662+00:00",
+      "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+      "cpu_ids_initialized": [0, 1, 2, 3, 4, 5, 6, 7],
+      "guest_online_sysfs_readable": false,
+      "kernel": {
+        "boot_format": "elf",
+        "boot_sha256": "845eb9a9198d3fb77ad5d48d072351f878d8b7aeb19f8ccc46ee558509d79465",
+        "elf_sha256": "845eb9a9198d3fb77ad5d48d072351f878d8b7aeb19f8ccc46ee558509d79465",
+        "manifest_sha256": "734b115b82cc8dca2ee66f9fef495a2fde48ac084ecf2feea2ebe4605b732285",
+        "source_commit": "39e61bab5903b773666d54123b51f66aa2ab8101",
+        "source_tree_sha256": "9cb46dd5e21ea929356d397b047545f0ad270b0047e70c17ce15351ec179b5af",
+        "source_dirty": false,
+        "axconfig_sha256": "f0d2253ca0a0e11f950040dc439d986aedd86fcf7727348737947d1bd57e463a"
+      },
+      "raw_disk": "rootfs-loongarch64.img",
+      "host_samples": {
+        "brk01": [15.678, 4],
+        "mincore03": [15.678, 4],
+        "mmap01": [15.678, 4],
+        "mremap01": [15.678, 4],
+        "probe1": [15.678, 4],
+        "sqlite1": [15.678, 4],
+        "probe2": [16.024, 4],
+        "sqlite2": [16.024, 4],
+        "probe3": [16.024, 4],
+        "sqlite3": [16.024, 4],
+        "probe4": [16.183, 4],
+        "probe5": [16.183, 4],
+        "bw": [16.183, 4]
+      },
+      "ltp": {
+        "brk01": {
+          "rc": 0,
+          "counts": {
+            "passed": 2,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["libc TPASS brk() works fine", "syscall TPASS brk() works fine"]
+        },
+        "mincore03": {
+          "rc": 0,
+          "counts": {
+            "passed": 2,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["TPASS mincore() reports untouched pages are not resident", "TPASS mincore() reports locked pages are resident"]
+        },
+        "mmap01": {
+          "rc": 0,
+          "counts": {
+            "passed": 1,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["TPASS Specified pattern not found in file"]
+        },
+        "mremap01": {
+          "rc": 0,
+          "counts": {
+            "passed": 1,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+            "warnings": 0
+          },
+          "subtests": ["TPASS Functionality of mremap() is correct"]
+        }
+      },
+      "bw_mem": {
+        "rc": 0,
+        "size_MB_reported": 8.39,
+        "MB_per_s": 1352.1
+      },
+      "probe_runs": [
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [5804980, 33477490, 64496080],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [5212010, 44116890, 47913140],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [8697550, 27282720, 44404650],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [9025220, 27503110, 28840340],
+          "accounting_profile_index": 0
+        },
+        {
+          "rc": 0,
+          "resident_pages": [0, 0, 0, 1024, 4096, 0, 4096, 0],
+          "touch_ns": [8394940, 22029030, 37905430],
+          "accounting_profile_index": 0
+        }
+      ],
+      "probe_accounting_profiles": [
+        {
+          "vm_size_kib": [9048, 9048, 25432, 25432, 25432, 25432, 25432, 9048],
+          "vm_rss_kib": [9048, 9048, 25432, 25432, 25432, 25432, 25432, 9048],
+          "maxrss_kib": [0, 0, 0, 0, 0, 0, 0, 0],
+          "minflt": [0, 0, 0, 0, 0, 0, 0, 0],
+          "majflt": [0, 0, 0, 0, 0, 0, 0, 0]
+        }
+      ],
+      "sqlite_runs": [
+        {
+          "rc": 0,
+          "total_s": 2.298,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 1.889,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        },
+        {
+          "rc": 0,
+          "total_s": 1.973,
+          "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+          "peak_sqlite_memory_bytes": 3499128,
+          "pager_heap_bytes": 1380664,
+          "page_cache_hits": 187413,
+          "page_cache_misses": 0
+        }
+      ]
+    }
+  },
+  "paired_first_touch": {
+    "repetitions": "Two boots per architecture and batch size. One complete untimed-for-summary warmup per boot, then three samples. Order reverses within each architecture.",
+    "sample_columns": [
+      "sparse_ns",
+      "dense_after_sparse_ns",
+      "zero_readback_ns",
+      "host_load_1min",
+      "host_qemu_process_count"
+    ],
+    "boots": [
+      {
+        "boot": 0,
+        "arch": "riscv64",
+        "batch_pages": 4,
+        "samples": [
+          [
+            38384500,
+            82436900,
+            158475900,
+            20.92626953125,
+            5
+          ],
+          [
+            23298200,
+            105343800,
+            164221300,
+            20.92626953125,
+            5
+          ],
+          [
+            55214500,
+            185926000,
+            182177600,
+            20.92626953125,
+            4
+          ]
+        ]
+      },
+      {
+        "boot": 1,
+        "arch": "riscv64",
+        "batch_pages": 1,
+        "samples": [
+          [
+            13974900,
+            181391000,
+            213400700,
+            20.671875,
+            3
+          ],
+          [
+            19308800,
+            244432400,
+            224894600,
+            20.671875,
+            3
+          ],
+          [
+            12327400,
+            193908700,
+            230820800,
+            20.671875,
+            3
+          ]
+        ]
+      },
+      {
+        "boot": 2,
+        "arch": "loongarch64",
+        "batch_pages": 1,
+        "samples": [
+          [
+            3270430,
+            101517020,
+            84793180,
+            20.05712890625,
+            3
+          ],
+          [
+            2127190,
+            99652580,
+            86619490,
+            20.05712890625,
+            3
+          ],
+          [
+            7520320,
+            94710080,
+            102294940,
+            20.05712890625,
+            3
+          ]
+        ]
+      },
+      {
+        "boot": 3,
+        "arch": "loongarch64",
+        "batch_pages": 4,
+        "samples": [
+          [
+            9132860,
+            52174980,
+            76856920,
+            20.05224609375,
+            3
+          ],
+          [
+            10311370,
+            55276970,
+            64644250,
+            20.05224609375,
+            3
+          ],
+          [
+            10123820,
+            40901660,
+            45726750,
+            20.05224609375,
+            3
+          ]
+        ]
+      },
+      {
+        "boot": 4,
+        "arch": "riscv64",
+        "batch_pages": 1,
+        "samples": [
+          [
+            19338000,
+            261544000,
+            293456700,
+            19.6689453125,
+            3
+          ],
+          [
+            17564600,
+            217131600,
+            228760900,
+            19.6689453125,
+            3
+          ],
+          [
+            18344700,
+            216281900,
+            234466000,
+            19.53515625,
+            3
+          ]
+        ]
+      },
+      {
+        "boot": 5,
+        "arch": "riscv64",
+        "batch_pages": 4,
+        "samples": [
+          [
+            29397400,
+            81906800,
+            93418100,
+            19.4921875,
+            3
+          ],
+          [
+            27872900,
+            91646200,
+            109092200,
+            18.89208984375,
+            3
+          ],
+          [
+            20361500,
+            80470900,
+            127840300,
+            18.89208984375,
+            3
+          ]
+        ]
+      },
+      {
+        "boot": 6,
+        "arch": "loongarch64",
+        "batch_pages": 4,
+        "samples": [
+          [
+            7414350,
+            57678790,
+            64924100,
+            18.89208984375,
+            3
+          ],
+          [
+            7148770,
+            32959440,
+            65482750,
+            18.89208984375,
+            3
+          ],
+          [
+            5967020,
+            53936820,
+            53556470,
+            18.89208984375,
+            3
+          ]
+        ]
+      },
+      {
+        "boot": 7,
+        "arch": "loongarch64",
+        "batch_pages": 1,
+        "samples": [
+          [
+            10482910,
+            118504050,
+            104295680,
+            19.46142578125,
+            3
+          ],
+          [
+            3924750,
+            73221580,
+            60274640,
+            19.46142578125,
+            3
+          ],
+          [
+            2632390,
+            53107070,
+            72009460,
+            19.46142578125,
+            3
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -8,7 +8,7 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "${scratch}"' EXIT
 cd "${scratch}"
 mkdir -p scripts rootfs/base qemu/etc vf2/etc fixture-bin
-cp "${repo}"/scripts/{build_img,fetch-rootfs,rootfs-riscv64,rootfs-rocksdb}.sh scripts/
+cp "${repo}"/scripts/{build_img,fetch-rootfs,rootfs-archives,rootfs-rocksdb}.sh scripts/
 export ROOTFS_VARIANT=tests IMG_SIZE=8M RISCV_PLATFORM=qemu-virt
 echo 'Ubuntu 26.10' > qemu/etc/issue
 echo 'Ubuntu 24.04.5' > vf2/etc/issue
@@ -37,6 +37,19 @@ CONTROL
 echo 'fixture license' > deb/usr/share/doc/fixture/copyright
 echo '.global _start; _start: ret' | riscv64-linux-gnu-as -march=rv64gc -mabi=lp64d -o tool.o
 riscv64-linux-gnu-ld -o tool tool.o
+net_tools=(iperf3 darkhttpd weighttp)
+mkdir -p net/opt/netbench/{bin,licenses,www}
+for name in "${net_tools[@]}"; do
+    cp tool "net/opt/netbench/bin/${name}"
+done
+echo 'network test fixture' > net/opt/netbench/www/index.html
+echo 'network tool license' > net/opt/netbench/licenses/fixture
+tar -cJf netbench-riscv64.tar.xz -C net ./opt/netbench
+mm_tools=(speedtest1 anon_residency)
+for name in "${mm_tools[@]}"; do
+    install -Dm755 tool "mm/opt/mmbench/bin/${name}"
+done
+tar -cJf mmbench-riscv64.tar.xz -C mm ./opt/mmbench
 for name in "${tools[@]}"; do
     cp tool "deb/usr/bin/${name}"
 done
@@ -46,11 +59,15 @@ dpkg-deb --build deb rocksdb.deb
 printf 'riscv64\t%s\thttps://fixture.invalid/rocksdb.deb\n' \
     "$(sha256sum rocksdb.deb | cut -d' ' -f1)" > scripts/rocksdb-packages.tsv
 
-# Substitute only the two release digests for the fixture archives.
+# Substitute the digests of the local release fixtures.
 base_sha="$(sha256sum "${base}" | cut -d' ' -f1)"
 suite_sha="$(sha256sum tests-20261120.tar.xz | cut -d' ' -f1)"
+for suite in netbench mmbench; do
+    sum="$(sha256sum "${suite}-riscv64.tar.xz" | cut -d' ' -f1)"
+    sed -i "/^declare -A ${suite}_sha=(/,/^)/s/^    \\[riscv64\\]=.*/    [riscv64]=${sum}/" scripts/rootfs-archives.sh
+done
 sed -i "s/^rv_ubuntu_sha=.*/rv_ubuntu_sha=${base_sha}/; s/^rv_tests_sha=.*/rv_tests_sha=${suite_sha}/" \
-    scripts/rootfs-riscv64.sh
+    scripts/rootfs-archives.sh
 old=rootfs/base/rootfs-tests-riscv64.tar.xz
 echo 'stale 20261116 cache' > "${old}"
 echo 'truncated 20261120 download' > rootfs/base/rootfs-tests-20261120-riscv64.tar.xz
@@ -60,7 +77,7 @@ if scripts/build_img.sh riscv64 > build.log 2>&1; then
 fi
 grep -F 'Missing tests rootfs input' build.log
 
-# Serve the pinned rootfs and RocksDB fixtures.
+# Serve the pinned rootfs, QEMU overlays and RocksDB fixtures.
 cat > fixture-bin/curl <<'CURL'
 #!/usr/bin/env bash
 set -eu
@@ -68,6 +85,10 @@ while [[ $# -gt 0 && "$1" != -o ]]; do shift; done
 case "$3" in
     https://github.com/muou000/PulseOS/releases/download/rootfs-tests-20261120/rootfs-tests-riscv64.tar.xz)
         cp tests-20261120.tar.xz "$2" ;;
+    https://github.com/muou000/PulseOS/releases/download/rootfs-tests-20261125/netbench-riscv64.tar.xz)
+        cp netbench-riscv64.tar.xz "$2" ;;
+    https://github.com/muou000/PulseOS/releases/download/rootfs-mm-tests-20261125/mmbench-riscv64.tar.xz)
+        cp mmbench-riscv64.tar.xz "$2" ;;
     https://fixture.invalid/rocksdb.deb) cp rocksdb.deb "$2" ;;
     *) exit 1 ;;
 esac
@@ -78,9 +99,38 @@ scripts/build_img.sh --fetch riscv64
 grep -Fx 'stale 20261116 cache' "${old}"
 cmp tests-20261120.tar.xz rootfs/base/rootfs-tests-20261120-riscv64.tar.xz
 
-# Both images build with only the cached archives available.
+# With the original test suites cached, --fetch still repairs an incomplete overlay.
+net_cache=rootfs/base/netbench-riscv64.tar.xz
+mm_cache=rootfs/base/mmbench-riscv64.tar.xz
+echo 'truncated overlay' > "${net_cache}"
+echo 'truncated overlay' > "${mm_cache}"
+scripts/build_img.sh --fetch riscv64
+cmp netbench-riscv64.tar.xz "${net_cache}"
+cmp mmbench-riscv64.tar.xz "${mm_cache}"
+
+# VF2 can fetch its own inputs and build with the QEMU-only overlays absent.
 printf '#!/bin/sh\nexit 1\n' > fixture-bin/curl
-RISCV_PLATFORM=visionfive2 scripts/build_img.sh --fetch riscv64
+rm "${net_cache}" "${mm_cache}"
+RISCV_PLATFORM=visionfive2 scripts/fetch-rootfs.sh --tests --arch riscv64
+RISCV_PLATFORM=visionfive2 make --no-print-directory -C "${repo}" img ARCH=riscv64 \
+    A="${scratch}" APP="${repo}" OUTPUT_DIR="${scratch}"
+cmp disk-vf2.img rootfs-visionfive2.img
+cp netbench-riscv64.tar.xz "${net_cache}"
+cp mmbench-riscv64.tar.xz "${mm_cache}"
+RISCV_PLATFORM=visionfive2 scripts/build_img.sh riscv64
+debugfs -R 'stat /opt/netbench' rootfs-visionfive2.img 2>&1 | grep -F 'File not found'
+debugfs -R 'stat /opt/mmbench' rootfs-visionfive2.img 2>&1 | grep -F 'File not found'
+for name in "${mm_tools[@]}"; do
+    debugfs -R "cat /opt/mmbench/bin/${name}" rootfs-riscv64.img 2>/dev/null | cmp - tool
+    debugfs -R "stat /opt/mmbench/bin/${name}" rootfs-riscv64.img 2>/dev/null | grep -F 'Mode:  0755'
+done
+for name in "${net_tools[@]}"; do
+    debugfs -R "stat /usr/bin/${name}" rootfs-visionfive2.img 2>&1 | grep -F 'File not found'
+    debugfs -R "cat /opt/netbench/bin/${name}" rootfs-riscv64.img 2>/dev/null | cmp - tool
+    debugfs -R "stat /usr/bin/${name}" rootfs-riscv64.img 2>/dev/null | grep -F "Fast link dest: \"/opt/netbench/bin/${name}\""
+done
+debugfs -R 'cat /opt/netbench/www/index.html' rootfs-riscv64.img 2>/dev/null | grep -Fx 'network test fixture'
+debugfs -R 'cat /opt/netbench/licenses/fixture' rootfs-riscv64.img 2>/dev/null | grep -Fx 'network tool license'
 for image in rootfs-riscv64.img rootfs-visionfive2.img; do
     debugfs -R 'cat /opt/io_uring/liburing-tests/MANIFEST.txt' "${image}" 2>/dev/null | grep -Fx suite
     for name in "${tools[@]}"; do
@@ -101,6 +151,23 @@ debugfs -R 'cat /etc/issue' rootfs-visionfive2.img 2>/dev/null | grep -Fx 'Ubunt
 mv rootfs/base/rootfs-tests-20261120-riscv64.tar.xz "${old}"
 scripts/build_img.sh --fetch riscv64
 
+# A QEMU test image needs verified overlays, even with auto selection.
+for suite in netbench mmbench; do
+    asset="${suite}-riscv64.tar.xz"
+    cache="rootfs/base/${asset}"
+    echo 'truncated overlay' > "${cache}"
+    for fault in corrupt missing; do
+        [[ "${fault}" != missing ]] || rm "${cache}"
+        if ROOTFS_VARIANT=auto scripts/build_img.sh riscv64 > build.log 2>&1; then
+            echo "Image builder accepted a ${fault} ${suite} overlay" >&2
+            exit 1
+        fi
+        grep -F "Missing or corrupt ${asset}" build.log
+    done
+    cp "${asset}" "${cache}"
+done
+scripts/build_img.sh riscv64
+
 # Builds without --fetch reject both corrupt and missing cached packages.
 cache=rootfs/base/rocksdb/riscv64/rocksdb.deb
 for fault in corrupt missing; do
@@ -118,8 +185,12 @@ done
 
 # Base skips even a cached test archive; auto falls back when that archive is absent.
 ROOTFS_VARIANT=base scripts/build_img.sh --fetch riscv64
+debugfs -R 'stat /opt/netbench' rootfs-riscv64.img 2>&1 | grep -F 'File not found'
+debugfs -R 'stat /opt/mmbench' rootfs-riscv64.img 2>&1 | grep -F 'File not found'
 mv "${old}" saved-tests.tar.xz
 ROOTFS_VARIANT=auto scripts/build_img.sh --fetch riscv64
+debugfs -R 'stat /opt/netbench' rootfs-riscv64.img 2>&1 | grep -F 'File not found'
+debugfs -R 'stat /opt/mmbench' rootfs-riscv64.img 2>&1 | grep -F 'File not found'
 
 # Verify ELF ISA rejection independently of the archive digest checks.
 cp "${base}" rootfs/base/alpine-minirootfs-riscv64.tar.gz

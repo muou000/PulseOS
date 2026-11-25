@@ -167,6 +167,71 @@ QEMU virt 的默认启动参数为 `-cpu max`。内核确认所有可调度 hart
 
 RISC-V QEMU 测试镜像使用 Ubuntu 官方的 `ubuntu-base-26.10-base-riscv64.tar.gz`。lmbench、LTP、sysbench、UnixBench、fio 和 liburing 测试程序取自 PulseOS 发布的 `rootfs-tests-riscv64.tar.xz`。VisionFive 2 直接使用这份完整的测试包。两份归档均可缓存在 `rootfs/base/`，分别用 `./scripts/fetch-rootfs.sh --arch riscv64` 和 `RISCV_PLATFORM=visionfive2 ./scripts/fetch-rootfs.sh --arch riscv64` 下载并校验。[Ubuntu Base 26.10](https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release/) · [PulseOS 测试制品及校验和](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261120)
 
+Release 提供两份已预装网络工具的 QEMU ext4 测试盘。RISC-V 64 使用 `disk.img.zst`，LoongArch64 使用 `disk-la.img.zst`。以下示例在空目录中下载、校验并解压 RISC-V 64 测试盘。[测试镜像和 SHA256SUMS](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261125)
+
+```sh
+gh release download rootfs-tests-20261125 -R muou000/PulseOS -p disk.img.zst -p SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS && zstd -d --sparse disk.img.zst -o disk.img
+```
+
+### 在来宾里测试内存管理
+
+两种 QEMU 测试镜像均包含 SQLite 3.54.1 的官方 SQL 工作负载 `speedtest1`、LTP、lmbench 和匿名页驻留探针。下载本版预制盘时，RV64 选择 `disk.img.zst`，LA64 选择 `disk-la.img.zst`。在空目录运行以下命令，校验通过后解压，再按下文 QEMU 步骤启动。[内存测试镜像与 SHA256SUMS](https://github.com/muou000/PulseOS/releases/tag/rootfs-mm-tests-20261125)
+
+```sh
+disk=disk.img            # LA64 使用 disk-la.img
+gh release download rootfs-mm-tests-20261125 -R muou000/PulseOS -p "$disk.zst" -p SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS && zstd -d --sparse "$disk.zst" -o "$disk"
+```
+
+在来宾中运行以下命令。SQLite 在内存中完成建表、索引、查询与更新。`--verify` 输出结果流的长度与指纹，本版参数在原生 Linux 上的参考值为 `826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697`。记录 `TOTAL`（秒）和 `Memory Used` 的峰值（字节），可分别比较同架构的耗时与 SQLite 分配器用量。[SQLite 官方工作负载说明](https://sqlite.org/cpu.html)
+
+```sh
+/opt/mmbench/bin/speedtest1 --memdb --testset main --size 5 --verify --stats
+export LTPROOT=/opt/ltp TMPDIR=/tmp PATH="/opt/ltp/testcases/bin:$PATH"
+brk01
+mincore03
+mmap01
+mremap01
+/opt/mmbench/bin/anon_residency
+```
+
+探针预留 16 MiB 匿名内存，每隔 64 KiB 写一页，接着逐页写入，执行 `MADV_DONTNEED`，再逐页读回校验清零。每个阶段分别报告区域内 `mincore` 驻留页数、整个进程的 `VmSize`、`VmRSS` 和 `getrusage` 计数。稀疏阶段用驻留页数除以实际写过的不同页数，可以衡量首次缺页时批量分配相邻页的内存代价。对比版本时固定架构、vCPU 数、内存及工作负载，并保留每轮结果。[mincore 接口](https://man7.org/linux/man-pages/man2/mincore.2.html)
+
+自行制盘时，检出本发布标签，运行 `make img ARCH=riscv64` 或 `make img ARCH=loongarch64`。要从源码重建内存工具包，准备相应的 Linux GNU 交叉 GCC、OpenSSL、Python 3 和 GNU tar，运行 `scripts/build_mmbench.sh riscv64` 或 `scripts/build_mmbench.sh loongarch64`。脚本校验上游源码后，将静态工具归档到 `target/mmbench/`。[SQLite 源码及 SHA3-256](https://sqlite.org/download.html)
+
+### 在来宾里测试网络
+
+| 工作负载 | 两种 QEMU 测试镜像预装的工具 | 主要观察量 |
+| --- | --- | --- |
+| TCP / UDP 传输 | `iperf3` 3.22.1 | TCP 收发吞吐，UDP 接收速率、丢包数与抖动 |
+| HTTP 静态文件服务 | `darkhttpd` 1.17 | GET 的状态码、正文和字节数 |
+| 并发 HTTP 客户端 | `weighttp` 0.5-pulse1 | 成功响应数、每秒请求数、延迟分布、连接复用次数 |
+
+三条命令均在 `/usr/bin`。两份测试镜像还提供 lmbench 的 `/opt/lmbench/bin/{lat_tcp,lat_udp,lat_connect,bw_tcp}`。构建 QEMU 测试盘时，`make img` 会下载并校验对应架构的网络工具包。提前运行 `./scripts/fetch-rootfs.sh --tests` 后可离线制盘。要从源代码重建工具包，在安装相应 Linux GNU 交叉工具链的主机运行 `./scripts/build_netbench.sh riscv64` 或 `./scripts/build_netbench.sh loongarch64`，产物位于 `target/netbench/`。[iperf3 用法](https://software.es.net/iperf/invoking.html) · [darkhttpd](https://unix4lyfe.org/darkhttpd/) · [weighttp](https://github.com/lighttpd/weighttp/tree/weighttp-0.5)
+
+在同一个来宾 shell 中运行以下命令即可测 IPv4 回环。iperf3 的 `receiver` 行给出接收端实际结果，添加 `-J` 可保存 JSON。
+
+```sh
+iperf3 -4 -s -B 127.0.0.1 >/tmp/iperf3.log 2>&1 & server=$!
+sleep 1
+iperf3 -4 -c 127.0.0.1 -t 3
+iperf3 -4 -c 127.0.0.1 -u -b 1M -l 512 -t 3
+kill "$server"
+```
+
+PulseOS 尚未实现 `SO_LINGER`。镜像里的 weighttp 在该选项返回 `ENOPROTOOPT` 时使用系统默认的连接关闭行为。下面用两个并发连接请求镜像里的固定页面。检查 `status_codes.2xx` 等于 16、`response_counts.fail` 和 `errs` 都是 0，以及 `traffic.bytes_body` 等于页面字节数的 16 倍，再比较吞吐和延迟。去掉 `-k` 可以测逐请求新建连接的开销。
+
+```sh
+darkhttpd /opt/netbench/www --addr 127.0.0.1 --port 8080 --no-listing >/tmp/darkhttpd.log 2>&1 & server=$!
+sleep 1
+wc -c /opt/netbench/www/index.html
+weighttp -q -n 16 -c 2 -k -a 10 http://127.0.0.1:8080/index.html
+kill "$server"
+```
+
+**测试 VirtIO 网卡路径。** 按下方命令使用 QEMU user 网络时，可在宿主运行 `iperf3 -4 -s -B 127.0.0.1`，再把来宾客户端的目标地址改为 `10.0.2.2`。测试宿主访问来宾 HTTP 时，在 QEMU 的 `-netdev user,id=…` 参数末尾追加 `,hostfwd=tcp:127.0.0.1:18080-:8080`，来宾用 `--addr 0.0.0.0` 启动 darkhttpd，宿主执行 `curl -fsS http://127.0.0.1:18080/index.html` 可检查正文。两条路径都经过 VirtIO 和 QEMU 用户态网络后端。比较内核改动前后的结果时，固定架构、QEMU 参数、网络路径、时长、负载和并发度，多轮记录两端结果。
+
 ### 在来宾里测试 RocksDB
 
 上表的测试镜像均预装 RocksDB 9.11.2。`db_bench` 可测数据库读写和压实，`cache_bench` 可单独测块缓存，`ldb` 可检查键值，`sst_dump` 可校验 SST 文件。四条命令均在 `/usr/bin`，对应的 ELF 和运行库位于 `/opt/rocksdb/{bin,lib}`。制盘主机需要 `dpkg-deb`（Debian/Ubuntu 的 `dpkg` 包）。`make img` 会按架构下载并校验固定版本的包，也可以先用 `./scripts/fetch-rootfs.sh --tests` 准备缓存，再离线运行 `./scripts/build_img.sh all`。[包版本及 SHA256](scripts/rocksdb-packages.tsv)
