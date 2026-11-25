@@ -37,6 +37,8 @@ LTP 在 tmpfs 工作目录验证了 libc 和裸调用的堆伸缩、未触及及
 
 两架构的方向一致。共享宿主上同期有其他 QEMU 作业，逐次波动较大；应用层收益需在受控宿主分别复测。驻留结果在两个架构可重复。全部原始纳秒样本、命令、宿主负载、镜像与内核散列见随附数据。[逐轮记录](results.json)
 
+考虑到并行工作发现的 vDSO 时钟读数偏差，我们在镜像副本中将探针的读时改为直接调用 `SYS_clock_gettime`，其余源码和内核相同。每种配置预热一次，再测三轮。四页改为单页后，稀疏写耗时中位数分别为 RV64 12.02 → 6.55 ms、LA64 4.39 → 1.64 ms；随后的全页写分别为 38.50 → 102.69 ms 和 18.66 → 40.11 ms。两种计时方式得到一致方向。两轮宿主负载不同，绝对耗时应在各自轮次内比较。[直接系统调用复测](syscall-clock.json) · [时钟问题 #299](https://github.com/muou000/PulseOS/issues/299)
+
 ## 应用可见的记账
 
 - 在预留 16 MiB 时，两架构的 `mincore` 都报告区域内零页驻留，`/proc/self/status` 的 VmRSS 已增加 16384 KiB，且与 VmSize 相等。密集写入与丢弃阶段的 RSS 都维持高位，解除映射时才下降。源码直接将 VMA 长度赋给进程和线程的 RSS 字段。[procfs 实现](https://github.com/muou000/PulseOS/blob/39e61bab5903b773666d54123b51f66aa2ab8101/modules/process/src/procfs.rs#L150)
