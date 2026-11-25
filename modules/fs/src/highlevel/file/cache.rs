@@ -690,6 +690,7 @@ pub(super) async fn append_slice_source_async(
 struct WritebackPage {
     page_num: u32,
     frame: Arc<PageCacheFrame>,
+    offset: usize,
     len: usize,
     content_generation: u64,
     writable_mapping_generation: u64,
@@ -697,15 +698,18 @@ struct WritebackPage {
 }
 
 impl WritebackPage {
-    fn complete(&self, page: &mut PageCache, data: &[u8]) {
+    fn complete(&self, page: &mut PageCache, data: &[u8]) -> bool {
         if Arc::ptr_eq(&page.frame, &self.frame)
             && page.dirty
             && page.content_generation == self.content_generation
             && page.writable_mapping_generation == self.writable_mapping_generation
-            && (!self.compare_contents || page.data()[..self.len] == *data)
+            && (!self.compare_contents
+                || page.data()[self.offset..self.offset + self.len] == *data)
         {
-            page.dirty = false;
+            page.clear_dirty();
+            return true;
         }
+        false
     }
 }
 
@@ -1184,6 +1188,8 @@ fn dealloc_page_batch_vaddrs(mut vaddrs: Vec<usize>) {
 pub struct PageCache {
     frame: Arc<PageCacheFrame>,
     dirty: bool,
+    dirty_start: u16,
+    dirty_end: u16,
     may_write_mapping: bool,
     content_generation: u64,
     writable_mapping_generation: u64,
@@ -1195,6 +1201,8 @@ impl PageCache {
         Ok(Self {
             frame,
             dirty: false,
+            dirty_start: PAGE_SIZE as u16,
+            dirty_end: 0,
             may_write_mapping: false,
             content_generation: 0,
             writable_mapping_generation: 0,
@@ -1218,6 +1226,8 @@ impl PageCache {
         Self {
             frame: Arc::new(PageCacheFrame { addr }),
             dirty: false,
+            dirty_start: PAGE_SIZE as u16,
+            dirty_end: 0,
             may_write_mapping: false,
             content_generation: 0,
             writable_mapping_generation: 0,
@@ -1237,11 +1247,38 @@ impl PageCache {
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.dirty_start = 0;
+        self.dirty_end = PAGE_SIZE as u16;
         self.content_generation = self.content_generation.wrapping_add(1);
+    }
+
+    pub fn mark_dirty_range(&mut self, start: usize, end: usize) {
+        let start = start.min(PAGE_SIZE) as u16;
+        let end = end.min(PAGE_SIZE) as u16;
+        if start >= end {
+            return;
+        }
+        if self.dirty {
+            self.dirty_start = self.dirty_start.min(start);
+            self.dirty_end = self.dirty_end.max(end);
+        } else {
+            self.dirty = true;
+            self.dirty_start = start;
+            self.dirty_end = end;
+        }
+        self.content_generation = self.content_generation.wrapping_add(1);
+    }
+
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
+        self.dirty_start = PAGE_SIZE as u16;
+        self.dirty_end = 0;
     }
 
     fn mark_mapping_dirty(&mut self) {
         self.dirty = true;
+        self.dirty_start = 0;
+        self.dirty_end = PAGE_SIZE as u16;
     }
 
     fn has_user_mapping(&self) -> bool {
@@ -1324,11 +1361,259 @@ struct EvictListener {
     listener: Box<dyn Fn(u32, &PageCache) + Send + Sync>,
 }
 
+/// Page cache map paired with secondary O(dirty) and O(mapped) indices so
+/// fdatasync and range queries avoid scanning all clean resident pages.
+pub(crate) struct PageCacheMap {
+    lru: LruCache<u32, PageCache>,
+    dirty_pages: alloc::collections::BTreeSet<u32>,
+    writable_mapped_pages: alloc::collections::BTreeSet<u32>,
+}
+
+impl PageCacheMap {
+    fn unbounded() -> Self {
+        Self {
+            lru: LruCache::unbounded(),
+            dirty_pages: alloc::collections::BTreeSet::new(),
+            writable_mapped_pages: alloc::collections::BTreeSet::new(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.lru.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lru.is_empty()
+    }
+
+    pub(crate) fn contains(&self, pn: &u32) -> bool {
+        self.lru.contains(pn)
+    }
+
+    pub(crate) fn peek(&self, pn: &u32) -> Option<&PageCache> {
+        self.lru.peek(pn)
+    }
+
+    pub(crate) fn get(&mut self, pn: &u32) -> Option<&PageCache> {
+        self.lru.get(pn).map(|page| &*page)
+    }
+
+    pub(crate) fn get_mut(&mut self, pn: &u32) -> Option<&mut PageCache> {
+        self.lru.get_mut(pn)
+    }
+
+    pub(crate) fn peek_lru(&self) -> Option<(&u32, &PageCache)> {
+        self.lru.peek_lru()
+    }
+
+    pub(crate) fn promote(&mut self, pn: &u32) {
+        self.lru.promote(pn);
+    }
+
+    pub(crate) fn iter(&self) -> lru::Iter<'_, u32, PageCache> {
+        self.lru.iter()
+    }
+
+    fn sync_index_for_page(&mut self, pn: u32) {
+        match self.lru.peek(&pn) {
+            Some(page) => {
+                if page.dirty {
+                    self.dirty_pages.insert(pn);
+                } else {
+                    self.dirty_pages.remove(&pn);
+                }
+                if page.may_write_mapping {
+                    self.writable_mapped_pages.insert(pn);
+                } else {
+                    self.writable_mapped_pages.remove(&pn);
+                }
+            }
+            None => {
+                self.dirty_pages.remove(&pn);
+                self.writable_mapped_pages.remove(&pn);
+            }
+        }
+    }
+
+    pub(crate) fn put(&mut self, pn: u32, page: PageCache) -> Option<PageCache> {
+        if page.dirty {
+            self.dirty_pages.insert(pn);
+        } else {
+            self.dirty_pages.remove(&pn);
+        }
+        if page.may_write_mapping {
+            self.writable_mapped_pages.insert(pn);
+        } else {
+            self.writable_mapped_pages.remove(&pn);
+        }
+        self.lru.put(pn, page)
+    }
+
+    pub(crate) fn pop(&mut self, pn: &u32) -> Option<PageCache> {
+        self.dirty_pages.remove(pn);
+        self.writable_mapped_pages.remove(pn);
+        self.lru.pop(pn)
+    }
+
+    pub(crate) fn pop_lru(&mut self) -> Option<(u32, PageCache)> {
+        let (pn, page) = self.lru.pop_lru()?;
+        self.dirty_pages.remove(&pn);
+        self.writable_mapped_pages.remove(&pn);
+        Some((pn, page))
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.lru.clear();
+        self.dirty_pages.clear();
+        self.writable_mapped_pages.clear();
+    }
+
+    pub(crate) fn mark_dirty(&mut self, pn: u32) -> bool {
+        let Some(page) = self.lru.get_mut(&pn) else {
+            return false;
+        };
+        page.mark_dirty();
+        self.dirty_pages.insert(pn);
+        true
+    }
+
+    pub(crate) fn mark_dirty_range(&mut self, pn: u32, start: usize, end: usize) -> bool {
+        let Some(page) = self.lru.get_mut(&pn) else {
+            return false;
+        };
+        let start = start.min(PAGE_SIZE);
+        let end = end.min(PAGE_SIZE);
+        if start >= end {
+            return true;
+        }
+        page.mark_dirty_range(start, end);
+        self.dirty_pages.insert(pn);
+        true
+    }
+
+    pub(crate) fn clear_dirty(&mut self, pn: u32) {
+        if let Some(page) = self.lru.get_mut(&pn) {
+            page.clear_dirty();
+        }
+        self.dirty_pages.remove(&pn);
+    }
+
+    pub(crate) fn pin_for_mapping(&mut self, pn: u32, may_write: bool) -> VfsResult<PhysAddr> {
+        let page = self.lru.get_mut(&pn).ok_or(VfsError::BadState)?;
+        let paddr = page.pin_for_mapping(may_write)?;
+        if page.may_write_mapping {
+            self.writable_mapped_pages.insert(pn);
+        } else {
+            self.writable_mapped_pages.remove(&pn);
+        }
+        Ok(paddr)
+    }
+
+    pub(crate) fn mark_shared_page_writable(&mut self, pn: u32, paddr: PhysAddr) -> VfsResult<()> {
+        let page = self.lru.get_mut(&pn).ok_or(VfsError::BadState)?;
+        if page.paddr() != paddr || !page.has_user_mapping() {
+            return Err(VfsError::BadState);
+        }
+        page.writable_mapping_generation = page.writable_mapping_generation.wrapping_add(1);
+        page.may_write_mapping = true;
+        self.writable_mapped_pages.insert(pn);
+        Ok(())
+    }
+
+    fn complete_writeback(&mut self, pn: u32, snapshot: &WritebackPage, data: &[u8]) {
+        if let Some(page) = self.lru.get_mut(&pn)
+            && snapshot.complete(page, data)
+        {
+            self.dirty_pages.remove(&pn);
+        }
+    }
+
+    fn refresh_writable_mappings(&mut self, page_range: Option<(u32, u32)>, mark_dirty: bool) {
+        let mut stale = Vec::new();
+        let pns: Vec<u32> = match page_range {
+            Some((first, end)) if first < end => {
+                self.writable_mapped_pages.range(first..end).copied().collect()
+            }
+            Some(_) => return,
+            None => self.writable_mapped_pages.iter().copied().collect(),
+        };
+        for pn in pns {
+            match self.lru.peek_mut(&pn) {
+                Some(page) if page.may_write_mapping && page.has_user_mapping() => {
+                    if mark_dirty {
+                        page.mark_mapping_dirty();
+                        self.dirty_pages.insert(pn);
+                    }
+                }
+                Some(page) => {
+                    page.may_write_mapping = false;
+                    stale.push(pn);
+                }
+                None => stale.push(pn),
+            }
+        }
+        for pn in stale {
+            self.writable_mapped_pages.remove(&pn);
+        }
+    }
+
+    fn has_writable_mapping(&mut self) -> bool {
+        self.refresh_writable_mappings(None, false);
+        !self.writable_mapped_pages.is_empty()
+    }
+
+    fn has_dirty_or_mapped_in_range(&self, first: u32, end: u32) -> bool {
+        if first >= end {
+            return false;
+        }
+        if self.dirty_pages.range(first..end).next().is_some() {
+            return true;
+        }
+        self.writable_mapped_pages.range(first..end).any(|pn| {
+            self.lru
+                .peek(pn)
+                .is_some_and(|page| page.may_write_mapping && page.has_user_mapping())
+        })
+    }
+
+    fn sync_dirty_page_frames(&mut self, page_range: Option<(u32, u32)>) -> Vec<(u32, Arc<PageCacheFrame>)> {
+        let mut pages = Vec::new();
+        let in_range = |pn: u32| page_range.is_none_or(|(first, end)| pn >= first && pn < end);
+        for &pn in &self.dirty_pages {
+            if in_range(pn)
+                && let Some(page) = self.lru.peek(&pn)
+            {
+                pages.push((pn, page.frame.clone()));
+            }
+        }
+        for &pn in &self.writable_mapped_pages {
+            if in_range(pn)
+                && !self.dirty_pages.contains(&pn)
+                && let Some(page) = self.lru.peek(&pn)
+                && page.may_write_mapping
+                && page.has_user_mapping()
+            {
+                pages.push((pn, page.frame.clone()));
+            }
+        }
+        pages
+    }
+
+    fn dirty_candidates(&mut self, page_range: Option<(u32, u32)>) -> Vec<u32> {
+        self.refresh_writable_mappings(page_range, true);
+        match page_range {
+            Some((first, end)) if first < end => self.dirty_pages.range(first..end).copied().collect(),
+            Some(_) => Vec::new(),
+            None => self.dirty_pages.iter().copied().collect(),
+        }
+    }
+}
+
 pub(crate) struct CachedFileShared {
     fs_id: usize,
     // Page stripes protect fill/write coherence; inline entries keep the hot
     // cache-hit path to one cache lock without per-page Arc/Mutex overhead.
-    page_cache: Mutex<LruCache<u32, PageCache>>,
+    page_cache: Mutex<PageCacheMap>,
     page_access: PageAccessDomain,
     cache_soft_limit: AtomicUsize,
     evict_listeners: Mutex<Vec<Arc<EvictListener>>>,
@@ -1371,10 +1656,10 @@ impl Drop for SyncDirtyPages<'_> {
         // Restore only the same frames; a later checkpoint must retry them.
         let mut cache = self.shared.page_cache.lock();
         for (pn, frame) in &self.pages {
-            if let Some(page) = cache.get_mut(pn)
+            if let Some(page) = cache.peek(pn)
                 && Arc::ptr_eq(&page.frame, frame)
             {
-                page.mark_dirty();
+                cache.mark_dirty(*pn);
             }
         }
         self.shared.request_background_writeback();
@@ -1413,7 +1698,7 @@ impl CachedFileShared {
             fs_id,
             // The LRU's own capacity eagerly reserves hash-table metadata.
             // Keep storage lazy and enforce the disk limit during admission.
-            page_cache: Mutex::new(LruCache::unbounded()),
+            page_cache: Mutex::new(PageCacheMap::unbounded()),
             page_access: PageAccessDomain::default(),
             cache_soft_limit: AtomicUsize::new(if in_memory {
                 usize::MAX
@@ -1543,7 +1828,7 @@ impl CachedFileShared {
             while let Some((_pn, mut page)) = cache.pop_lru() {
                 if page.dirty {
                     discarded_dirty += 1;
-                    page.dirty = false;
+                    page.clear_dirty();
                 }
                 debug_assert!(
                     !page.has_user_mapping(),
@@ -1573,17 +1858,13 @@ impl CachedFileShared {
         // this checkpoint. Keep polling only this cache while such a mapping
         // remains, matching the conservative mmap durability behavior without
         // scanning unrelated clean caches.
-        let writable_mapping_active = self
-            .page_cache
-            .lock()
-            .iter()
-            .any(|(_, page)| page.may_write_mapping && page.has_user_mapping());
+        let writable_mapping_active = self.page_cache.lock().has_writable_mapping();
         self.writable_mapping_watch
             .store(writable_mapping_active, Ordering::Release);
     }
 
     fn pop_clean_lru_pages(
-        cache: &mut LruCache<u32, PageCache>,
+        cache: &mut PageCacheMap,
         max: usize,
     ) -> Vec<(u32, PageCache)> {
         let max = max.min(PAGE_CACHE_EVICTION_BATCH);
@@ -1645,19 +1926,9 @@ impl CachedFileShared {
     fn flush_dirty_pages_locked(
         file_len: u64,
         file: &FileNode,
-        guard: &mut LruCache<u32, PageCache>,
+        guard: &mut PageCacheMap,
     ) -> VfsResult<()> {
-        for (_, page) in guard.iter_mut() {
-            if page.may_write_mapping && page.has_user_mapping() {
-                page.mark_mapping_dirty();
-            }
-        }
-        let mut dirty_pns: Vec<u32> = guard
-            .iter()
-            .filter(|(_, page)| page.dirty)
-            .map(|(pn, _)| *pn)
-            .collect();
-        dirty_pns.sort_unstable();
+        let dirty_pns = guard.dirty_candidates(None);
 
         if dirty_pns.is_empty() {
             return Ok(());
@@ -1694,6 +1965,7 @@ impl CachedFileShared {
                         snapshots.push(WritebackPage {
                             page_num: pn_curr,
                             frame: page.frame.clone(),
+                            offset: 0,
                             len: curr_len,
                             content_generation: page.content_generation,
                             writable_mapping_generation: page.writable_mapping_generation,
@@ -1711,16 +1983,12 @@ impl CachedFileShared {
                 let mut data_offset = 0;
                 for snapshot in snapshots {
                     let end = data_offset + snapshot.len;
-                    if let Some(page) = guard.get_mut(&snapshot.page_num) {
-                        snapshot.complete(page, &merged_buf[data_offset..end]);
-                    }
+                    guard.complete_writeback(snapshot.page_num, &snapshot, &merged_buf[data_offset..end]);
                     data_offset = end;
                 }
             } else {
                 for k in i..=j {
-                    if let Some(page) = guard.get_mut(&dirty_pns[k]) {
-                        page.dirty = false;
-                    }
+                    guard.clear_dirty(dirty_pns[k]);
                 }
             }
 
@@ -1751,12 +2019,12 @@ impl CachedFileShared {
 
     fn mark_page_dirty_if_paddr(&self, pn: u32, paddr: PhysAddr, in_memory: bool) -> VfsResult<()> {
         let mut cache = self.page_cache.lock();
-        let page = cache.get_mut(&pn).ok_or(VfsError::BadState)?;
+        let page = cache.peek(&pn).ok_or(VfsError::BadState)?;
         if page.paddr() != paddr {
             return Err(VfsError::BadState);
         }
         if !in_memory {
-            page.mark_dirty();
+            cache.mark_dirty(pn);
             // Publish the request before releasing the matching page, so
             // checkpoint completion cannot miss this dirty generation.
             self.request_background_writeback();
@@ -1777,27 +2045,18 @@ impl CachedFileShared {
         page_range: Option<(u32, u32)>,
         data_only: bool,
     ) -> VfsResult<()> {
-        let pages = self
-            .page_cache
-            .lock()
-            .iter()
-            .filter(|(pn, page)| {
-                let in_range = page_range.is_none_or(|(first, end)| **pn >= first && **pn < end);
-                in_range && (page.dirty || (page.may_write_mapping && page.has_user_mapping()))
-            })
-            .map(|(pn, page)| (*pn, page.frame.clone()))
-            .collect();
+        let pages = self.page_cache.lock().sync_dirty_page_frames(page_range);
         let mut dirty_pages = SyncDirtyPages {
             shared: self,
             pages,
             completed: false,
         };
         let cached_size = self.size();
+        self.flush_dirty_pages_in_range_async_inner(file, page_range, false)
+            .await?;
         if file.len().await? != cached_size {
             file.set_len(cached_size).await?;
         }
-        self.flush_dirty_pages_in_range_async(file, page_range)
-            .await?;
         file.sync(data_only).await?;
         dirty_pages.completed = true;
         Ok(())
@@ -1887,15 +2146,15 @@ impl CachedFileShared {
         if cache.is_empty() {
             return false;
         }
-        let is_match = |page: &PageCache| {
-            !dirty_only || page.dirty || (page.may_write_mapping && page.has_user_mapping())
-        };
+        if dirty_only {
+            return cache.has_dirty_or_mapped_in_range(first_page, last_page);
+        }
         if (last_page - first_page) as usize <= cache.len() {
-            (first_page..last_page).any(|pn| cache.peek(&pn).is_some_and(is_match))
+            (first_page..last_page).any(|pn| cache.peek(&pn).is_some())
         } else {
             cache
                 .iter()
-                .any(|(pn, page)| *pn >= first_page && *pn < last_page && is_match(page))
+                .any(|(pn, _)| *pn >= first_page && *pn < last_page)
         }
     }
 
@@ -1926,33 +2185,100 @@ impl CachedFileShared {
             .await
     }
 
+    async fn flush_single_dirty_page_async(
+        &self,
+        file: &FileNode,
+        pn: u32,
+        file_len: u64,
+    ) -> VfsResult<()> {
+        enum SingleWriteBuf {
+            Inline([u8; 512], usize),
+            Heap(Vec<u8>),
+        }
+        impl SingleWriteBuf {
+            fn as_slice(&self) -> &[u8] {
+                match self {
+                    Self::Inline(buf, len) => &buf[..*len],
+                    Self::Heap(buf) => buf.as_slice(),
+                }
+            }
+        }
+
+        let (page_start, snapshot, write_buf) = {
+            let mut cache = self.page_cache.lock();
+            let effective_file_len = self.size().max(file_len);
+            let Some(page) = cache.get_mut(&pn) else {
+                return Err(VfsError::Io);
+            };
+            let current_start = pn as u64 * PAGE_SIZE as u64;
+            let curr_len =
+                effective_file_len.saturating_sub(current_start).min(PAGE_SIZE as u64) as usize;
+            let compare_contents = page.may_write_mapping && page.has_user_mapping();
+            let (write_start, write_end) = if compare_contents {
+                (0, curr_len)
+            } else {
+                let start = (page.dirty_start as usize).min(curr_len);
+                let end = (page.dirty_end as usize).min(curr_len);
+                (start, end.max(start))
+            };
+            let write_len = write_end - write_start;
+            let snapshot = WritebackPage {
+                page_num: pn,
+                frame: page.frame.clone(),
+                offset: write_start,
+                len: write_len,
+                content_generation: page.content_generation,
+                writable_mapping_generation: page.writable_mapping_generation,
+                compare_contents,
+            };
+            let write_buf = if write_len <= 512 {
+                let mut buf = [0u8; 512];
+                if write_len > 0 {
+                    buf[..write_len].copy_from_slice(&page.data()[write_start..write_end]);
+                }
+                SingleWriteBuf::Inline(buf, write_len)
+            } else {
+                SingleWriteBuf::Heap(page.data()[write_start..write_end].to_vec())
+            };
+            (current_start, snapshot, write_buf)
+        };
+
+        let slice = write_buf.as_slice();
+        if !slice.is_empty() {
+            write_all_at_async(file, slice, page_start + snapshot.offset as u64).await?;
+        }
+
+        let mut cache = self.page_cache.lock();
+        cache.complete_writeback(pn, &snapshot, slice);
+        Ok(())
+    }
+
     async fn flush_dirty_pages_in_range_async(
         &self,
         file: &FileNode,
         page_range: Option<(u32, u32)>,
     ) -> VfsResult<()> {
-        let file_len = self.size();
-        if file.len().await? < file_len {
-            file.set_len(file_len).await?;
-        }
+        self.flush_dirty_pages_in_range_async_inner(file, page_range, page_range.is_none())
+            .await
+    }
 
-        let dirty_pns = {
-            let mut cache = self.page_cache.lock();
-            let mut dirty = cache
-                .iter_mut()
-                .filter_map(|(pn, page)| {
-                    if !page_range.is_none_or(|(first, end)| *pn >= first && *pn < end) {
-                        return None;
-                    }
-                    if page.may_write_mapping && page.has_user_mapping() {
-                        page.mark_mapping_dirty();
-                    }
-                    page.dirty.then_some(*pn)
-                })
-                .collect::<Vec<_>>();
-            dirty.sort_unstable();
-            dirty
-        };
+    async fn flush_dirty_pages_in_range_async_inner(
+        &self,
+        file: &FileNode,
+        page_range: Option<(u32, u32)>,
+        extend_file_len: bool,
+    ) -> VfsResult<()> {
+        let file_len = self.size();
+        let dirty_pns = self.page_cache.lock().dirty_candidates(page_range);
+
+        if dirty_pns.len() == 1 {
+            self.flush_single_dirty_page_async(file, dirty_pns[0], file_len)
+                .await?;
+            if extend_file_len && file.len().await? < file_len {
+                file.set_len(file_len).await?;
+            }
+            return Ok(());
+        }
 
         let mut page_batches = Vec::new();
         let mut start = 0;
@@ -1984,6 +2310,7 @@ impl CachedFileShared {
                     .ok_or(VfsError::StorageFull)?;
                 let (mut data, snapshots) = {
                     let mut cache = self.page_cache.lock();
+                    let effective_file_len = self.size().max(file_len);
                     let mut data = WritebackData::new(pages.len(), expected_len);
                     let mut snapshots = Vec::with_capacity(pages.len());
                     for &pn in pages {
@@ -1994,12 +2321,14 @@ impl CachedFileShared {
                             break;
                         };
                         let current_start = pn as u64 * PAGE_SIZE as u64;
-                        let len =
-                            file_len.saturating_sub(current_start).min(PAGE_SIZE as u64) as usize;
+                        let len = effective_file_len
+                            .saturating_sub(current_start)
+                            .min(PAGE_SIZE as u64) as usize;
                         let compare_contents = page.may_write_mapping && page.has_user_mapping();
                         snapshots.push(WritebackPage {
                             page_num: pn,
                             frame: page.frame.clone(),
+                            offset: 0,
                             len,
                             content_generation: page.content_generation,
                             writable_mapping_generation: page.writable_mapping_generation,
@@ -2039,14 +2368,18 @@ impl CachedFileShared {
             let mut data_offset = 0;
             for snapshot in batch.pages {
                 let end = data_offset + snapshot.len;
-                if let Some(page) = cache.get_mut(&snapshot.page_num) {
-                    snapshot.complete(page, &data[data_offset..end]);
-                }
+                cache.complete_writeback(snapshot.page_num, &snapshot, &data[data_offset..end]);
                 data_offset = end;
             }
         }
 
-        first_error.map_or(Ok(()), Err)
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        if extend_file_len && file.len().await? < file_len {
+            file.set_len(file_len).await?;
+        }
+        Ok(())
     }
 
     async fn discard_pages_without_writeback_async(
@@ -2061,8 +2394,10 @@ impl CachedFileShared {
                 match cache.get_mut(&pn) {
                     Some(page) if page.has_user_mapping() => Some(page.paddr()),
                     Some(_) => {
-                        let mut page = cache.pop(&pn).expect("cached page disappeared");
-                        page.dirty = false;
+                        let Some(mut page) = cache.pop(&pn) else {
+                            continue;
+                        };
+                        page.clear_dirty();
                         drop(cache);
                         let listeners = self.evict_listeners_snapshot();
                         for listener in &listeners {
@@ -2086,7 +2421,7 @@ impl CachedFileShared {
                     && page.paddr() == paddr
                 {
                     page.data().fill(0);
-                    page.dirty = false;
+                    cache.clear_dirty(pn);
                 }
                 continue;
             }
@@ -2104,7 +2439,7 @@ impl CachedFileShared {
                 && page.paddr() == paddr
             {
                 page.data().copy_from_slice(&data);
-                page.dirty = false;
+                cache.clear_dirty(pn);
             }
         }
         Ok(())
@@ -2794,7 +3129,7 @@ impl CachedFile {
             if len > 0 {
                 task::future::block_on(file.write_at(&page.data()[..len], page_start))?;
             }
-            page.dirty = false;
+            page.clear_dirty();
         }
         Ok(())
     }
@@ -2802,7 +3137,7 @@ impl CachedFile {
     fn page_or_insert(
         &self,
         file: &FileNode,
-        cache: &mut LruCache<u32, PageCache>,
+        cache: &mut PageCacheMap,
         pn: u32,
         mut skip_read: bool,
         file_len: u64,
@@ -2862,7 +3197,7 @@ impl CachedFile {
     }
 
     fn pin_cached_pages(
-        cache: &mut LruCache<u32, PageCache>,
+        cache: &mut PageCacheMap,
         pn: u32,
         page_count: usize,
         may_write: bool,
@@ -2880,10 +3215,7 @@ impl CachedFile {
         for offset in 0..page_count {
             let offset = u32::try_from(offset).map_err(|_| VfsError::StorageFull)?;
             let page_num = pn.checked_add(offset).ok_or(VfsError::StorageFull)?;
-            let result = cache
-                .get_mut(&page_num)
-                .ok_or(VfsError::BadState)
-                .and_then(|page| page.pin_for_mapping(may_write));
+            let result = cache.pin_for_mapping(page_num, may_write);
             match result {
                 Ok(paddr) => {
                     if let Err((_, paddr)) = pinned.push((page_num, paddr)) {
@@ -3334,8 +3666,9 @@ impl CachedFile {
         let _page_guard = task::future::block_on(self.shared.page_access.acquire_for_page(pn));
         let _guard = task::future::block_on(self.shared.io_lock.read());
         let mut cache = self.shared.page_cache.lock();
-        let page = cache.get_mut(&pn);
-        f(page)
+        let result = f(cache.get_mut(&pn));
+        cache.sync_index_for_page(pn);
+        result
     }
 
     pub fn with_page_or_insert<R>(
@@ -3353,8 +3686,11 @@ impl CachedFile {
             false,
             file_len,
         )?;
-        let page = guard.get_mut(&pn).ok_or(VfsError::BadState)?;
-        let result = f(page, evicted);
+        let result = {
+            let page = guard.get_mut(&pn).ok_or(VfsError::BadState)?;
+            f(page, evicted)
+        };
+        guard.sync_index_for_page(pn);
         drop(guard);
         drop(io_guard);
         result
@@ -3508,6 +3844,11 @@ impl CachedFile {
                 return if copied == 0 { Err(error) } else { Ok(copied) };
             }
 
+            let old_size = self.shared.size();
+            let page_start = pn as u64 * PAGE_SIZE as u64;
+            let new_end = current
+                .checked_add(len as u64)
+                .ok_or(VfsError::InvalidInput)?;
             let mut cache = self.shared.page_cache.lock();
             let Some(page) = cache.get_mut(&pn) else {
                 return if copied == 0 {
@@ -3519,19 +3860,22 @@ impl CachedFile {
             page.data()[page_offset..page_offset + len]
                 .copy_from_slice(&data[copied..copied + len]);
             if !self.in_memory {
-                page.mark_dirty();
+                let range_start = if old_size >= page_start && old_size < page_start + page_offset as u64 {
+                    (old_size - page_start) as usize
+                } else {
+                    page_offset
+                };
+                cache.mark_dirty_range(pn, range_start, page_offset + len);
                 if !writeback_requested {
                     self.shared.request_background_writeback();
                     writeback_requested = true;
                 }
             }
+            self.shared.extend_size(new_end);
             drop(cache);
 
             copied += len;
-            current = current
-                .checked_add(len as u64)
-                .ok_or(VfsError::InvalidInput)?;
-            self.shared.extend_size(current);
+            current = new_end;
         }
 
         Ok(copied)
@@ -3744,7 +4088,7 @@ impl CachedFile {
                 let new_page_offset = (len - page_start).min(PAGE_SIZE as u64) as usize;
                 page.data()[old_page_offset..new_page_offset].fill(0);
                 if !self.in_memory {
-                    page.mark_dirty();
+                    cache.mark_dirty_range(old_last_page, old_page_offset, new_page_offset);
                 }
             }
         } else {
@@ -3891,12 +4235,16 @@ impl CachedFile {
         pn: u32,
         may_write: bool,
     ) -> VfsResult<Option<PhysAddr>> {
-        let result = self.with_page(pn, |page| {
-            let Some(page) = page else {
-                return Ok(None);
-            };
-            page.pin_for_mapping(may_write).map(Some)
-        });
+        let result = {
+            let _page_guard = task::future::block_on(self.shared.page_access.acquire_for_page(pn));
+            let _guard = task::future::block_on(self.shared.io_lock.read());
+            let mut cache = self.shared.page_cache.lock();
+            if cache.contains(&pn) {
+                cache.pin_for_mapping(pn, may_write).map(Some)
+            } else {
+                Ok(None)
+            }
+        };
         if may_write && matches!(&result, Ok(Some(_))) {
             self.shared.watch_writable_mapping();
         }
@@ -4005,15 +4353,12 @@ impl CachedFile {
     }
 
     pub fn mark_shared_page_writable(&self, pn: u32, paddr: PhysAddr) -> VfsResult<()> {
-        let result = self.with_page(pn, |page| {
-            let page = page.ok_or(VfsError::BadState)?;
-            if page.paddr() != paddr || !page.has_user_mapping() {
-                return Err(VfsError::BadState);
-            }
-            page.writable_mapping_generation = page.writable_mapping_generation.wrapping_add(1);
-            page.may_write_mapping = true;
-            Ok(())
-        });
+        let result = {
+            let _page_guard = task::future::block_on(self.shared.page_access.acquire_for_page(pn));
+            let _guard = task::future::block_on(self.shared.io_lock.read());
+            let mut cache = self.shared.page_cache.lock();
+            cache.mark_shared_page_writable(pn, paddr)
+        };
         if result.is_ok() {
             self.shared.watch_writable_mapping();
         }
@@ -4036,15 +4381,19 @@ impl CachedFile {
 
     /// Marks the page at the given page index as dirty.
     pub fn mark_page_dirty(&self, pn: u32) -> VfsResult<()> {
-        let result = self.with_page(pn, |page| match page {
-            Some(page) => {
+        let result = {
+            let _page_guard = task::future::block_on(self.shared.page_access.acquire_for_page(pn));
+            let _guard = task::future::block_on(self.shared.io_lock.read());
+            let mut cache = self.shared.page_cache.lock();
+            if cache.contains(&pn) {
                 if !self.in_memory {
-                    page.mark_dirty();
+                    cache.mark_dirty(pn);
                 }
                 Ok(())
+            } else {
+                Err(VfsError::BadState)
             }
-            None => Err(VfsError::BadState),
-        });
+        };
         if !self.in_memory && result.is_ok() {
             self.shared.request_background_writeback();
         }
@@ -4386,6 +4735,7 @@ mod tests {
         WritebackPage {
             page_num: 0,
             frame: page.frame.clone(),
+            offset: 0,
             len: PAGE_SIZE,
             content_generation: page.content_generation,
             writable_mapping_generation: page.writable_mapping_generation,
@@ -4596,7 +4946,7 @@ mod tests {
         assert!(replacement.dirty);
         snapshot.complete(&mut original, &bytes);
         assert!(!original.dirty);
-        replacement.dirty = false;
+        replacement.clear_dirty();
     }
 
     #[test]

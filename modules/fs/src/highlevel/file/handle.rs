@@ -994,7 +994,11 @@ impl File {
         }
     }
 
-    fn new(inner: FileBackend, flags: FileFlags, write_access: Option<WriteAccessGuard>) -> Self {
+    pub(super) fn new(
+        inner: FileBackend,
+        flags: FileFlags,
+        write_access: Option<WriteAccessGuard>,
+    ) -> Self {
         let append_position = if flags.contains(FileFlags::APPEND) {
             cached_file_size(inner.location()).unwrap_or_default()
         } else {
@@ -1175,14 +1179,18 @@ impl File {
     pub async fn sync(&self, data_only: bool) -> VfsResult<()> {
         self.access(FileFlags::empty())?;
         #[cfg(feature = "times")]
-        let timestamp_flags = self.take_timestamp_updates().await?;
+        let timestamp_flags = if data_only {
+            0
+        } else {
+            self.take_timestamp_updates().await?
+        };
 
         let result = self
             .inner
             .sync_for_description(data_only, self.writeback_errors.as_ref())
             .await;
         #[cfg(feature = "times")]
-        if result.is_err() {
+        if result.is_err() && !data_only && timestamp_flags != 0 {
             self.access_flags
                 .fetch_or(timestamp_flags, Ordering::AcqRel);
         }

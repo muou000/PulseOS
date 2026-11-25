@@ -135,6 +135,13 @@ impl Ext4Filesystem {
         crate::disk::DiskWriteScope::new(self.disk_flusher.as_ref(), owners)
     }
 
+    pub(super) fn retroactive_write_scope(
+        &self,
+        owners: &[u64],
+    ) -> crate::disk::DiskWriteScope<'_> {
+        crate::disk::DiskWriteScope::new_retroactive(self.disk_flusher.as_ref(), owners)
+    }
+
     pub(super) fn queue_deletion(self: &Arc<Self>, ino: u32) {
         self.pending_deletions.lock().push(ino);
         self.deletion_generation.fetch_add(1, Ordering::Release);

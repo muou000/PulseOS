@@ -1926,9 +1926,11 @@ impl ExtentTree {
         let mut buf_pos = 0usize;
         let mut current_block = start_block;
         let mut total_written = 0usize;
+        let mut extents_mutated = false;
 
         while bytes_remaining > 0 {
             let opt_extent = self.find_extent(current_block).await?;
+            let mut iteration_mutated_extents = false;
 
             let advanced_bytes = match opt_extent {
                 Some(extent) => {
@@ -1980,6 +1982,8 @@ impl ExtentTree {
                         )
                         .await?
                     } else {
+                        iteration_mutated_extents = true;
+                        extents_mutated = true;
                         let metadata_before =
                             self.metadata_block_count().await?;
                         let written = write_into_uninitialized_extent(
@@ -2022,6 +2026,8 @@ impl ExtentTree {
                     written_in_run
                 }
                 None => {
+                    iteration_mutated_extents = true;
+                    extents_mutated = true;
                     let mut needed_blocks = blocks_needed_for_bytes(
                         start_offset_in_block,
                         bytes_remaining,
@@ -2130,13 +2136,23 @@ impl ExtentTree {
             start_offset_in_block =
                 offset_in_block_usize(current_offset, block_size_u64)?;
 
-            self.try_merge_adjacent(current_block).await?;
+            if iteration_mutated_extents {
+                self.try_merge_adjacent(current_block).await?;
+            }
         }
 
         let new_size = add_to_file_offset(offset, total_written)?;
-        inode.set_size_in_bytes(max(inode.size_in_bytes(), new_size));
-        inode.set_inline_data(self.to_bytes()?);
-        inode.write(&ext4).await?;
+        let updated_size = max(inode.size_in_bytes(), new_size);
+        let size_changed = updated_size != inode.size_in_bytes();
+        if size_changed {
+            inode.set_size_in_bytes(updated_size);
+        }
+        if extents_mutated {
+            inode.set_inline_data(self.to_bytes()?);
+        }
+        if size_changed || extents_mutated {
+            inode.write(&ext4).await?;
+        }
 
         Ok(total_written)
     }
@@ -2242,6 +2258,7 @@ impl ExtentTree {
         }
 
         let block_size_u64 = self.ext4.0.superblock.block_size().to_u64();
+        let block_size_usize = self.ext4.0.superblock.block_size().to_usize();
         let old_blocks = old_size.div_ceil(block_size_u64);
         let new_blocks = new_size.div_ceil(block_size_u64);
 
@@ -2275,6 +2292,28 @@ impl ExtentTree {
             inode.set_fs_blocks(fs_blocks, &self.ext4)?;
         }
 
+        let tail_offset = usize::try_from(new_size % block_size_u64)
+            .map_err(|_| CorruptKind::InvalidBlockSize)?;
+        if tail_offset != 0 {
+            let last_block = FileBlockIndex::try_from(new_size / block_size_u64)
+                .map_err(|_| Ext4Error::FileTooLarge)?;
+            if let Some(extent) = self.find_extent(last_block).await?
+                && extent.is_initialized
+            {
+                let offset_in_extent = last_block
+                    .checked_sub(extent.block_within_file)
+                    .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+                let fs_block = extent
+                    .start_block
+                    .checked_add(u64::from(offset_in_extent))
+                    .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+                let zeros = alloc::vec![0u8; block_size_usize - tail_offset];
+                let off_u32 = u32::try_from(tail_offset)
+                    .map_err(|_| CorruptKind::InvalidBlockSize)?;
+                self.ext4.write_to_block(fs_block, off_u32, &zeros).await?;
+            }
+        }
+
         inode.set_size_in_bytes(new_size);
         inode.write(&self.ext4).await?;
         Ok(())
@@ -2294,22 +2333,19 @@ async fn write_partial_block(
     let block_end = block_offset
         .checked_add(take)
         .ok_or(CorruptKind::InvalidBlockSize)?;
-
-    if block_size == 4096 {
-        let mut block_buf = [0u8; 4096];
-        if pre_read {
-            ext4.read_from_block(fs_block, 0, &mut block_buf).await?;
-        }
-        block_buf[block_offset..block_end].copy_from_slice(chunk);
-        ext4.write_to_block(fs_block, 0, &block_buf).await?;
-    } else {
-        let mut block_buf = alloc::vec![0u8; block_size];
-        if pre_read {
-            ext4.read_from_block(fs_block, 0, &mut block_buf).await?;
-        }
-        block_buf[block_offset..block_end].copy_from_slice(chunk);
-        ext4.write_to_block(fs_block, 0, &block_buf).await?;
+    if chunk.len() != take || block_end > block_size {
+        return Err(CorruptKind::InvalidBlockSize.into());
     }
+
+    if pre_read {
+        let block_offset = u32::try_from(block_offset)
+            .map_err(|_| CorruptKind::InvalidBlockSize)?;
+        return ext4.write_to_block(fs_block, block_offset, chunk).await;
+    }
+
+    let mut block_buf = alloc::vec![0u8; block_size];
+    block_buf[block_offset..block_end].copy_from_slice(chunk);
+    ext4.write_to_block(fs_block, 0, &block_buf).await?;
     Ok(())
 }
 
