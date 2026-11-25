@@ -77,6 +77,8 @@ fn main() {
                 process::fd::run_pipe_guest_checks().expect("pipe guest checks failed");
                 process::io_uring::run_io_uring_resource_guest_checks()
                     .expect("io_uring resource guest checks failed");
+                fs::run_virtio_blk_recheck_guest_checks()
+                    .expect("virtio-blk recheck guest checks failed");
             }
             process::run_futex_guest_checks().expect("futex guest checks failed");
             process::run_process_registry_guest_checks().expect("process registry guest checks failed");

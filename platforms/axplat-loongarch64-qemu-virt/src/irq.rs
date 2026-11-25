@@ -129,10 +129,19 @@ impl IrqIf for IrqIfImpl {
         } else if irq == EIOINTC_CPU_IRQ {
             if let Some(irq_num) = eiointc::claim_irq() {
                 trace!("EIOINTC IRQ {}", irq_num);
+                // PCH-MSI vectors (>= 64) are edge-triggered pulses: clear the
+                // pending bit before running the handler so new completions
+                // arriving while the handler runs are not wiped by a trailing W1C.
+                let ack_before_handle = irq_common::is_msi_irq(irq_num);
+                if ack_before_handle {
+                    eiointc::complete_irq(irq_num);
+                }
                 if !IRQ_HANDLER_TABLE.handle(irq_num) {
                     warn!("Unhandled EIOINTC IRQ {}", irq_num);
                 }
-                eiointc::complete_irq(irq_num);
+                if !ack_before_handle {
+                    eiointc::complete_irq(irq_num);
+                }
             } else {
                 debug!("Spurious EIOINTC interrupt");
             }

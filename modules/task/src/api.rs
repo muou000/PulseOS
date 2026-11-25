@@ -8,17 +8,60 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use kernel_guard::NoPreemptIrqSave;
 
-/// Global timer hook function pointer. Set by the process module to check itimers
-/// on each timer tick. Must be safe to call from interrupt context.
-static TIMER_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+const MAX_TIMER_HOOKS: usize = 4;
+
+/// Global timer hook function pointers invoked on each timer tick (e.g.
+/// process itimers, block watchdog). Must be safe to call from IRQ context.
+static TIMER_HOOKS: [AtomicPtr<()>; MAX_TIMER_HOOKS] = [
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+];
 
 /// Register a callback that will be invoked on every timer tick.
+///
+/// Registration is idempotent: re-registering the same hook is a no-op.
 ///
 /// # Safety
 ///
 /// The callback must be safe to call from interrupt context (no blocking locks).
 pub fn register_timer_hook(hook: fn()) {
-    TIMER_HOOK.store(hook as *mut (), Ordering::Release);
+    let target = hook as *mut ();
+    for slot in &TIMER_HOOKS {
+        let existing = slot.load(Ordering::Acquire);
+        if existing == target {
+            return;
+        }
+        if existing.is_null() {
+            match slot.compare_exchange(
+                core::ptr::null_mut(),
+                target,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) if actual == target => return,
+                Err(_) => {}
+            }
+        }
+    }
+    panic!("task timer hook table full");
+}
+
+fn invoke_timer_hooks() {
+    for slot in &TIMER_HOOKS {
+        let ptr = slot.load(Ordering::Acquire);
+        if !ptr.is_null() {
+            let hook: fn() = unsafe { core::mem::transmute(ptr) };
+            hook();
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn invoke_timer_hooks_for_test() {
+    invoke_timer_hooks();
 }
 
 /// Sets a generic oneshot timer that fires at the specified deadline.
@@ -220,12 +263,8 @@ pub fn on_timer_tick() {
     use kernel_guard::NoOp;
     crate::timers::check_events();
     crate::future::check_timer_events();
-    // Invoke the registered timer hook (e.g. itimer check).
-    let ptr = TIMER_HOOK.load(Ordering::Acquire);
-    if !ptr.is_null() {
-        let hook: fn() = unsafe { core::mem::transmute(ptr) };
-        hook();
-    }
+    // Invoke registered timer hooks (e.g. itimer check, block watchdog).
+    invoke_timer_hooks();
     // Since irq and preemption are both disabled here,
     // we can get current run queue with the default `kernel_guard::NoOp`.
     current_run_queue::<NoOp>().scheduler_timer_tick();

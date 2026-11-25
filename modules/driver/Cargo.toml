@@ -25,6 +25,7 @@ virtio = ["driver_virtio", "dep:kernel_alloc", "dep:hal", "dep:config"]
 
 multitask = []
 irq = ["task/irq"]
+guest-checks = []
 
 # Async block I/O interface (AsyncBlockDriverOps trait implementation).
 # Requires `multitask` + `irq` to be effective at runtime.

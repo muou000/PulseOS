@@ -64,7 +64,7 @@
 extern crate log;
 extern crate kernel_log;
 
-#[cfg(any(feature = "dyn", feature = "starfive-jh7110-dwmac"))]
+#[cfg(any(feature = "dyn", feature = "virtio", feature = "starfive-jh7110-dwmac"))]
 extern crate alloc;
 
 #[macro_use]
@@ -148,6 +148,56 @@ impl AllDevices {
             AxDeviceEnum::Display(dev) => self.display.push(dev),
         }
     }
+}
+
+/// Snapshot of VirtIO block driver completion and recheck counters for one device.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VirtIoBlkStats {
+    pub submissions: u64,
+    pub completions_total: u64,
+    pub irq_count: u64,
+    pub irq_completions: u64,
+    pub poll_completions: u64,
+    pub recheck_armed: u64,
+    pub recheck_already_armed: u64,
+    pub recheck_timer_programs: u64,
+    pub recheck_callback_fired: u64,
+    pub recheck_irq_completed_before_callback: u64,
+    pub recheck_callback_irq_already_completed: u64,
+    pub recheck_callback_reclaimed: u64,
+    pub recheck_reclaimed_completions: u64,
+    pub recheck_rearmed: u64,
+    pub in_flight_current: usize,
+    pub in_flight_max: usize,
+    pub in_flight_submit_sum: u64,
+    pub queue_full_waits: u64,
+    pub cancelled_detached: u64,
+    pub cancelled_completed_recycled: u64,
+}
+
+/// Copies a lock-free stats snapshot for each active VirtIO block device into `out`.
+///
+/// Returns the number of devices written (at most `out.len()`).
+pub fn copy_virtio_blk_stats(out: &mut [VirtIoBlkStats]) -> usize {
+    #[cfg(block_dev = "virtio-blk")]
+    {
+        virtio::copy_virtio_blk_stats(out)
+    }
+    #[cfg(not(block_dev = "virtio-blk"))]
+    {
+        let _ = out;
+        0
+    }
+}
+
+/// Suppresses or restores completion draining inside the VirtIO block IRQ handler
+/// for controlled missing-interrupt guest verification.
+#[cfg(feature = "guest-checks")]
+pub fn set_virtio_blk_irq_suppressed_for_test(suppressed: bool) {
+    #[cfg(block_dev = "virtio-blk")]
+    virtio::set_virtio_blk_irq_suppressed_for_test(suppressed);
+    #[cfg(not(block_dev = "virtio-blk"))]
+    let _ = suppressed;
 }
 
 /// Probes and initializes all device drivers, returns the [`AllDevices`] struct.
