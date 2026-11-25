@@ -966,8 +966,56 @@ impl Write for TcpSocket {
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        self.shutdown().ok();
-        SOCKET_SET.remove_and_unregister(self.handle);
+        if self.is_listening() {
+            LISTEN_TABLE.unlisten(self.endpoints.read().local.port);
+        }
+        SOCKET_SET.close_tcp(self.handle);
+    }
+}
+
+/// A TCP connection whose last application reference has been dropped.
+/// Its queued bytes and FIN can still need acknowledgements or retransmission.
+pub(super) struct ClosingTcp {
+    pub(super) handle: SocketHandle,
+    pub(super) deadline: hal::time::TimeValue,
+    state: tcp::State,
+    unacked: usize,
+}
+
+impl ClosingTcp {
+    pub(super) fn new(
+        handle: SocketHandle,
+        socket: &mut tcp::Socket,
+        now: hal::time::TimeValue,
+    ) -> Self {
+        let state = socket.state();
+        socket.discard_time_wait_buffers();
+        // CLOSED with a peer still has a reset to dispatch. Bound that last
+        // attempt as well, since the route or device may have disappeared.
+        let timeout = if state == tcp::State::Closed { 1 } else { 60 };
+        Self {
+            handle,
+            deadline: now + core::time::Duration::from_secs(timeout),
+            state,
+            unacked: socket.send_queue(),
+        }
+    }
+
+    pub(super) fn finished(&mut self, socket: &mut tcp::Socket, now: hal::time::TimeValue) -> bool {
+        if socket.remote_endpoint().is_none() {
+            return true;
+        }
+        if self.state != socket.state() || self.unacked != socket.send_queue() {
+            // Even a slow reader can keep draining while its ACKs advance.
+            *self = Self::new(self.handle, socket, now);
+        } else if now >= self.deadline {
+            if self.state == tcp::State::Closed {
+                return true;
+            }
+            socket.abort();
+            *self = Self::new(self.handle, socket, now);
+        }
+        false
     }
 }
 
