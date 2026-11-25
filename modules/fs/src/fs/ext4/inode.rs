@@ -1301,7 +1301,7 @@ impl DirNodeOps for Inode {
             flags: ext4plus::inode::InodeFlags::empty(),
         };
 
-        let mut write_scope = self.fs.write_scope(&[self.ino as u64]);
+        let mut write_scope = self.fs.retroactive_write_scope(&[self.ino as u64]);
         let write_scope_handle = write_scope.handle();
         write_scope
             .run(async {

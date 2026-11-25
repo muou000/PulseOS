@@ -1,9 +1,4 @@
-use alloc::{
-    boxed::Box,
-    string::{String, ToString},
-    sync::Arc,
-    vec,
-};
+use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
 use async_trait::async_trait;
@@ -31,21 +26,21 @@ fn take_mut<'a>(buf: &mut &'a mut [u8], cnt: usize) -> &'a mut [u8] {
 /// a compatibility bridge and blocks only the calling task on the same future.
 #[derive(Clone)]
 pub struct SharedBlockDevice {
-    name: String,
+    name: Arc<str>,
     dev: Arc<dyn DynAsyncBlockDriverOps + Send + Sync>,
 }
 
 impl SharedBlockDevice {
     /// Wraps a block device so the same underlying driver can be reused.
     pub fn new(dev: AxBlockDevice) -> Self {
-        let name = dev.device_name().to_string();
+        let name = Arc::from(dev.device_name());
         let dev: Arc<dyn DynAsyncBlockDriverOps + Send + Sync> = Arc::from(dev);
         Self { name, dev }
     }
 
     /// Builds a `SharedBlockDevice` from a pre-existing shared driver handle.
     pub fn from_arc(dev: Arc<dyn DynAsyncBlockDriverOps + Send + Sync>) -> Self {
-        let name = dev.device_name().to_string();
+        let name = Arc::from(dev.device_name());
         Self { name, dev }
     }
 
@@ -143,6 +138,10 @@ pub trait DiskFlushable: Send + Sync {
         0
     }
 
+    fn begin_retroactive_write_scope(&self, owners: &[u64]) -> u64 {
+        self.begin_write_scope(owners)
+    }
+
     fn enter_write_scope(&self, _scope_id: u64) {}
 
     fn include_write_owner(&self, _scope_id: u64, _owner: u64) {}
@@ -177,6 +176,11 @@ impl Drop for DiskWritePollGuard<'_> {
 impl<'a> DiskWriteScope<'a> {
     pub(crate) fn new(disk: &'a dyn DiskFlushable, owners: &[u64]) -> Self {
         let scope_id = disk.begin_write_scope(owners);
+        Self { disk, scope_id }
+    }
+
+    pub(crate) fn new_retroactive(disk: &'a dyn DiskFlushable, owners: &[u64]) -> Self {
+        let scope_id = disk.begin_retroactive_write_scope(owners);
         Self { disk, scope_id }
     }
 

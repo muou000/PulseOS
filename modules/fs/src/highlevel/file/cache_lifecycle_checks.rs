@@ -21,6 +21,8 @@ use spin::Mutex;
 use super::{
     CachedFile, CachedFileShared, File, FileBackend, FileCacheKey, FsContext, OpenOptions,
     PAGE_SIZE, PageCache, UnlinkedFileCacheLease, WritebackPage,
+    CachedFile, CachedFileShared, File, FileBackend, FileCacheKey, FileFlags, FsContext,
+    OpenOptions, PAGE_SIZE, PageCache, UnlinkedFileCacheLease, WritebackPage,
     active_disk_file_cache_snapshot, cached_file_size, cached_file_size_if_present,
     detach_file_cache_state, discard_unlinked_file_cache_after, file_state_registry_shard,
     flush_all_file_caches_async, flush_file_cache_state, flush_pending_file_caches_async,
@@ -46,6 +48,17 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(&waker))
 }
 
+struct MockDiskFs;
+
+#[async_trait::async_trait]
+impl FilesystemOps for MockDiskFs {
+    fn name(&self) -> &str { "mockdisk" }
+    fn root_dir(&self) -> vfs::DirEntry { panic!("mock disk fs has no root dir") }
+    fn stat(&self) -> VfsResult<vfs::StatFs> { Err(VfsError::Unsupported) }
+}
+
+static MOCK_DISK_FS: MockDiskFs = MockDiskFs;
+
 struct TestFile {
     inode: u64,
     data: Mutex<Vec<u8>>,
@@ -59,6 +72,10 @@ struct TestFile {
     pause_sync: AtomicBool,
     writes: AtomicUsize,
     syncs: AtomicUsize,
+    allow_metadata_update: AtomicBool,
+    metadata_updates: AtomicUsize,
+    set_lens: AtomicUsize,
+    last_writes: Mutex<Vec<(u64, usize)>>,
 }
 
 #[async_trait::async_trait]
@@ -67,10 +84,21 @@ impl NodeOps for TestFile {
     async fn metadata(&self) -> VfsResult<Metadata> { Err(VfsError::Unsupported) }
     async fn update_metadata(&self, _update: MetadataUpdate) -> VfsResult<()> {
         Err(VfsError::Unsupported)
+        if self.allow_metadata_update.load(Ordering::Acquire) {
+            self.metadata_updates.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err(VfsError::Unsupported)
+        }
     }
     async fn len(&self) -> VfsResult<u64> { Ok(self.data.lock().len() as u64) }
     fn filesystem(&self) -> &dyn FilesystemOps {
         panic!("cache lifecycle checks do not query filesystem metadata")
+        if self.allow_metadata_update.load(Ordering::Acquire) {
+            &MOCK_DISK_FS
+        } else {
+            panic!("cache lifecycle checks do not query filesystem metadata")
+        }
     }
     async fn sync(&self, _data_only: bool) -> VfsResult<()> {
         self.syncs.fetch_add(1, Ordering::Relaxed);
@@ -142,10 +170,12 @@ impl FileNodeOps for TestFile {
         let mut data = self.data.lock();
         if end > data.len() { data.resize(end, 0); }
         data[offset..end].copy_from_slice(buf);
+        self.last_writes.lock().push((offset as u64, buf.len()));
         Ok(buf.len())
     }
     async fn append(&self, _buf: &[u8]) -> VfsResult<(usize, u64)> { Err(VfsError::Unsupported) }
     async fn set_len(&self, len: u64) -> VfsResult<()> {
+        self.set_lens.fetch_add(1, Ordering::Relaxed);
         self.data.lock().resize(usize::try_from(len).map_err(|_| VfsError::InvalidInput)?, 0);
         Ok(())
     }
@@ -173,6 +203,10 @@ impl CacheCase {
             pause_sync: AtomicBool::new(false),
             writes: AtomicUsize::new(0),
             syncs: AtomicUsize::new(0),
+            allow_metadata_update: AtomicBool::new(false),
+            metadata_updates: AtomicUsize::new(0),
+            set_lens: AtomicUsize::new(0),
+            last_writes: Mutex::new(Vec::new()),
         });
         let file = FileNode::new(backend.clone());
         let shared = Arc::new(CachedFileShared::new(0, false, PAGE_SIZE as u64, Some(file.clone())));
@@ -351,6 +385,7 @@ fn snapshot_identity_generations() -> VfsResult<()> {
 
 pub(super) fn run() -> VfsResult<()> {
     let checks: [(&str, fn() -> VfsResult<()>); 9] = [
+    let checks: [(&str, fn() -> VfsResult<()>); 11] = [
         ("fault_io_owner_waiter", fault_io_owner_waiter),
         ("fault_io_hot_target_cold_neighbor", fault_io_hot_target_cold_neighbor),
         ("fault_io_cancel_error_retry", fault_io_cancel_error_retry),
@@ -360,6 +395,14 @@ pub(super) fn run() -> VfsResult<()> {
         ("cache_redirty_checkpoint", redirty_checkpoint),
         ("cache_durability_recovery", durability_recovery),
         ("cache_snapshot_identity_generations", snapshot_identity_generations),
+        (
+            "fdatasync_skips_deferred_timestamps_and_redundant_set_len",
+            fdatasync_skips_deferred_timestamps_and_redundant_set_len,
+        ),
+        (
+            "fdatasync_partial_page_subrange_redirty_and_retry",
+            fdatasync_partial_page_subrange_redirty_and_retry,
+        ),
     ];
     for (name, check) in checks {
         if let Err(err) = check() {
@@ -669,6 +712,10 @@ fn create_test_file_cache(
         pause_sync: AtomicBool::new(false),
         writes: AtomicUsize::new(0),
         syncs: AtomicUsize::new(0),
+        allow_metadata_update: AtomicBool::new(false),
+        metadata_updates: AtomicUsize::new(0),
+        set_lens: AtomicUsize::new(0),
+        last_writes: Mutex::new(Vec::new()),
     });
     let file = FileNode::new(backend.clone());
     let shared = Arc::new(CachedFileShared::new(
@@ -1053,4 +1100,165 @@ fn fault_io_unsupported_generation_retry() -> VfsResult<()> {
     check!(io == mm::FilePageIo::StorageRead);
     check!(backend.reads.load(Ordering::Acquire) == 3);
     Ok(())
+}
+
+fn test_cached_file_handle(inode: u64, initial_data: Vec<u8>) -> (File, Arc<CachedFileShared>, Arc<TestFile>) {
+    let initial_len = initial_data.len() as u64;
+    let backend = Arc::new(TestFile {
+        inode,
+        data: Mutex::new(initial_data),
+        fail_read: AtomicBool::new(false),
+        pause_read: AtomicBool::new(false),
+        read_io: AtomicUsize::new(0),
+        reads: AtomicUsize::new(0),
+        fail_write: AtomicBool::new(false),
+        fail_sync: AtomicBool::new(false),
+        pause_write: AtomicBool::new(false),
+        pause_sync: AtomicBool::new(false),
+        writes: AtomicUsize::new(0),
+        syncs: AtomicUsize::new(0),
+        allow_metadata_update: AtomicBool::new(true),
+        metadata_updates: AtomicUsize::new(0),
+        set_lens: AtomicUsize::new(0),
+        last_writes: Mutex::new(Vec::new()),
+    });
+    let file_node = FileNode::new(backend.clone());
+    let shared = Arc::new(CachedFileShared::new(0, false, initial_len, Some(file_node.clone())));
+    let fs = crate::fs::new_tmpfs();
+    let mount = Mountpoint::new_root(&fs);
+    let entry = vfs::DirEntry::new_file(
+        file_node,
+        vfs::NodeType::RegularFile,
+        vfs::Reference::root(),
+    );
+    let cached = super::CachedFile {
+        inner: vfs::Location::new(mount, entry),
+        shared: shared.clone(),
+        in_memory: false,
+        read_hint: Arc::new(core::sync::atomic::AtomicU64::new(u64::MAX)),
+    };
+    let file = File::new(FileBackend::Cached(cached), FileFlags::READ | FileFlags::WRITE, None);
+    (file, shared, backend)
+}
+
+fn fdatasync_skips_deferred_timestamps_and_redundant_set_len() -> VfsResult<()> {
+    let (file, _shared, backend) = test_cached_file_handle(9001, Vec::new());
+    let chunk1 = vec![0x41u8; 288];
+    let chunk2 = vec![0x42u8; 288];
+
+    task::future::block_on(async {
+        check!(file.write_at_slice(&chunk1, 0).await? == chunk1.len());
+        file.sync(true).await?;
+        check!(backend.metadata_updates.load(Ordering::Acquire) == 0);
+        check!(backend.set_lens.load(Ordering::Acquire) == 0);
+        check!(&*backend.last_writes.lock() == &[(0u64, 288usize)]);
+        backend.last_writes.lock().clear();
+
+        check!(file.write_at_slice(&chunk2, 288).await? == chunk2.len());
+        file.sync(true).await?;
+        check!(backend.metadata_updates.load(Ordering::Acquire) == 0);
+        check!(backend.set_lens.load(Ordering::Acquire) == 0);
+        check!(&*backend.last_writes.lock() == &[(288u64, 288usize)]);
+        {
+            let data = backend.data.lock();
+            check!(data.len() == 576);
+            check!(data[..288] == chunk1[..]);
+            check!(data[288..576] == chunk2[..]);
+        }
+
+        file.sync(false).await?;
+        #[cfg(feature = "times")]
+        check!(backend.metadata_updates.load(Ordering::Acquire) == 1);
+        Ok(())
+    })
+}
+
+fn fdatasync_partial_page_subrange_redirty_and_retry() -> VfsResult<()> {
+    let (file, shared, backend) = test_cached_file_handle(9002, Vec::new());
+    let p1 = vec![0x11u8; 128];
+    let p2 = vec![0x22u8; 128];
+    let p3 = vec![0x33u8; 128];
+    let p4 = vec![0x44u8; 128];
+
+    // 1. Sync failure preserves dirty state for retry.
+    task::future::block_on(async {
+        check!(file.write_at_slice(&p1, 0).await? == 128);
+        file.sync(true).await?;
+        check!(file.write_at_slice(&p2, 128).await? == 128);
+        backend.fail_sync.store(true, Ordering::Release);
+        check!(file.sync(true).await.is_err());
+        check!(shared.page_cache.lock().peek(&0).is_some_and(|p| p.dirty));
+        backend.fail_sync.store(false, Ordering::Release);
+        file.sync(true).await?;
+        check!(&backend.data.lock()[..256] == [&p1[..], &p2[..]].concat().as_slice());
+        Ok::<_, VfsError>(())
+    })?;
+
+    // 2. Concurrent re-dirty during paused writeback leaves page dirty and preserves new bytes.
+    task::future::block_on(file.write_at_slice(&p3, 256))?;
+    backend.last_writes.lock().clear();
+    backend.pause_write.store(true, Ordering::Release);
+    let mut sync_fut = Box::pin(shared.sync_dirty_pages_async(
+        file.location().entry().as_file()?,
+        true,
+    ));
+    check!(poll_once(sync_fut.as_mut()).is_pending());
+    check!(backend.writes.load(Ordering::Acquire) == 3);
+    // Simulate concurrent page write while writeback write_at is in-flight.
+    {
+        let mut cache = shared.page_cache.lock();
+        let page = cache.get_mut(&0).ok_or(VfsError::BadState)?;
+        page.data()[384..512].copy_from_slice(&p4);
+        page.mark_dirty();
+    }
+    shared.set_size(512);
+    backend.pause_write.store(false, Ordering::Release);
+    let Poll::Ready(res) = poll_once(sync_fut.as_mut()) else {
+        return Err(VfsError::BadState);
+    };
+    res?;
+    check!(shared.page_cache.lock().peek(&0).is_some_and(|p| p.dirty));
+    task::future::block_on(file.sync(true))?;
+    check!(&backend.data.lock()[256..512] == [&p3[..], &p4[..]].concat().as_slice());
+
+    // 3. Truncate shrink into partial page zeroes tail across re-extend.
+    let FileBackend::Cached(cached) = file.backend()? else {
+        return Err(VfsError::BadState);
+    };
+    task::future::block_on(async {
+        cached.set_len_async(100).await?;
+        file.sync(true).await?;
+        check!(file.write_at_slice(&[0x55u8; 50], 200).await? == 50);
+        file.sync(true).await?;
+        {
+            let data = backend.data.lock();
+            check!(data.len() == 250);
+            check!(data[100..200].iter().all(|&b| b == 0));
+            check!(data[200..250].iter().all(|&b| b == 0x55));
+        }
+
+        // 4. Read-only mapping upgraded via mark_shared_page_writable is tracked in
+        // writable_mapped_pages, flushed on fdatasync, and cleared when unmapped.
+        let paddr = cached
+            .try_pin_shared_page_paddr(0, false)?
+            .ok_or(VfsError::BadState)?;
+        let pin = MappingPin(paddr);
+        cached.mark_shared_page_writable(0, paddr)?;
+        {
+            let mut cache = shared.page_cache.lock();
+            check!(cache.writable_mapped_pages.contains(&0));
+            let page = cache.get_mut(&0).ok_or(VfsError::BadState)?;
+            page.data()[128..144].fill(0x77);
+        }
+        file.sync(true).await?;
+        check!(backend.data.lock()[128..144].iter().all(|&b| b == 0x77));
+        drop(pin);
+        file.sync(true).await?;
+        {
+            let cache = shared.page_cache.lock();
+            check!(!cache.writable_mapped_pages.contains(&0));
+            check!(cache.peek(&0).is_some_and(|p| !p.may_write_mapping));
+        }
+        Ok(())
+    })
 }
