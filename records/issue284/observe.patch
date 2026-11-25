@@ -1,0 +1,297 @@
+diff --git a/modules/fs/src/fs/ext4/fs.rs b/modules/fs/src/fs/ext4/fs.rs
+index d8fd1741..8463778d 100644
+--- a/modules/fs/src/fs/ext4/fs.rs
++++ b/modules/fs/src/fs/ext4/fs.rs
+@@ -45,6 +45,23 @@ impl Ext4Filesystem {
+     pub async fn new<D: AsyncBlockDriverOps + Clone + 'static>(dev: D) -> VfsResult<Filesystem> {
+         log::info!("Ext4Filesystem::new: opening block device");
+         let disk = Ext4Disk::new(dev);
++        {
++            let weak = Arc::downgrade(&disk);
++            let mut slot = crate::sst_observe::EXT4_SNAPSHOT.lock();
++            if slot.is_none() {
++                *slot = Some(alloc::boxed::Box::new(move || {
++                    let Some(disk) = weak.upgrade() else { return (0, 0) };
++                    let mut cached = 0;
++                    let mut evicted = 0;
++                    for stripe in &disk.block_cache_stripes {
++                        let stripe = stripe.inner.lock();
++                        cached += stripe.cache.iter().map(|(_, blk)| blk.data.len()).sum::<usize>();
++                        evicted += stripe.flushing_evicted.values().map(|(_, buf)| buf.len()).sum::<usize>();
++                    }
++                    (cached, evicted)
++                }));
++            }
++        }
+
+         const EXT4_SUPERBLOCK_OFFSET: usize = 1024;
+         const LOG_BLOCK_SIZE_OFFSET: usize = 24;
+diff --git a/modules/fs/src/fs/ext4/mod.rs b/modules/fs/src/fs/ext4/mod.rs
+index eafe9af3..02302a23 100644
+--- a/modules/fs/src/fs/ext4/mod.rs
++++ b/modules/fs/src/fs/ext4/mod.rs
+@@ -1328,6 +1328,7 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
+         D: AsyncBlockDriverOps,
+     {
+         for attempt in 1..=DEVICE_READ_MAX_ATTEMPTS {
++            let observed_start = crate::sst_observe::device_read(dest.len());
+             let read_result = match task::future::timeout(
+                 Some(DEVICE_IO_TIMEOUT),
+                 dev.read_block_async(first_block, dest),
+@@ -1348,6 +1349,9 @@ impl<D: AsyncBlockDriverOps + Clone + 'static> Ext4Disk<D> {
+                     Err(DevError::Io)
+                 }
+             };
++            if let Some(start) = observed_start {
++                crate::sst_observe::SST_DISK_NS.fetch_add(hal::time::monotonic_time_nanos() - start, Ordering::Relaxed);
++            }
+             match read_result {
+                 Ok(()) => return Ok(()),
+                 Err(error)
+diff --git a/modules/fs/src/fs/procfs.rs b/modules/fs/src/fs/procfs.rs
+index ec853333..6e56e92d 100644
+--- a/modules/fs/src/fs/procfs.rs
++++ b/modules/fs/src/fs/procfs.rs
+@@ -896,12 +896,14 @@ fn render_meminfo() -> String {
+     let mem_free = free_bytes.min(total_bytes);
+     let mem_available = mem_free;
+
+-    format!(
++    let mut out = format!(
+         "MemTotal: {:>8} kB\nMemFree: {:>9} kB\nMemAvailable: {:>4} kB\n",
+         to_kib(total_bytes),
+         to_kib(mem_free),
+         to_kib(mem_available)
+-    )
++    );
++    crate::sst_observe::append(&mut out);
++    out
+ }
+
+ fn render_mounts() -> String {
+diff --git a/modules/fs/src/highlevel/file/cache.rs b/modules/fs/src/highlevel/file/cache.rs
+index 49575049..b0d3a021 100644
+--- a/modules/fs/src/highlevel/file/cache.rs
++++ b/modules/fs/src/highlevel/file/cache.rs
+@@ -2,6 +2,8 @@ use kspin::SpinNoPreempt;
+
+ use super::*;
+
++use crate::sst_observe as observe;
++
+ #[cfg(feature = "mapping-lifecycle-test")]
+ #[path = "cache_lifecycle_checks.rs"]
+ mod lifecycle_checks;
+@@ -1364,6 +1366,7 @@ struct EvictListener {
+ /// Page cache map paired with secondary O(dirty) and O(mapped) indices so
+ /// fdatasync and range queries avoid scanning all clean resident pages.
+ pub(crate) struct PageCacheMap {
++    observed_sst: bool,
+     lru: LruCache<u32, PageCache>,
+     dirty_pages: alloc::collections::BTreeSet<u32>,
+     writable_mapped_pages: alloc::collections::BTreeSet<u32>,
+@@ -1372,6 +1375,7 @@ pub(crate) struct PageCacheMap {
+ impl PageCacheMap {
+     fn unbounded() -> Self {
+         Self {
++            observed_sst: false,
+             lru: LruCache::unbounded(),
+             dirty_pages: alloc::collections::BTreeSet::new(),
+             writable_mapped_pages: alloc::collections::BTreeSet::new(),
+@@ -1446,17 +1450,22 @@ impl PageCacheMap {
+         } else {
+             self.writable_mapped_pages.remove(&pn);
+         }
+-        self.lru.put(pn, page)
++        let old = self.lru.put(pn, page);
++        if self.observed_sst { observe::resident(self.len()); }
++        old
+     }
+
+     pub(crate) fn pop(&mut self, pn: &u32) -> Option<PageCache> {
+         self.dirty_pages.remove(pn);
+         self.writable_mapped_pages.remove(pn);
+-        self.lru.pop(pn)
++        let old = self.lru.pop(pn);
++        if self.observed_sst { observe::resident(self.len()); }
++        old
+     }
+
+     pub(crate) fn pop_lru(&mut self) -> Option<(u32, PageCache)> {
+         let (pn, page) = self.lru.pop_lru()?;
++        if self.observed_sst { observe::resident(self.len()); }
+         self.dirty_pages.remove(&pn);
+         self.writable_mapped_pages.remove(&pn);
+         Some((pn, page))
+@@ -1464,6 +1473,7 @@ impl PageCacheMap {
+
+     pub(crate) fn clear(&mut self) {
+         self.lru.clear();
++        if self.observed_sst { observe::resident(0); }
+         self.dirty_pages.clear();
+         self.writable_mapped_pages.clear();
+     }
+@@ -1884,6 +1894,7 @@ impl CachedFileShared {
+                 continue;
+             }
+             if let Some(entry) = cache.pop_lru() {
++                if cache.observed_sst { observe::EVICTIONS.fetch_add(1, Ordering::Relaxed); }
+                 evicted.push(entry);
+             }
+             scanned += 1;
+@@ -3069,6 +3080,12 @@ impl CachedFile {
+             }
+         };
+
++        if !in_memory && location.entry().name().ends_with(".sst") {
++            let mut cache = shared.page_cache.lock();
++            cache.observed_sst = true;
++            observe::INODE.store(location.inode(), Ordering::Relaxed);
++            observe::resident(cache.len());
++        }
+         Ok(Self {
+             inner: location,
+             shared,
+@@ -3259,6 +3276,9 @@ impl CachedFile {
+         file_len: u64,
+         observe_target: bool,
+     ) -> VfsResult<(Vec<(u32, PageCache)>, Option<bool>)> {
++        let inode = observe::INODE.load(Ordering::Relaxed);
++        let _observation = (inode != 0 && self.inner.inode() == inode && !self.in_memory)
++            .then(|| observe::Fill::new(page_count));
+         let mut storage_read = Some(false);
+         let page_start = pn as u64 * PAGE_SIZE as u64;
+         let bytes_available = file_len.saturating_sub(page_start);
+@@ -3751,6 +3771,10 @@ impl CachedFile {
+             page_offset = 0;
+         }
+
++        if cache.observed_sst {
++            let pages = (end_page - start_page) as usize;
++            observe::read(pages, pages);
++        }
+         self.read_hint.store(end, Ordering::Release);
+         Some(Ok(read))
+     }
+@@ -3772,6 +3796,7 @@ impl CachedFile {
+         let mut read = 0usize;
+         let sequential = self.read_hint.load(Ordering::Acquire) == offset;
+         let mut pn = start_page;
++        let mut first_lookup = true;
+         while pn < end_page {
+             let hit_pages = {
+                 // A resident page is stable while `page_cache` is held. Keep
+@@ -3779,6 +3804,11 @@ impl CachedFile {
+                 // and device waits happen after both guards are dropped.
+                 let _io_guard = self.shared.io_lock.read().await;
+                 let mut cache = self.shared.page_cache.lock();
++                if first_lookup && cache.observed_sst {
++                    let hits = (start_page..end_page).filter(|pn| cache.contains(pn)).count();
++                    observe::read((end_page - start_page) as usize, hits);
++                }
++                first_lookup = false;
+                 let mut hit_pages = 0usize;
+                 while pn < end_page && hit_pages < READ_COPY_BATCH_PAGES {
+                     let page_start = pn as u64 * PAGE_SIZE as u64;
+diff --git a/modules/fs/src/lib.rs b/modules/fs/src/lib.rs
+index a7099ab9..be3ba205 100644
+--- a/modules/fs/src/lib.rs
++++ b/modules/fs/src/lib.rs
+@@ -26,6 +26,7 @@ use kspin::SpinNoPreempt;
+ use spin::Lazy;
+
+ mod disk;
++mod sst_observe;
+ pub mod fs;
+ mod mounts;
+
+diff --git a/modules/fs/src/sst_observe.rs b/modules/fs/src/sst_observe.rs
+new file mode 100644
+index 00000000..b2088f93
+--- /dev/null
++++ b/modules/fs/src/sst_observe.rs
+@@ -0,0 +1,84 @@
++// Diagnostic kernel used by the single-SST, single-reader #284 workload.
++use alloc::{boxed::Box, string::String};
++use core::{fmt::Write, sync::atomic::{AtomicU64, Ordering::Relaxed}};
++use kspin::SpinNoPreempt;
++
++macro_rules! counters {
++    ($($ident:ident => $name:literal),+ $(,)?) => {
++        $(pub(crate) static $ident: AtomicU64 = AtomicU64::new(0);)+
++        pub(crate) fn append(out: &mut String) {
++            $(writeln!(out, "{}: {}", $name, $ident.load(Relaxed)).unwrap();)+
++            if let Some(snapshot) = &*EXT4_SNAPSHOT.lock() {
++                let (cached, evicted) = snapshot();
++                writeln!(out, "Ext4CachedBytes: {cached}\nExt4FlushEvictedBytes: {evicted}").unwrap();
++            }
++        }
++    };
++}
++
++counters! {
++    INODE => "SstInode", READ_CALLS => "SstReadCalls", READ_PAGES => "SstReadPages",
++    HITS => "SstResidentHits", FILLS => "SstRefillCalls", PAGES => "SstRefillPages",
++    EVICTIONS => "SstEvictions", RESIDENT => "SstResidentPages", PEAK => "SstPeakPages",
++    FILL_NS => "SstRefillNanos", COLLISIONS => "SstFillCollisions",
++    EXT4_READS => "Ext4ReadCalls", EXT4_BYTES => "Ext4ReadBytes",
++    EXT4_SMALL => "Ext4SmallCalls", EXT4_SMALL_BYTES => "Ext4SmallBytes",
++    SST_READS => "SstFillExt4Calls", SST_BYTES => "SstFillExt4Bytes",
++    SST_DISK_NS => "SstFillExt4Nanos",
++}
++
++pub(crate) static EXT4_SNAPSHOT: SpinNoPreempt<Option<Box<dyn Fn() -> (usize, usize) + Send + Sync>>> = SpinNoPreempt::new(None);
++static READER: AtomicU64 = AtomicU64::new(0);
++
++pub(crate) fn read(pages: usize, hits: usize) {
++    READ_CALLS.fetch_add(1, Relaxed);
++    READ_PAGES.fetch_add(pages as u64, Relaxed);
++    HITS.fetch_add(hits as u64, Relaxed);
++}
++
++pub(crate) fn resident(pages: usize) {
++    RESIDENT.store(pages as u64, Relaxed);
++    PEAK.fetch_max(pages as u64, Relaxed);
++}
++
++pub(crate) struct Fill {
++    start: u64,
++    acquired: bool,
++}
++
++impl Fill {
++    pub(crate) fn new(pages: usize) -> Self {
++        FILLS.fetch_add(1, Relaxed);
++        PAGES.fetch_add(pages as u64, Relaxed);
++        let id = task::current().id().as_u64();
++        let acquired = READER.compare_exchange(0, id, Relaxed, Relaxed).is_ok();
++        if !acquired {
++            COLLISIONS.fetch_add(1, Relaxed);
++        }
++        Self { start: hal::time::monotonic_time_nanos(), acquired }
++    }
++}
++
++impl Drop for Fill {
++    fn drop(&mut self) {
++        if self.acquired {
++            READER.store(0, Relaxed);
++        }
++        FILL_NS.fetch_add(hal::time::monotonic_time_nanos() - self.start, Relaxed);
++    }
++}
++
++pub(crate) fn device_read(bytes: usize) -> Option<u64> {
++    EXT4_READS.fetch_add(1, Relaxed);
++    EXT4_BYTES.fetch_add(bytes as u64, Relaxed);
++    if bytes <= 4096 {
++        EXT4_SMALL.fetch_add(1, Relaxed);
++        EXT4_SMALL_BYTES.fetch_add(bytes as u64, Relaxed);
++    }
++    let id = READER.load(Relaxed);
++    if id != 0 && task::current().id().as_u64() == id {
++        SST_READS.fetch_add(1, Relaxed);
++        SST_BYTES.fetch_add(bytes as u64, Relaxed);
++        Some(hal::time::monotonic_time_nanos())
++    } else { None }
++}
