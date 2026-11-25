@@ -1,6 +1,7 @@
 /* Run inside the stock PulseOS QEMU user-network guest. */
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,7 +86,7 @@ static void connection(int *client, int *peer, struct sockaddr_in *source)
     require(close(listener) == 0, "close listener");
 }
 
-static void drain(void)
+static void drain(bool slow)
 {
     int client, peer;
     struct sockaddr_in source;
@@ -95,12 +96,13 @@ static void drain(void)
 
     /* Exceed the peer's 256 KiB receive window so the final close must leave
        some accepted data in the sender until this thread starts reading. */
-    static unsigned char data[384 * 1024];
-    for (size_t i = 0; i < sizeof(data); ++i)
+    static unsigned char data[480 * 1024];
+    const size_t size = slow ? sizeof(data) : 384 * 1024;
+    for (size_t i = 0; i < size; ++i)
         data[i] = (unsigned char)(i % 251);
     size_t sent = 0;
-    while (sent < sizeof(data)) {
-        ssize_t n = send(copy, data + sent, sizeof(data) - sent, MSG_NOSIGNAL);
+    while (sent < size) {
+        ssize_t n = send(copy, data + sent, size - sent, MSG_NOSIGNAL);
         require(n > 0, "send on duplicate");
         sent += (size_t)n;
     }
@@ -108,9 +110,24 @@ static void drain(void)
     unsigned char buf[8192];
     size_t got = 0;
     ssize_t n;
-    while ((n = recv(peer, buf, sizeof(buf), 0)) > 0) {
+    /* Open the window twice, with the second read after the initial 60s
+       orphan deadline. ACK progress from the first read must extend it. */
+    const size_t first_read = 128 * 1024;
+    if (slow)
+        sleep(35);
+    for (;;) {
+        size_t length = sizeof(buf);
+        if (slow && got < first_read && first_read - got < length)
+            length = first_read - got;
+        n = recv(peer, buf, length, 0);
+        if (n <= 0)
+            break;
         require((size_t)n <= sent - got && !memcmp(buf, data + got, (size_t)n), "payload");
         got += (size_t)n;
+        if (slow && got == first_read) {
+            printf("read %zu bytes after 35 seconds, pausing 35 more\n", got);
+            sleep(35);
+        }
     }
     printf("accepted=%zu received=%zu final_recv=%zd\n", sent, got, n);
     require(n == 0 && got == sent, "complete stream followed by EOF");
@@ -151,10 +168,11 @@ static void abort_connect(void)
 int main(int argc, char **argv)
 {
     if (argc != 2) {
-        fprintf(stderr, "usage: %s {drain|orphan|abort}\n", argv[0]);
+        fprintf(stderr, "usage: %s {drain|slow|orphan|abort}\n", argv[0]);
         return 2;
     }
-    if (!strcmp(argv[1], "drain")) drain();
+    if (!strcmp(argv[1], "drain")) drain(false);
+    else if (!strcmp(argv[1], "slow")) drain(true);
     else if (!strcmp(argv[1], "orphan")) orphan();
     else if (!strcmp(argv[1], "abort")) abort_connect();
     else return 2;
