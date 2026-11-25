@@ -1,7 +1,7 @@
 //! Opt-in guest checks using real cache frames and asynchronous FileNode I/O.
 //! The backend injects storage errors; it does not claim physical disk coverage.
 
-use alloc::{boxed::Box, sync::Arc, task::Wake, vec::Vec};
+use alloc::{boxed::Box, sync::{Arc, Weak}, vec, vec::Vec};
 use core::{
     any::Any,
     future::Future,
@@ -11,18 +11,20 @@ use core::{
 };
 
 use vfs::{
-    FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, NodeOps, VfsError, VfsResult,
+    FileNode, FileNodeOps, FilesystemOps, Metadata, MetadataUpdate, Mountpoint, NodeOps,
+    NodePermission, VfsError, VfsResult,
 };
 use hal::mem::PhysAddr;
 use poll::{IoEvents, Pollable};
 use spin::Mutex;
 
 use super::{
-    CachedFileShared, FileCacheKey, PAGE_SIZE, PageCache, UnlinkedFileCacheLease, WritebackPage,
-    active_disk_file_cache_snapshot, detach_file_cache_state, discard_unlinked_file_cache_after,
-    file_state_registry_shard, flush_all_file_caches_async, flush_file_cache_state,
-    flush_pending_file_caches_async, page_cache_reclaim_inner,
-    release_unreferenced_disk_file_caches, FILE_SHARED_STATES,
+    CachedFile, CachedFileShared, File, FileBackend, FileCacheKey, FsContext, OpenOptions,
+    PAGE_SIZE, PageCache, UnlinkedFileCacheLease, WritebackPage,
+    active_disk_file_cache_snapshot, cached_file_size, cached_file_size_if_present,
+    detach_file_cache_state, discard_unlinked_file_cache_after, file_state_registry_shard,
+    flush_all_file_caches_async, flush_file_cache_state, flush_pending_file_caches_async,
+    page_cache_reclaim_inner, release_unreferenced_disk_file_caches, FILE_SHARED_STATES,
 };
 
 macro_rules! check {
@@ -35,7 +37,7 @@ macro_rules! check {
 }
 
 struct NoopWake;
-impl Wake for NoopWake {
+impl alloc::task::Wake for NoopWake {
     fn wake(self: Arc<Self>) {}
 }
 
@@ -367,8 +369,283 @@ pub(super) fn run() -> VfsResult<()> {
         info!("MLC_KERNEL PASS {}", name);
     }
     run_cache_shard_regression_checks()?;
+    run_tmpfs_cache_lifecycle_checks()?;
     #[cfg(feature = "ext4")]
     crate::fs::ext4::run_fault_io_checks()?;
+    Ok(())
+}
+
+fn new_tmpfs_context() -> (vfs::Filesystem, FsContext) {
+    let fs = crate::fs::new_tmpfs();
+    let mount = Mountpoint::new_root(&fs);
+    let cx = FsContext::new(mount.root_location());
+    (fs, cx)
+}
+
+fn weak_cache_for_file(file: &File) -> VfsResult<Weak<CachedFileShared>> {
+    match file.backend()? {
+        FileBackend::Cached(cached) => Ok(Arc::downgrade(&cached.shared)),
+        FileBackend::Direct(_) => Err(VfsError::BadState),
+    }
+}
+
+fn tmpfs_write_new(cx: &FsContext, path: &str, data: &[u8]) -> VfsResult<Weak<CachedFileShared>> {
+    task::future::block_on(async {
+        let file = File::create(cx, path).await?;
+        let weak = weak_cache_for_file(&file)?;
+        let written = file.write_at_slice(data, 0).await?;
+        check!(written == data.len());
+        Ok(weak)
+    })
+}
+
+fn tmpfs_read_all(file: &File, expected_len: usize) -> VfsResult<Vec<u8>> {
+    let mut buf = vec![0u8; expected_len + 16];
+    let n = task::future::block_on(file.read_at(&mut buf.as_mut_slice(), 0))?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+fn tmpfs_rename_after_close_preserves_data_and_size() -> VfsResult<()> {
+    let (_fs, cx) = new_tmpfs_context();
+    task::future::block_on(cx.create_dir("dir1", NodePermission::from_bits_truncate(0o755)))?;
+    task::future::block_on(cx.create_dir("dir2", NodePermission::from_bits_truncate(0o755)))?;
+
+    let payload = b"MANIFEST-000001\n";
+    let _weak = tmpfs_write_new(&cx, "/dir1/000001.dbtmp", payload)?;
+
+    let (src_ino, src_meta_size, src_cached_size) = task::future::block_on(async {
+        let loc = cx.resolve("/dir1/000001.dbtmp").await?;
+        let meta = loc.metadata().await?;
+        let cached_sz = cached_file_size_if_present(&loc);
+        Ok::<_, VfsError>((meta.inode, meta.size, cached_sz))
+    })?;
+    check!(src_meta_size == payload.len() as u64);
+    check!(src_cached_size == Some(payload.len() as u64));
+
+    // 1. Same-directory rename after last fd closed.
+    task::future::block_on(cx.rename("/dir1/000001.dbtmp", "/dir1/CURRENT"))?;
+    check!(matches!(
+        task::future::block_on(cx.resolve("/dir1/000001.dbtmp")),
+        Err(VfsError::NotFound)
+    ));
+
+    let (dst_ino, dst_meta_size, dst_cached_size, bytes) = task::future::block_on(async {
+        let loc = cx.resolve("/dir1/CURRENT").await?;
+        let meta = loc.metadata().await?;
+        let cached_sz = cached_file_size(&loc)?;
+        let bytes = cx.read("/dir1/CURRENT").await?;
+        Ok::<_, VfsError>((meta.inode, meta.size, cached_sz, bytes))
+    })?;
+    check!(dst_ino == src_ino);
+    check!(dst_meta_size == payload.len() as u64);
+    check!(dst_cached_size == payload.len() as u64);
+    check!(bytes == payload);
+
+    // 2. Self-rename must be a no-op and preserve data.
+    task::future::block_on(cx.rename("/dir1/CURRENT", "/dir1/CURRENT"))?;
+    check!(task::future::block_on(cx.read("/dir1/CURRENT"))? == payload);
+
+    // 3. Cross-directory rename after last fd closed.
+    task::future::block_on(cx.rename("/dir1/CURRENT", "/dir2/CURRENT"))?;
+    check!(matches!(
+        task::future::block_on(cx.resolve("/dir1/CURRENT")),
+        Err(VfsError::NotFound)
+    ));
+    let cross_meta = task::future::block_on(cx.metadata("/dir2/CURRENT"))?;
+    check!(cross_meta.inode == src_ino && cross_meta.size == payload.len() as u64);
+    check!(task::future::block_on(cx.read("/dir2/CURRENT"))? == payload);
+
+    // 4. Parent directory rename (triggers DirNode::forget() on subtree).
+    task::future::block_on(cx.rename("/dir2", "/dir2_moved"))?;
+    let moved_meta = task::future::block_on(cx.metadata("/dir2_moved/CURRENT"))?;
+    check!(moved_meta.inode == src_ino && moved_meta.size == payload.len() as u64);
+    check!(task::future::block_on(cx.read("/dir2_moved/CURRENT"))? == payload);
+
+    // 5. Same-directory rename while holding an open fd on the source file.
+    let open_payload = b"OPEN-FD-RENAME\n";
+    let open_fd = task::future::block_on(async {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(true);
+        let file = opts.open(&cx, "/dir1/open_src").await?.into_file()?;
+        check!(file.write_at_slice(open_payload, 0).await? == open_payload.len());
+        Ok::<_, VfsError>(file)
+    })?;
+    let open_src_ino = task::future::block_on(cx.metadata("/dir1/open_src"))?.inode;
+    task::future::block_on(cx.rename("/dir1/open_src", "/dir1/open_dst"))?;
+    let open_dst_meta = task::future::block_on(cx.metadata("/dir1/open_dst"))?;
+    check!(open_dst_meta.inode == open_src_ino);
+    check!(open_dst_meta.size == open_payload.len() as u64);
+    check!(task::future::block_on(cx.read("/dir1/open_dst"))? == open_payload);
+    check!(tmpfs_read_all(&open_fd, open_payload.len())? == open_payload);
+    drop(open_fd);
+    check!(task::future::block_on(cx.read("/dir1/open_dst"))? == open_payload);
+
+    Ok(())
+}
+
+fn tmpfs_hardlink_unlink_after_close_preserves_data() -> VfsResult<()> {
+    let (fs, cx) = new_tmpfs_context();
+    let baseline_files = fs.stat()?.file_count;
+
+    let payload = b"HARDLINK-CONTENT\n";
+    let weak = tmpfs_write_new(&cx, "/orig", payload)?;
+    let orig_ino = task::future::block_on(cx.metadata("/orig"))?.inode;
+
+    task::future::block_on(cx.link("/orig", "/alias"))?;
+    task::future::block_on(cx.remove_file("/orig"))?;
+
+    check!(matches!(
+        task::future::block_on(cx.resolve("/orig")),
+        Err(VfsError::NotFound)
+    ));
+    let alias_meta = task::future::block_on(cx.metadata("/alias"))?;
+    check!(alias_meta.inode == orig_ino);
+    check!(alias_meta.size == payload.len() as u64);
+    check!(task::future::block_on(cx.read("/alias"))? == payload);
+    check!(weak.strong_count() > 0);
+
+    task::future::block_on(cx.remove_file("/alias"))?;
+    check!(fs.stat()?.file_count == baseline_files);
+    check!(weak.strong_count() == 0);
+    Ok(())
+}
+
+fn tmpfs_rename_overwrite_closed_and_open_targets() -> VfsResult<()> {
+    let (fs, cx) = new_tmpfs_context();
+    let baseline_files = fs.stat()?.file_count;
+
+    // Part A: overwrite a closed multi-page target.
+    let old_data = vec![0xA5u8; 8 * PAGE_SIZE];
+    let old_weak = tmpfs_write_new(&cx, "/dst_closed", &old_data)?;
+    check!(old_weak.strong_count() > 0);
+    let new_data = b"NEW-DATA\n";
+    let new_weak = tmpfs_write_new(&cx, "/src_closed", new_data)?;
+    let src_ino = task::future::block_on(cx.metadata("/src_closed"))?.inode;
+    let before_replace_count = fs.stat()?.file_count;
+    check!(before_replace_count == baseline_files + 2);
+
+    task::future::block_on(cx.rename("/src_closed", "/dst_closed"))?;
+    check!(matches!(
+        task::future::block_on(cx.resolve("/src_closed")),
+        Err(VfsError::NotFound)
+    ));
+    let dst_meta = task::future::block_on(cx.metadata("/dst_closed"))?;
+    check!(dst_meta.inode == src_ino);
+    check!(dst_meta.size == new_data.len() as u64);
+    check!(task::future::block_on(cx.read("/dst_closed"))? == new_data);
+    check!(fs.stat()?.file_count == baseline_files + 1);
+    check!(old_weak.strong_count() == 0);
+    check!(new_weak.strong_count() > 0);
+
+    task::future::block_on(cx.remove_file("/dst_closed"))?;
+    check!(fs.stat()?.file_count == baseline_files);
+    check!(new_weak.strong_count() == 0);
+
+    // Part B: overwrite a target that still has an open read/write fd.
+    let open_old_data = vec![0x5Au8; 4 * PAGE_SIZE];
+    let open_fd = task::future::block_on(async {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(true);
+        let file = opts.open(&cx, "/dst_open").await?.into_file()?;
+        check!(file.write_at_slice(&open_old_data, 0).await? == open_old_data.len());
+        Ok::<_, VfsError>(file)
+    })?;
+    let open_old_weak = weak_cache_for_file(&open_fd)?;
+
+    let replacement = b"REPLACED\n";
+    let repl_weak = tmpfs_write_new(&cx, "/src_open", replacement)?;
+    let repl_ino = task::future::block_on(cx.metadata("/src_open"))?.inode;
+
+    task::future::block_on(cx.rename("/src_open", "/dst_open"))?;
+    check!(fs.stat()?.file_count == baseline_files + 2);
+    check!(open_old_weak.strong_count() > 0);
+
+    // New name observes replacement; old fd still observes and writes old inode.
+    let dst_open_meta = task::future::block_on(cx.metadata("/dst_open"))?;
+    check!(dst_open_meta.inode == repl_ino);
+    check!(dst_open_meta.size == replacement.len() as u64);
+    check!(task::future::block_on(cx.read("/dst_open"))? == replacement);
+    check!(tmpfs_read_all(&open_fd, open_old_data.len())? == open_old_data);
+    check!(task::future::block_on(open_fd.write_at_slice(b"TAIL", 0))? == 4);
+    check!(task::future::block_on(cx.read("/dst_open"))? == replacement);
+
+    // Closing the old fd reclaims the replaced inode and its page cache.
+    drop(open_fd);
+    check!(fs.stat()?.file_count == baseline_files + 1);
+    check!(open_old_weak.strong_count() == 0);
+    check!(task::future::block_on(cx.read("/dst_open"))? == replacement);
+
+    task::future::block_on(cx.remove_file("/dst_open"))?;
+    check!(fs.stat()?.file_count == baseline_files);
+    check!(repl_weak.strong_count() == 0);
+    Ok(())
+}
+
+fn tmpfs_unlink_reclaims_after_final_close() -> VfsResult<()> {
+    let (fs, cx) = new_tmpfs_context();
+    let baseline_files = fs.stat()?.file_count;
+
+    // Case 1: unlink after close reclaims immediately.
+    let big = vec![0x3Cu8; 8 * PAGE_SIZE];
+    let weak1 = tmpfs_write_new(&cx, "/unlinked_closed", &big)?;
+    check!(fs.stat()?.file_count == baseline_files + 1);
+    check!(weak1.strong_count() > 0);
+    task::future::block_on(cx.remove_file("/unlinked_closed"))?;
+    check!(fs.stat()?.file_count == baseline_files);
+    check!(weak1.strong_count() == 0);
+
+    // Case 2: unlink while open retains data until final close, then reclaims.
+    let open_fd = task::future::block_on(async {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(true);
+        let file = opts.open(&cx, "/unlinked_open").await?.into_file()?;
+        check!(file.write_at_slice(&big, 0).await? == big.len());
+        Ok::<_, VfsError>(file)
+    })?;
+    let weak2 = weak_cache_for_file(&open_fd)?;
+    task::future::block_on(cx.remove_file("/unlinked_open"))?;
+    check!(matches!(
+        task::future::block_on(cx.resolve("/unlinked_open")),
+        Err(VfsError::NotFound)
+    ));
+    check!(fs.stat()?.file_count == baseline_files + 1);
+    check!(weak2.strong_count() > 0);
+    check!(tmpfs_read_all(&open_fd, big.len())? == big);
+
+    drop(open_fd);
+    check!(fs.stat()?.file_count == baseline_files);
+    check!(weak2.strong_count() == 0);
+    Ok(())
+}
+
+fn run_tmpfs_cache_lifecycle_checks() -> VfsResult<()> {
+    let checks: [(&str, fn() -> VfsResult<()>); 4] = [
+        (
+            "tmpfs_rename_after_close_preserves_data_and_size",
+            tmpfs_rename_after_close_preserves_data_and_size,
+        ),
+        (
+            "tmpfs_hardlink_unlink_after_close_preserves_data",
+            tmpfs_hardlink_unlink_after_close_preserves_data,
+        ),
+        (
+            "tmpfs_rename_overwrite_closed_and_open_targets",
+            tmpfs_rename_overwrite_closed_and_open_targets,
+        ),
+        (
+            "tmpfs_unlink_reclaims_after_final_close",
+            tmpfs_unlink_reclaims_after_final_close,
+        ),
+    ];
+    for (name, check) in checks {
+        if let Err(err) = check() {
+            error!("[TMPFS_CACHE_GUEST] FAIL {} {:?}", name, err);
+            return Err(err);
+        }
+        info!("[TMPFS_CACHE_GUEST] PASS {}", name);
+    }
+    info!("[TMPFS_CACHE_GUEST] All tmpfs cache lifecycle checks PASSED!");
     Ok(())
 }
 
