@@ -1187,6 +1187,7 @@ fn dealloc_page_batch_vaddrs(mut vaddrs: Vec<usize>) {
 #[derive(Debug)]
 pub struct PageCache {
     frame: Arc<PageCacheFrame>,
+    demote_after_copy: bool,
     dirty: bool,
     dirty_start: u16,
     dirty_end: u16,
@@ -1200,6 +1201,7 @@ impl PageCache {
         let frame = Self::new_standalone_frame(skip_zero)?;
         Ok(Self {
             frame,
+            demote_after_copy: false,
             dirty: false,
             dirty_start: PAGE_SIZE as u16,
             dirty_end: 0,
@@ -1225,6 +1227,7 @@ impl PageCache {
     fn from_independent_frame(addr: VirtAddr) -> Self {
         Self {
             frame: Arc::new(PageCacheFrame { addr }),
+            demote_after_copy: false,
             dirty: false,
             dirty_start: PAGE_SIZE as u16,
             dirty_end: 0,
@@ -1400,6 +1403,29 @@ impl PageCacheMap {
 
     pub(crate) fn get_mut(&mut self, pn: &u32) -> Option<&mut PageCache> {
         self.lru.get_mut(pn)
+    }
+
+    fn copy_resident(
+        &mut self,
+        pn: u32,
+        range: core::ops::Range<usize>,
+        dst: &mut impl Write,
+    ) -> VfsResult<Option<usize>> {
+        let Some(page) = self.get_mut(&pn) else {
+            return Ok(None);
+        };
+        let expected = range.len();
+        let copied = dst.write(&page.data()[range])?;
+        if copied != expected {
+            return Err(VfsError::Io);
+        }
+        // Finish the demand copy before making the new page a reclaim victim.
+        // A second reference promotes it normally, even if the backing cache
+        // has since evicted its copy.
+        if core::mem::take(&mut page.demote_after_copy) {
+            self.lru.demote(&pn);
+        }
+        Ok(Some(copied))
     }
 
     pub(crate) fn peek_lru(&self) -> Option<(&u32, &PageCache)> {
@@ -3525,9 +3551,15 @@ impl CachedFile {
             } else {
                 (first_missing_page, page_count - first_missing_offset)
             };
+            // A one-page buffered demand fill can be served by a second cache
+            // (e.g. ext4's block cache). Ask the backend for data-I/O provenance
+            // so a full file cache can retain pages which needed a device read.
+            let observe_refill = !self.in_memory && pin.is_none() && demand_pages != 0
+                && requested_pages == 1;
             let (mut new_pages, io) = self
-                .load_pages_async(file, fill_page, fill_count, file_len, observe_target)
+                .load_pages_async(file, fill_page, fill_count, file_len, observe_target || observe_refill)
                 .await?;
+            let cheap_refill = observe_refill && io == Some(false);
             let io = match io {
                 Some(true) => mm::FilePageIo::StorageRead,
                 Some(false) => mm::FilePageIo::NoStorageRead,
@@ -3574,10 +3606,11 @@ impl CachedFile {
                 }
             }
 
-            for (page_num, page) in new_pages {
+            for (page_num, mut page) in new_pages {
                 if cache.contains(&page_num) {
                     continue;
                 }
+                page.demote_after_copy = cheap_refill && required > cache_soft_limit;
                 cache.put(page_num, page);
             }
             drop(cache);
@@ -3730,20 +3763,11 @@ impl CachedFile {
         for pn in start_page..end_page {
             let page_start = pn as u64 * PAGE_SIZE as u64;
             let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
-            let copied = match page_end.checked_sub(page_offset) {
-                Some(copied) => copied,
-                None => return Some(Err(VfsError::BadState)),
+            let copied = match cache.copy_resident(pn, page_offset..page_end, &mut dst) {
+                Ok(Some(copied)) => copied,
+                Ok(None) => return Some(Err(VfsError::BadState)),
+                Err(error) => return Some(Err(error)),
             };
-            let page = cache
-                .get_mut(&pn)
-                .expect("resident cache page disappeared while locked");
-            let written = match dst.write(&page.data()[page_offset..page_end]) {
-                Ok(written) => written,
-                Err(err) => return Some(Err(err.into())),
-            };
-            if written != copied {
-                return Some(Err(VfsError::Io));
-            }
             read = match read.checked_add(copied) {
                 Some(read) => read,
                 None => return Some(Err(VfsError::Io)),
@@ -3783,16 +3807,10 @@ impl CachedFile {
                 while pn < end_page && hit_pages < READ_COPY_BATCH_PAGES {
                     let page_start = pn as u64 * PAGE_SIZE as u64;
                     let page_end = (end - page_start).min(PAGE_SIZE as u64) as usize;
-                    let Some(page) = cache.get_mut(&pn) else {
+                    let Some(copied) = cache.copy_resident(pn, page_offset..page_end, &mut dst)?
+                    else {
                         break;
                     };
-                    let copied = page_end
-                        .checked_sub(page_offset)
-                        .ok_or(VfsError::BadState)?;
-                    let written = dst.write(&page.data()[page_offset..page_end])?;
-                    if written != copied {
-                        return Err(VfsError::Io);
-                    }
                     read = read.checked_add(copied).ok_or(VfsError::Io)?;
                     pn = pn.checked_add(1).ok_or(VfsError::StorageFull)?;
                     page_offset = 0;
