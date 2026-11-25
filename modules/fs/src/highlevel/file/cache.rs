@@ -1324,7 +1324,7 @@ struct EvictListener {
     listener: Box<dyn Fn(u32, &PageCache) + Send + Sync>,
 }
 
-pub(super) struct CachedFileShared {
+pub(crate) struct CachedFileShared {
     fs_id: usize,
     // Page stripes protect fill/write coherence; inline entries keep the hot
     // cache-hit path to one cache lock without per-page Arc/Mutex overhead.
@@ -1451,7 +1451,7 @@ impl CachedFileShared {
     }
 
     #[inline]
-    pub(super) fn size(&self) -> u64 {
+    pub(crate) fn size(&self) -> u64 {
         self.size.load(Ordering::Acquire)
     }
 
@@ -1463,7 +1463,7 @@ impl CachedFileShared {
     }
 
     #[inline]
-    pub(super) fn set_size(&self, size: u64) {
+    pub(crate) fn set_size(&self, size: u64) {
         self.size.store(size, Ordering::Release);
     }
 
@@ -2551,6 +2551,21 @@ pub fn page_cache_reclaim(num_pages: usize) -> usize {
     reclaimed
 }
 
+fn tmpfs_get_or_init_shared_state(
+    location: &Location,
+    fs_id: usize,
+) -> Option<VfsResult<Arc<CachedFileShared>>> {
+    let tmp_node = location
+        .entry()
+        .downcast::<crate::fs::tmpfs::TmpNode>()
+        .ok()?;
+    if let Some(state) = tmp_node.cached_file_state() {
+        return Some(Ok(state));
+    }
+    let candidate = Arc::new(CachedFileShared::new(fs_id, true, 0, None));
+    Some(tmp_node.attach_cached_file_state(candidate))
+}
+
 pub(super) async fn shared_file_state_async(
     location: &Location,
 ) -> VfsResult<Arc<CachedFileShared>> {
@@ -2559,6 +2574,10 @@ pub(super) async fn shared_file_state_async(
     }
 
     let key = file_cache_key(location);
+    if let Some(state) = tmpfs_get_or_init_shared_state(location, key.fs_id) {
+        return state;
+    }
+
     let registry_shard = file_state_registry_shard(key);
     let in_memory = location.filesystem().name() == "tmpfs";
 
@@ -2601,6 +2620,9 @@ pub fn cached_file_size(location: &Location) -> VfsResult<u64> {
 }
 
 pub fn cached_file_size_if_present(location: &Location) -> Option<u64> {
+    if let Ok(tmp_node) = location.entry().downcast::<crate::fs::tmpfs::TmpNode>() {
+        return tmp_node.cached_file_size();
+    }
     let key = file_cache_key(location);
     FILE_SHARED_STATES[file_state_registry_shard(key)]
         .lock()
@@ -2686,20 +2708,28 @@ impl CachedFile {
 
         location.retain_open_file().await?;
         let in_memory = location.filesystem().name() == "tmpfs";
-        let existing = location
-            .user_data()
-            .get::<FileUserData>()
-            .and_then(|data| data.live());
-        let shared = match existing {
-            Some(shared) => shared,
-            None => {
-                let candidate = shared_file_state_async(&location).await?;
-                let mut user_data = location.user_data();
-                if let Some(existing) = user_data.get::<FileUserData>().and_then(|data| data.live()) {
-                    existing
-                } else {
-                    user_data.insert(FileUserData::Strong(candidate.clone()));
-                    candidate
+        let shared = if let Some(state) =
+            tmpfs_get_or_init_shared_state(&location, filesystem_id(location.filesystem()))
+        {
+            state?
+        } else {
+            let existing = location
+                .user_data()
+                .get::<FileUserData>()
+                .and_then(|data| data.live());
+            match existing {
+                Some(shared) => shared,
+                None => {
+                    let candidate = shared_file_state_async(&location).await?;
+                    let mut user_data = location.user_data();
+                    if let Some(existing) =
+                        user_data.get::<FileUserData>().and_then(|data| data.live())
+                    {
+                        existing
+                    } else {
+                        user_data.insert(FileUserData::Strong(candidate.clone()));
+                        candidate
+                    }
                 }
             }
         };

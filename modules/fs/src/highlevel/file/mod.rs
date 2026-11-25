@@ -202,6 +202,7 @@ pub use io_test::{
 use position::{FilePosition, IoPosition};
 pub use position::FilePositionTicket;
 
+pub(crate) use cache::CachedFileShared;
 pub use cache::*;
 pub use handle::*;
 

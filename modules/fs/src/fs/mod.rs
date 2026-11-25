@@ -9,7 +9,7 @@ pub mod ext4;
 pub(crate) mod devfs;
 pub mod loop_dev;
 pub mod procfs;
-mod tmpfs;
+pub(crate) mod tmpfs;
 
 use driver::prelude::AsyncBlockDriverOps;
 use vfs::{Filesystem, VfsResult};
