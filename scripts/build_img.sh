@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_DIR="${REPO_ROOT}/rootfs/base"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}}"
 RISCV_PLATFORM="${RISCV_PLATFORM:-qemu-virt}"
-source "${REPO_ROOT}/scripts/rootfs-riscv64.sh"
+source "${REPO_ROOT}/scripts/rootfs-archives.sh"
 
 MIN_IMG_MIB="${MIN_IMG_MIB:-128}"
 EXTRA_MARGIN_MIB="${EXTRA_MARGIN_MIB:-128}"
@@ -152,7 +152,7 @@ ensure_loongarch64_gnu_libdir_compat() {
 
 build_one_arch() (
     local arch="$1" name="$1" variant="${ROOTFS_VARIANT:-auto}"
-    local inputs fetch_rocksdb="${fetch}"
+    local inputs fetch_tools="${fetch}"
     if [[ "${arch}" == riscv64 && "${RISCV_PLATFORM}" == visionfive2 ]]; then
         name=visionfive2
     fi
@@ -161,12 +161,20 @@ build_one_arch() (
         local fetch_variant="${variant}"
         [[ "${fetch_variant}" != auto ]] || fetch_variant=tests
         "${REPO_ROOT}/scripts/fetch-rootfs.sh" "--${fetch_variant}" --arch "${arch}"
-        # Fetching the test bundle also fetches its RocksDB packages.
-        fetch_rocksdb=no
+        fetch_tools=no
         inputs="$(rootfs_archives "${arch}" "${variant}")" || die "Missing archives for ${name} after fetch"
     fi
     local archives=()
     mapfile -t archives <<< "${inputs}"
+    local netbench=""
+    if [[ "${archives[-1]}" == */rootfs-tests-* ]]; then
+        if [[ "${fetch_tools}" == yes ]]; then
+            "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch "${arch}"
+            fetch_netbench "${arch}"
+        fi
+        netbench="$(verified_archive "${netbench_sha[${arch}]}" "${BASE_DIR}/netbench-${arch}.tar.xz")" \
+            || die "Missing or corrupt netbench-${arch}.tar.xz. Run scripts/fetch-rootfs.sh --tests --arch ${arch}."
+    fi
 
     local tmpdir stage_dir tmp_img
     tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/pulseos-rootfs-${name}-XXXXXX")"
@@ -189,12 +197,15 @@ build_one_arch() (
     # cleanup can always access the stage. Exec bits are preserved.
     chmod -R u+rwX "${stage_dir}"
 
-    # The selected test archive is last for both the overlay and full-rootfs layouts.
-    if [[ "${archives[-1]}" == */rootfs-tests-* ]]; then
-        if [[ "${fetch_rocksdb}" == yes ]]; then
-            "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch "${arch}"
-        fi
+    if [[ -n "${netbench}" ]]; then
         "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" install "${arch}" "${stage_dir}"
+        echo "[${name}] Installing network tools from: ${netbench}"
+        tar --no-same-owner -xaf "${netbench}" -C "${stage_dir}" ./opt/netbench
+        local tool
+        for tool in iperf3 darkhttpd weighttp; do
+            [[ -x "${stage_dir}/opt/netbench/bin/${tool}" ]] || die "Missing network tool: ${tool}"
+            ln -sf "/opt/netbench/bin/${tool}" "${stage_dir}/usr/bin/${tool}"
+        done
     fi
 
     if [[ "${arch}" == "loongarch64" ]]; then
