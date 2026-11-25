@@ -1,0 +1,40 @@
+{
+  "test_rootfs_tag": "rootfs-tests-20261125",
+  "rootfs_commit": "39e61bab5903b773666d54123b51f66aa2ab8101",
+  "kernels": {
+    "riscv64": {
+      "commit": "3f8b3396d8167156011409f6c950ee0ff8956955",
+      "tree_sha256": "9cb46dd5e21ea929356d397b047545f0ad270b0047e70c17ce15351ec179b5af",
+      "git_worktree_dirty": false,
+      "binary": "58a3a18d2af7b25c7f77068dddd351b07ebafa4bedd83c996e5ce51cb73151ef",
+      "elf": "2d3b946b7c066533a719741b6cdd884aaf9e3cc6bb0ecf91b5bbb624cba6e93d"
+    },
+    "loongarch64": {
+      "commit": "3f8b3396d8167156011409f6c950ee0ff8956955",
+      "tree_sha256": "9cb46dd5e21ea929356d397b047545f0ad270b0047e70c17ce15351ec179b5af",
+      "git_worktree_dirty": false,
+      "binary": "5f30a3866ede759569f7b4b6b44c1cd88fb511cc85e022b552b4d8b779f5c240",
+      "elf": "845eb9a9198d3fb77ad5d48d072351f878d8b7aeb19f8ccc46ee558509d79465"
+    }
+  },
+  "host": "Linux 6.6.87.2-microsoft-standard-WSL2 x86_64 GNU/Linux",
+  "baseline_rootfs_sha256": {
+    "disk.img": "1c85641c81d923211ca2229275ab9870203a098341d9e1363c237831cc79a1ab",
+    "disk-la.img": "1a0f51586aaf24f9d8c652e55d44b648c9fd949e068ab31b41a38c49573e6df3"
+  },
+  "qemu_versions": {
+    "riscv64": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+    "loongarch64": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)"
+  },
+  "recorder": "056834ae23e66c9488d5f0c657086889e4d20280c76da6b06705e8163cbe0a71",
+  "analyzer_sha256": "17a9db16f288909c345822ba5a99318b1c12379d9c8c74354ac0401ef30484e4",
+  "host_iperf_sha256": "603ed120b9c48fa2fef3fd0e3a47db7f91eab346618999e2f028e02a22d9412f",
+  "profile_kernel": {
+    "commit": "39e61bab5903b773666d54123b51f66aa2ab8101",
+    "tree_sha256": "9cb46dd5e21ea929356d397b047545f0ad270b0047e70c17ce15351ec179b5af",
+    "git_worktree_dirty": false,
+    "binary": "8b13b18226b0037ec10ae3f85338d15cfe6c9a31653c675220e4f618b0dd58a4",
+    "elf": "46731cbdc7d8ee58b09f4d03c4ec8c1f3491ad5a94f65de513eb60eb21b70210"
+  },
+  "profile_rootfs_sha256": "defaacfccad14167a01a17c83402622ee9f86aecf28bf7b337ddb21087654ded"
+}
