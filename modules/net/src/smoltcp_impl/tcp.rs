@@ -508,7 +508,7 @@ impl TcpSocket {
     }
 
     fn recv_once_raw(handle: SocketHandle, buf: &mut [u8], peek: bool) -> AxResult<usize> {
-        SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+        let result = SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
             if socket.recv_queue() > 0 {
                 let res = if peek {
                     socket.peek_slice(buf)
@@ -521,7 +521,13 @@ impl TcpSocket {
             } else {
                 Err(AxError::WouldBlock)
             }
-        })
+        });
+        // Consuming data opens the receive window. The peer may be waiting for
+        // our window update, with no incoming packet to wake the poller.
+        if !peek && result.as_ref().is_ok_and(|len| *len != 0) {
+            schedule_poll();
+        }
+        result
     }
 
     /// Attempts to receive data once without blocking or mutating `self.nonblock`.
