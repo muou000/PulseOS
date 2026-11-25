@@ -59,4 +59,4 @@ bpf-analyzer CASE.pbcap --mode kernel --weight period --json
 
 源码 commit 39e61bab5903b773666d54123b51f66aa2ab8101，BPF-enabled 内核构建 provenance 记录干净的源输入。QEMU 命令指向的内核 bin 和保留的 kernel.elf 均与构建 provenance 的 SHA256 相符。四个 capture 的 kernel artifact SHA、GNU build-id 和运行时 _stext 与 ELF 匹配。采样镜像身份由本地制盘记录提供；capture 自身的 image_hash 和 pulse_commit 均为 unknown。生产 recorder 与 build.json、四个 capture 内的 artifact 身份相符。执行机本地留存了原始 capture、完整串口日志和匹配 ELF，无公开原始归档或保留期限保证。重放需要取得对应的原始 capture 及 ELF。
 
-[分场景采样证据](profile.json) 含四个 SHA、工具/镜像身份、分层 loss、所有链终止原因、逐源权重、主要叶 PC 和代表性调用链。可按上文的 recorder 和 analyzer 命令复采及核对。[环境记录](../environment.json)未执行火焰图、用户态符号导出、跨架构采样对照或更改内核后的 A/B。
+[分场景采样证据](profile.json) 含四个 SHA、工具/镜像身份、分层 loss、所有链终止原因、逐源权重、主要叶 PC 和代表性调用链。可按上文的 recorder 和 analyzer 命令复采及核对。火焰图、用户态符号导出、跨架构采样对照和内核改动后的 A/B 均未执行。[环境记录](../environment.json)

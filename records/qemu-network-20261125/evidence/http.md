@@ -21,7 +21,7 @@ The LA64 c1/close hostfwd 64 KiB rounds had 43, 27 and 30 complete bodies out of
 
 ## Accepted socket option and latency
 
-Darkhttpd explicitly sets TCP_NODELAY on its listening fd before listen(). A diagnostic copy of the same upstream daemon logs getsockopt(TCP_NODELAY) on listener and child at first accept. It optionally calls setsockopt(TCP_NODELAY=1) on each accepted fd. The original disk images were copied before adding the diagnostic binary; stock tools were preserved. Runs alternate original settings and reapplication in one boot, using the same client, generator, endpoint, and fixed logging configuration. The Linux host control read 1 on the listener and 1 on the accepted fd. PulseOS returned 1 and 0 on both architectures.
+Darkhttpd explicitly sets TCP_NODELAY on its listening fd before listen(). A diagnostic copy of the same upstream daemon logs getsockopt(TCP_NODELAY) on listener and child at first accept. It optionally calls setsockopt(TCP_NODELAY=1) on each accepted fd. The original disk images were copied before adding the diagnostic binary; stock tools were preserved. Runs alternate original settings and reapplication in one boot, using the same client, generator, endpoint, and fixed logging configuration. The Linux host control read 1 on the listener and 1 on the accepted fd. PulseOS returned 1 and 0 on both architectures. Set PULSE_DIAG_REAPPLY=1 to repeat the accepted-fd setting with the diagnostic build. [Diagnostic patch for darkhttpd 1.17](../darkhttpd-nodelay.patch)
 
 | Arch | Payload | Original req/s (two rounds) | Reapply req/s | Original p50 total (ms) | Reapply p50 total (ms) |
 |---|---:|---:|---:|---:|---:|
