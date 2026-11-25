@@ -201,7 +201,7 @@ struct SocketTable<'a> {
 impl SocketTable<'_> {
     fn reap_closed_tcp(&mut self, now: TimeValue) {
         self.closing_tcp.retain_mut(|closing| {
-            if closing.finished(self.sockets.get_mut(closing.handle), now) {
+            if closing.poll_close(self.sockets.get_mut(closing.handle), now) {
                 self.sockets.remove(closing.handle);
                 false
             } else {

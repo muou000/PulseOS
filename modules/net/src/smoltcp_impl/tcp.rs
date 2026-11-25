@@ -970,6 +970,8 @@ impl Drop for TcpSocket {
             LISTEN_TABLE.unlisten(self.endpoints.read().local.port);
         }
         SOCKET_SET.close_tcp(self.handle);
+        // A poll registration can outlive the last file reference.
+        self.notify_wait_queues(IoEvents::IN | IoEvents::OUT | IoEvents::HUP);
     }
 }
 
@@ -1001,7 +1003,12 @@ impl ClosingTcp {
         }
     }
 
-    pub(super) fn finished(&mut self, socket: &mut tcp::Socket, now: hal::time::TimeValue) -> bool {
+    /// Advance the detached close and return true when the handle can be removed.
+    pub(super) fn poll_close(
+        &mut self,
+        socket: &mut tcp::Socket,
+        now: hal::time::TimeValue,
+    ) -> bool {
         if socket.remote_endpoint().is_none() {
             return true;
         }
