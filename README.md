@@ -174,6 +174,32 @@ gh release download rootfs-tests-20261125 -R muou000/PulseOS -p disk.img.zst -p 
 sha256sum --ignore-missing -c SHA256SUMS && zstd -d --sparse disk.img.zst -o disk.img
 ```
 
+### 在来宾里测试内存管理
+
+两种 QEMU 测试镜像均包含 SQLite 3.54.1 的官方 SQL 工作负载 `speedtest1`、LTP、lmbench 和匿名页驻留探针。下载本版预制盘时，RV64 选择 `disk.img.zst`，LA64 选择 `disk-la.img.zst`。在空目录运行以下命令，校验通过后解压，再按下文 QEMU 步骤启动。[内存测试镜像与 SHA256SUMS](https://github.com/muou000/PulseOS/releases/tag/rootfs-mm-tests-20261125)
+
+```sh
+disk=disk.img            # LA64 使用 disk-la.img
+gh release download rootfs-mm-tests-20261125 -R muou000/PulseOS -p "$disk.zst" -p SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS && zstd -d --sparse "$disk.zst" -o "$disk"
+```
+
+在来宾中运行以下命令。SQLite 在内存中完成建表、索引、查询与更新。`--verify` 输出结果流的长度与指纹，本版参数在原生 Linux 上的参考值为 `826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697`。记录 `TOTAL`（秒）和 `Memory Used` 的峰值（字节），可分别比较同架构的耗时与 SQLite 分配器用量。[SQLite 官方工作负载说明](https://sqlite.org/cpu.html)
+
+```sh
+/opt/mmbench/bin/speedtest1 --memdb --testset main --size 5 --verify --stats
+export LTPROOT=/opt/ltp TMPDIR=/tmp PATH="/opt/ltp/testcases/bin:$PATH"
+brk01
+mincore03
+mmap01
+mremap01
+/opt/mmbench/bin/anon_residency
+```
+
+探针预留 16 MiB 匿名内存，每隔 64 KiB 写一页，接着逐页写入，执行 `MADV_DONTNEED`，再逐页读回校验清零。每个阶段分别报告区域内 `mincore` 驻留页数、整个进程的 `VmSize`、`VmRSS` 和 `getrusage` 计数。稀疏阶段用驻留页数除以实际写过的不同页数，可以衡量首次缺页时批量分配相邻页的内存代价。对比版本时固定架构、vCPU 数、内存及工作负载，并保留每轮结果。[mincore 接口](https://man7.org/linux/man-pages/man2/mincore.2.html)
+
+自行制盘时，检出本发布标签，运行 `make img ARCH=riscv64` 或 `make img ARCH=loongarch64`。要从源码重建内存工具包，准备相应的 Linux GNU 交叉 GCC、OpenSSL、Python 3 和 GNU tar，运行 `scripts/build_mmbench.sh riscv64` 或 `scripts/build_mmbench.sh loongarch64`。脚本校验上游源码后，将静态工具归档到 `target/mmbench/`。[SQLite 源码及 SHA3-256](https://sqlite.org/download.html)
+
 ### 在来宾里测试网络
 
 | 工作负载 | 两种 QEMU 测试镜像预装的工具 | 主要观察量 |
