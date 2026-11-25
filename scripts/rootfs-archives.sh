@@ -31,6 +31,12 @@ declare -A netbench_sha=(
     [loongarch64]=41b3e5863040ed7f6a157e45a74d50d8c95eefc49cfb762ac50ca776ebcc83df
 )
 
+schedbench_tag=rootfs-sched-tests-20261125
+declare -A schedbench_sha=(
+    [riscv64]=0716fd8ac7722f6c2e6dc8e7cd33e2209b64bb7be0877bd56faeed47f1d9c1f8
+    [loongarch64]=79900712e8c58bc516dd535b5335520a4df29cf65d737acf5e5d61b26d1fe257
+)
+
 # Atomically cache a release asset. Both the full rootfs downloader and an
 # incremental image build use this path so a failed fetch preserves the cache.
 fetch_one() (
@@ -48,8 +54,11 @@ fetch_one() (
     mv -f "${tmp}" "${BASE_DIR}/${out}"
 )
 
-fetch_netbench() {
+fetch_qemu_tools() {
     local arch="$1" asset="netbench-$1.tar.xz"
     fetch_one "${asset}" "${asset}" "${netbench_sha[${arch}]}" \
         "${release_url}/${netbench_tag}"
+    asset="schedbench-$1.tar.xz"
+    fetch_one "${asset}" "${asset}" "${schedbench_sha[${arch}]}" \
+        "${release_url}/${schedbench_tag}"
 }

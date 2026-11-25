@@ -25,7 +25,7 @@ Usage:
 
 Options:
   --tests          Fetch the test rootfs, bundled benchmark suites, RocksDB
-                   tools and (for QEMU targets) network tools (default).
+                   tools and (for QEMU targets) network and scheduler tools (default).
   --base           Fetch minimal base rootfs tarballs without bundled tests.
   --arch ARCH      Target architecture to fetch: all (default), riscv64, loongarch64.
   -h, --help       Show this help message.
@@ -99,7 +99,7 @@ if [[ "${VARIANT}" == "tests" ]]; then
         fi
         "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch riscv64
         if [[ "${RISCV_PLATFORM}" == qemu-virt ]]; then
-            fetch_netbench riscv64
+            fetch_qemu_tools riscv64
         fi
     fi
     if [[ "${ARCH_FILTER}" == "all" || "${ARCH_FILTER}" == "loongarch64" ]]; then
@@ -107,7 +107,7 @@ if [[ "${VARIANT}" == "tests" ]]; then
             "e530f99e806cea640df12c482b63128af3131c304cdfd0d5053e661e2efbac1e" \
             "${TESTS_URL}"
         "${REPO_ROOT}/scripts/rootfs-rocksdb.sh" fetch loongarch64
-        fetch_netbench loongarch64
+        fetch_qemu_tools loongarch64
     fi
 else
     if [[ "${ARCH_FILTER}" != loongarch64 && "${RISCV_PLATFORM}" == visionfive2 ]]; then
