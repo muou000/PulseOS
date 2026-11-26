@@ -1,0 +1,122 @@
+{
+  "riscv64": {
+    "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+    "guest_kernel_sha256": "58a3a18d2af7b25c7f77068dddd351b07ebafa4bedd83c996e5ce51cb73151ef",
+    "cases": {
+      "sqlite": {
+        "rc": 0,
+        "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+        "total_seconds": 3.157,
+        "sqlite_peak_bytes": 3499128
+      },
+      "probe": {
+        "rc": 0,
+        "resident_pages_by_phase": {
+          "warmup": 0,
+          "baseline": 0,
+          "reserved": 0,
+          "sparse": 1024,
+          "dense": 4096,
+          "discarded": 0,
+          "zero_readback": 4096,
+          "unmapped": 0
+        }
+      },
+      "sqlite20": {
+        "rc": 0,
+        "verification_hash": "3807866 2738af78e6eaae28c03f3766bc00b9defffe6fac85355c4d",
+        "total_seconds": 15.014,
+        "sqlite_peak_bytes": 13961576
+      },
+      "mmap_ext4": {
+        "rc": 0,
+        "ltp_reported_filesystem": "ext2/ext3/ext4",
+        "ltp": {
+          "passed": 1,
+          "failed": 0,
+          "broken": 0,
+          "skipped": 0,
+          "warnings": 0
+        },
+        "diagnostics": []
+      },
+      "mremap_ext4": {
+        "rc": 0,
+        "ltp_reported_filesystem": "ext2/ext3/ext4",
+        "ltp": {
+          "passed": 1,
+          "failed": 0,
+          "broken": 0,
+          "skipped": 0,
+          "warnings": 0
+        },
+        "diagnostics": []
+      }
+    },
+    "sha256_verified": {
+      "disk.img.zst": true,
+      "disk.img": true,
+      "mmbench-riscv64.tar.xz": true
+    }
+  },
+  "loongarch64": {
+    "qemu_version": "QEMU emulator version 11.1.50 (v11.1.0-2112-g2a0ac9c8ac)",
+    "guest_kernel_sha256": "845eb9a9198d3fb77ad5d48d072351f878d8b7aeb19f8ccc46ee558509d79465",
+    "cases": {
+      "sqlite": {
+        "rc": 0,
+        "verification_hash": "826556 2ef302098d252181c4cb98b84a8a332a8e98506910393697",
+        "total_seconds": 1.616,
+        "sqlite_peak_bytes": 3499128
+      },
+      "probe": {
+        "rc": 0,
+        "resident_pages_by_phase": {
+          "warmup": 0,
+          "baseline": 0,
+          "reserved": 0,
+          "sparse": 1024,
+          "dense": 4096,
+          "discarded": 0,
+          "zero_readback": 4096,
+          "unmapped": 0
+        }
+      },
+      "sqlite20": {
+        "rc": 0,
+        "verification_hash": "3807866 2738af78e6eaae28c03f3766bc00b9defffe6fac85355c4d",
+        "total_seconds": 6.265,
+        "sqlite_peak_bytes": 13961576
+      },
+      "mmap_ext4": {
+        "rc": 0,
+        "ltp_reported_filesystem": "ext2/ext3/ext4",
+        "ltp": {
+          "passed": 1,
+          "failed": 0,
+          "broken": 0,
+          "skipped": 0,
+          "warnings": 0
+        },
+        "diagnostics": []
+      },
+      "mremap_ext4": {
+        "rc": 0,
+        "ltp_reported_filesystem": "ext2/ext3/ext4",
+        "ltp": {
+          "passed": 1,
+          "failed": 0,
+          "broken": 0,
+          "skipped": 0,
+          "warnings": 0
+        },
+        "diagnostics": []
+      }
+    },
+    "sha256_verified": {
+      "disk-la.img.zst": true,
+      "disk-la.img": true,
+      "mmbench-loongarch64.tar.xz": true
+    }
+  }
+}

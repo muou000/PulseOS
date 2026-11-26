@@ -24,11 +24,16 @@ riscv_test_archive() {
 
 release_url=https://github.com/muou000/PulseOS/releases/download
 
-# Checksum-pinned network overlay for the download and offline image paths.
+# Checksum-pinned QEMU test overlays for the download and offline image paths.
 netbench_tag=rootfs-tests-20261125
 declare -A netbench_sha=(
     [riscv64]=11bb69183987613cee96b899f9851fc3650716947ef6481984b944cab7fa2679
     [loongarch64]=41b3e5863040ed7f6a157e45a74d50d8c95eefc49cfb762ac50ca776ebcc83df
+)
+mmbench_tag=rootfs-mm-tests-20261125
+declare -A mmbench_sha=(
+    [riscv64]=3634bfea154b71763a100375acdd5e3f23971c1fa7c752622b006d3e7dc5a3b3
+    [loongarch64]=6633409363a52131e434ba374eaf53d89398318632d586eabae04a660f199875
 )
 
 schedbench_tag=rootfs-sched-tests-20261125
@@ -54,11 +59,12 @@ fetch_one() (
     mv -f "${tmp}" "${BASE_DIR}/${out}"
 )
 
-fetch_qemu_tools() {
-    local arch="$1" asset="netbench-$1.tar.xz"
-    fetch_one "${asset}" "${asset}" "${netbench_sha[${arch}]}" \
+fetch_qemu_test_overlays() {
+    local arch="$1"
+    fetch_one "netbench-${arch}.tar.xz" "netbench-${arch}.tar.xz" "${netbench_sha[${arch}]}" \
         "${release_url}/${netbench_tag}"
-    asset="schedbench-$1.tar.xz"
-    fetch_one "${asset}" "${asset}" "${schedbench_sha[${arch}]}" \
+    fetch_one "mmbench-${arch}.tar.xz" "mmbench-${arch}.tar.xz" "${mmbench_sha[${arch}]}" \
+        "${release_url}/${mmbench_tag}"
+    fetch_one "schedbench-${arch}.tar.xz" "schedbench-${arch}.tar.xz" "${schedbench_sha[${arch}]}" \
         "${release_url}/${schedbench_tag}"
 }

@@ -166,13 +166,15 @@ build_one_arch() (
     fi
     local archives=()
     mapfile -t archives <<< "${inputs}"
-    local netbench="" schedbench=""
+    local netbench="" mmbench="" schedbench=""
     if [[ "${archives[-1]}" == */rootfs-tests-* && "${name}" != visionfive2 ]]; then
         if [[ "${fetch_tools}" == yes ]]; then
-            fetch_qemu_tools "${arch}"
+            fetch_qemu_test_overlays "${arch}"
         fi
         netbench="$(verified_archive "${netbench_sha[${arch}]}" "${BASE_DIR}/netbench-${arch}.tar.xz")" \
             || die "Missing or corrupt netbench-${arch}.tar.xz. Run scripts/fetch-rootfs.sh --tests --arch ${arch}."
+        mmbench="$(verified_archive "${mmbench_sha[${arch}]}" "${BASE_DIR}/mmbench-${arch}.tar.xz")" \
+            || die "Missing or corrupt mmbench-${arch}.tar.xz. Run scripts/fetch-rootfs.sh --tests --arch ${arch}."
         schedbench="$(verified_archive "${schedbench_sha[${arch}]}" "${BASE_DIR}/schedbench-${arch}.tar.xz")" \
             || die "Missing or corrupt schedbench-${arch}.tar.xz. Run scripts/fetch-rootfs.sh --tests --arch ${arch}."
     fi
@@ -211,6 +213,12 @@ build_one_arch() (
         for tool in iperf3 darkhttpd weighttp; do
             [[ -x "${stage_dir}/opt/netbench/bin/${tool}" ]] || die "Missing network tool: ${tool}"
             ln -sf "/opt/netbench/bin/${tool}" "${stage_dir}/usr/bin/${tool}"
+        done
+        echo "[${name}] Installing memory workload from: ${mmbench}"
+        tar --no-same-owner -xaf "${mmbench}" -C "${stage_dir}" ./opt/mmbench
+        for tool in speedtest1 anon_residency; do
+            [[ -f "${stage_dir}/opt/mmbench/bin/${tool}" && -x "${stage_dir}/opt/mmbench/bin/${tool}" ]] \
+                || die "Missing mmbench executable: ${tool}"
         done
         echo "[${name}] Installing scheduler tools from: ${schedbench}"
         tar --no-same-owner -xaf "${schedbench}" -C "${stage_dir}" ./opt/schedbench

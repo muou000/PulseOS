@@ -13,7 +13,7 @@ use smoltcp::{
     socket::tcp::{self, ConnectError, State},
     wire::{IpEndpoint, IpListenEndpoint},
 };
-use spin::RwLock;
+use spin::{Once, RwLock};
 
 use super::{
     LISTEN_TABLE, SOCKET_SET, SocketPollRegistration, SocketSetWrapper, SocketWaitQueues,
@@ -70,6 +70,8 @@ pub struct TcpSocket {
     endpoints: RwLock<SocketEndpoints>,
     nonblock: AtomicBool,
     reuse_addr: AtomicBool,
+    // Shared with the listen table so each SYN can copy the current setting.
+    listener_nagle: Once<Arc<AtomicBool>>,
     rcv_timeout: AtomicU64,
     snd_timeout: AtomicU64,
     pub multicast_groups: Mutex<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
@@ -91,6 +93,7 @@ impl TcpSocket {
             )),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            listener_nagle: Once::new(),
             rcv_timeout: AtomicU64::new(0),
             snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
@@ -111,6 +114,7 @@ impl TcpSocket {
             endpoints: RwLock::new(SocketEndpoints::new(local_addr, peer_addr)),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            listener_nagle: Once::new(),
             rcv_timeout: AtomicU64::new(0),
             snd_timeout: AtomicU64::new(0),
             multicast_groups: Mutex::new(alloc::vec::Vec::new()),
@@ -401,7 +405,12 @@ impl TcpSocket {
     pub fn listen(&self) -> AxResult {
         self.update_state(STATE_CLOSED, STATE_LISTENING, || {
             let bound_endpoint = self.bound_endpoint()?;
-            LISTEN_TABLE.listen(bound_endpoint, self.wait_queues.clone())?;
+            let nagle_enabled = SOCKET_SET.with_socket::<tcp::Socket, _, _>(self.handle, |socket| {
+                self.listener_nagle
+                    .call_once(|| Arc::new(AtomicBool::new(socket.nagle_enabled())))
+                    .clone()
+            });
+            LISTEN_TABLE.listen(bound_endpoint, nagle_enabled, self.wait_queues.clone())?;
             let mut ep = self.endpoints.write();
             ep.local.port = bound_endpoint.port;
             self.set_state(STATE_LISTENING);
@@ -700,7 +709,10 @@ impl TcpSocket {
     /// To set the nagle algorithm enabled or not.
     pub fn set_nagle_enabled(&self, enabled: bool) -> AxResult {
         SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(self.handle, |socket| {
-            socket.set_nagle_enabled(enabled)
+            socket.set_nagle_enabled(enabled);
+            if let Some(nagle) = self.listener_nagle.get() {
+                nagle.store(enabled, Ordering::Relaxed);
+            }
         });
         Ok(())
     }
