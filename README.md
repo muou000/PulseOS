@@ -167,12 +167,51 @@ QEMU virt 的默认启动参数为 `-cpu max`。内核确认所有可调度 hart
 
 RISC-V QEMU 测试镜像使用 Ubuntu 官方的 `ubuntu-base-26.10-base-riscv64.tar.gz`。lmbench、LTP、sysbench、UnixBench、fio 和 liburing 测试程序取自 PulseOS 发布的 `rootfs-tests-riscv64.tar.xz`。VisionFive 2 直接使用这份完整的测试包。两份归档均可缓存在 `rootfs/base/`，分别用 `./scripts/fetch-rootfs.sh --arch riscv64` 和 `RISCV_PLATFORM=visionfive2 ./scripts/fetch-rootfs.sh --arch riscv64` 下载并校验。[Ubuntu Base 26.10](https://cdimage.ubuntu.com/ubuntu-base/releases/26.10/release/) · [PulseOS 测试制品及校验和](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261120)
 
-Release 提供两份已预装网络工具的 QEMU ext4 测试盘。RISC-V 64 使用 `disk.img.zst`，LoongArch64 使用 `disk-la.img.zst`。以下示例在空目录中下载、校验并解压 RISC-V 64 测试盘。[测试镜像和 SHA256SUMS](https://github.com/muou000/PulseOS/releases/tag/rootfs-tests-20261125)
+Release 提供两份预装调度和网络测试工具的 QEMU ext4 测试盘。RISC-V 64 使用 `disk.img.zst`，LoongArch64 使用 `disk-la.img.zst`。以下示例在空目录中下载、校验并解压 RISC-V 64 测试盘。[测试镜像和 SHA256SUMS](https://github.com/muou000/PulseOS/releases/tag/rootfs-sched-tests-20261125)
 
 ```sh
-gh release download rootfs-tests-20261125 -R muou000/PulseOS -p disk.img.zst -p SHA256SUMS
+gh release download rootfs-sched-tests-20261125 -R muou000/PulseOS -p disk.img.zst -p SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS && zstd -d --sparse disk.img.zst -o disk.img
 ```
+
+### 在来宾里测试进程调度
+
+两份 QEMU 测试盘都提供 rt-tests 2.11 的 `/usr/bin/hackbench` 和 `/usr/bin/cyclictest`。前者测多个任务并发通信的完成时间，后者测周期线程到达预定唤醒时刻后，实际恢复到用户态的延迟。[rt-tests 上游发行包](https://www.kernel.org/pub/linux/utils/rt-tests/)
+
+**检查系统调用。** 来宾已有的 LTP 用例可检查当前线程的 CPU 亲和性与调度策略。逐项记录 `passed`、`failed`、`broken` 和 `skipped`，保留跳过原因。
+
+```sh
+/opt/ltp/testcases/bin/sched_getaffinity01
+/opt/ltp/testcases/bin/sched_setaffinity01
+/opt/ltp/testcases/bin/sched_getscheduler01
+```
+
+**测管道通信负载。** 以下两条命令均使用 rt-tests 的可执行文件。LTP 也在 `/opt/ltp/testcases/bin` 安装了同名程序，参数不同。每组有 4 个发送者和 4 个接收者，每个发送者向每个接收者发送 100 条 100 字节的消息。分别用进程和线程运行，核对全部 8 个任务启动、无错误且输出 `Time`（秒）。该时间包含 IPC、唤醒调度和工作任务退出。
+
+```sh
+/usr/bin/hackbench -g 1 -f 4 -l 100 -s 100 -p -P
+/usr/bin/hackbench -g 1 -f 4 -l 100 -s 100 -p -T
+```
+
+**测周期唤醒。** 在来宾 root shell 中将程序限制到 CPU 0。rt-tests 的 SMP 模式（`-S`）按有效亲和性掩码为每个 CPU 启动一个测量线程，本例只启动一个。分别请求普通策略和优先级 10 的 FIFO 策略。两次都使用单调时钟的绝对截止时间，周期 1000 µs（1 kHz），每次采集 200 个样本。检查最终统计行的 `C` 等于 200，且延迟满足 `0 ≤ Min ≤ Avg ≤ Max`（µs）。如有负值或计数异常，保留原始输出并单独调查。前者反映普通任务的唤醒延迟，后者反映申请相应实时优先级后的观测结果。判断 FIFO 优先级是否影响派发顺序，还需同核竞争负载与顺序观测。
+
+```sh
+taskset -c 0 /usr/bin/cyclictest -S --default-system --policy=other -d 0 -i 1000 -l 200 -q
+taskset -c 0 /usr/bin/cyclictest -S --default-system --policy=fifo -p 10 -d 0 -i 1000 -l 200 -q
+```
+
+省略 `-S` 会启用 libnuma 自动探测，当前来宾缺少 CPU 到 NUMA 节点的拓扑，可能在采样前报告 `invalid cpu passed to numa_node_of_cpu(0)`。
+
+**测调度交接与锁争用。** lmbench 的 `lat_ctx` 用管道在 2 个或 8 个进程之间传递令牌，报告扣除估计开销后的每次交接时间（µs）。sysbench 的 `threads` 工作负载让线程在共享互斥锁下循环调用 `sched_yield`。用相同时间窗比较 1 个和 8 个线程时的 events/s 与第 95 百分位事件延迟。
+
+```sh
+ENOUGH=10000 /opt/lmbench/bin/lat_ctx -P 1 -W 0 -N 3 -s 0 2 8
+for n in 1 8; do
+    /usr/bin/sysbench --threads="$n" --events=0 --time=2 threads --thread-yields=100 --thread-locks=1 run
+done
+```
+
+对比内核变更时，固定 QEMU 版本、vCPU 数、亲和性和负载，多轮报告各架构的结果。上述延迟包含来宾定时器和宿主对 QEMU 的调度。要重建工具包，在装有目标架构 Linux GNU 交叉工具链的主机运行 `./scripts/build_schedbench.sh riscv64` 或 `./scripts/build_schedbench.sh loongarch64`，产物在 `target/schedbench/`。镜像内的 `/opt/schedbench/src/` 提供原始源码和构建脚本，复制到主机后可用 `SCHEDBENCH_SOURCES` 指向该目录进行离线重建。
 
 ### 在来宾里测试内存管理
 

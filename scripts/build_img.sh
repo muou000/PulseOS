@@ -166,7 +166,7 @@ build_one_arch() (
     fi
     local archives=()
     mapfile -t archives <<< "${inputs}"
-    local netbench="" mmbench=""
+    local netbench="" mmbench="" schedbench=""
     if [[ "${archives[-1]}" == */rootfs-tests-* && "${name}" != visionfive2 ]]; then
         if [[ "${fetch_tools}" == yes ]]; then
             fetch_qemu_test_overlays "${arch}"
@@ -175,6 +175,8 @@ build_one_arch() (
             || die "Missing or corrupt netbench-${arch}.tar.xz. Run scripts/fetch-rootfs.sh --tests --arch ${arch}."
         mmbench="$(verified_archive "${mmbench_sha[${arch}]}" "${BASE_DIR}/mmbench-${arch}.tar.xz")" \
             || die "Missing or corrupt mmbench-${arch}.tar.xz. Run scripts/fetch-rootfs.sh --tests --arch ${arch}."
+        schedbench="$(verified_archive "${schedbench_sha[${arch}]}" "${BASE_DIR}/schedbench-${arch}.tar.xz")" \
+            || die "Missing or corrupt schedbench-${arch}.tar.xz. Run scripts/fetch-rootfs.sh --tests --arch ${arch}."
     fi
 
     local tmpdir stage_dir tmp_img
@@ -217,6 +219,12 @@ build_one_arch() (
         for tool in speedtest1 anon_residency; do
             [[ -f "${stage_dir}/opt/mmbench/bin/${tool}" && -x "${stage_dir}/opt/mmbench/bin/${tool}" ]] \
                 || die "Missing mmbench executable: ${tool}"
+        done
+        echo "[${name}] Installing scheduler tools from: ${schedbench}"
+        tar --no-same-owner -xaf "${schedbench}" -C "${stage_dir}" ./opt/schedbench
+        for tool in hackbench cyclictest; do
+            [[ -x "${stage_dir}/opt/schedbench/bin/${tool}" ]] || die "Missing scheduler tool: ${tool}"
+            ln -sf "/opt/schedbench/bin/${tool}" "${stage_dir}/usr/bin/${tool}"
         done
     fi
 

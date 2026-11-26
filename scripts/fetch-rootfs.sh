@@ -25,7 +25,8 @@ Usage:
 
 Options:
   --tests          Fetch the test rootfs, bundled benchmark suites, RocksDB
-                   tools and (for QEMU targets) network and memory workloads (default).
+                   tools and (for QEMU targets) network, memory and scheduler
+                   workloads (default).
   --base           Fetch minimal base rootfs tarballs without bundled tests.
   --arch ARCH      Target architecture to fetch: all (default), riscv64, loongarch64.
   -h, --help       Show this help message.
