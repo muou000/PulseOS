@@ -217,6 +217,22 @@ struct sample_record {
     int64_t fast_minus_target;
 };
 
+struct step_tracker {
+    bool has_prev;
+    int64_t prev;
+    int64_t min_step_ns;
+    int regressions;
+};
+
+struct bracket_stats {
+    int below_raw;
+    int above_raw;
+    int64_t min_minus_before_ns;
+    int64_t min_after_minus_ns;
+    struct sample_record worst_before;
+    struct sample_record worst_after;
+};
+
 struct thread_config {
     int cpu;
     int iters;
@@ -235,42 +251,43 @@ struct thread_result {
     int early_libc;
     int early_vdso;
 
-    int raw_regressions;
-    int libc_regressions;
-    int vdso_regressions;
-
-    int libc_below_raw;
-    int libc_above_raw;
-    int vdso_below_raw;
-    int vdso_above_raw;
-
     int64_t min_raw_target_ns;
     int64_t min_libc_target_ns;
     int64_t min_vdso_target_ns;
 
-    int64_t min_raw_step_ns;
-    int64_t min_libc_step_ns;
-    int64_t min_vdso_step_ns;
+    struct step_tracker raw_steps;
+    struct step_tracker libc_steps;
+    struct step_tracker vdso_steps;
 
-    int64_t min_libc_minus_before_ns;
-    int64_t min_after_minus_libc_ns;
-    int64_t min_vdso_minus_before_ns;
-    int64_t min_after_minus_vdso_ns;
-
-    struct sample_record worst_libc_before;
-    struct sample_record worst_libc_after;
-    struct sample_record worst_vdso_before;
-    struct sample_record worst_vdso_after;
+    struct bracket_stats libc_bracket;
+    struct bracket_stats vdso_bracket;
 };
 
-static int pin_current_thread(int cpu) {
-    cpu_set_t mask;
-    CPU_ZERO(&mask);
-    CPU_SET(cpu, &mask);
-    if (sched_setaffinity(0, sizeof(mask), &mask) < 0) {
-        return errno;
+static void step_tracker_init(struct step_tracker *t) {
+    t->has_prev = false;
+    t->prev = 0;
+    t->min_step_ns = INT64_MAX;
+    t->regressions = 0;
+}
+
+static void step_tracker_record(struct step_tracker *t, int64_t cur) {
+    if (t->has_prev) {
+        int64_t step = cur - t->prev;
+        if (step < t->min_step_ns) {
+            t->min_step_ns = step;
+        }
+        if (step < 0) {
+            t->regressions++;
+        }
     }
-    return 0;
+    t->prev = cur;
+    t->has_prev = true;
+}
+
+static void bracket_stats_init(struct bracket_stats *s) {
+    memset(s, 0, sizeof(*s));
+    s->min_minus_before_ns = INT64_MAX;
+    s->min_after_minus_ns = INT64_MAX;
 }
 
 static void record_sample(struct sample_record *dst, int iter, int rc, int64_t target,
@@ -287,19 +304,47 @@ static void record_sample(struct sample_record *dst, int iter, int rc, int64_t t
     dst->fast_minus_target = fast - target;
 }
 
-static void track_raw_step(struct thread_result *r, int64_t *prev_raw, bool *has_prev,
-                           int64_t cur) {
-    if (*has_prev) {
-        int64_t step = cur - *prev_raw;
-        if (step < r->min_raw_step_ns) {
-            r->min_raw_step_ns = step;
-        }
-        if (step < 0) {
-            r->raw_regressions++;
-        }
+static void bracket_stats_record(struct bracket_stats *s, int iter, int rc, int64_t target,
+                                 int64_t raw_before, int64_t fast, int64_t raw_after) {
+    int64_t diff_before = fast - raw_before;
+    int64_t diff_after = raw_after - fast;
+    if (diff_before < 0) {
+        s->below_raw++;
     }
-    *prev_raw = cur;
-    *has_prev = true;
+    if (diff_after < 0) {
+        s->above_raw++;
+    }
+    if (diff_before < s->min_minus_before_ns) {
+        s->min_minus_before_ns = diff_before;
+        record_sample(&s->worst_before, iter, rc, target, raw_before, fast, raw_after);
+    }
+    if (diff_after < s->min_after_minus_ns) {
+        s->min_after_minus_ns = diff_after;
+        record_sample(&s->worst_after, iter, rc, target, raw_before, fast, raw_after);
+    }
+}
+
+static void bracket_stats_merge(struct bracket_stats *dst, const struct bracket_stats *src) {
+    dst->below_raw += src->below_raw;
+    dst->above_raw += src->above_raw;
+    if (src->min_minus_before_ns < dst->min_minus_before_ns) {
+        dst->min_minus_before_ns = src->min_minus_before_ns;
+        dst->worst_before = src->worst_before;
+    }
+    if (src->min_after_minus_ns < dst->min_after_minus_ns) {
+        dst->min_after_minus_ns = src->min_after_minus_ns;
+        dst->worst_after = src->worst_after;
+    }
+}
+
+static int pin_current_thread(int cpu) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(cpu, &mask);
+    if (sched_setaffinity(0, sizeof(mask), &mask) < 0) {
+        return errno;
+    }
+    return 0;
 }
 
 static void *worker_main(void *arg) {
@@ -307,13 +352,11 @@ static void *worker_main(void *arg) {
     r->min_raw_target_ns = INT64_MAX;
     r->min_libc_target_ns = INT64_MAX;
     r->min_vdso_target_ns = INT64_MAX;
-    r->min_raw_step_ns = INT64_MAX;
-    r->min_libc_step_ns = INT64_MAX;
-    r->min_vdso_step_ns = INT64_MAX;
-    r->min_libc_minus_before_ns = INT64_MAX;
-    r->min_after_minus_libc_ns = INT64_MAX;
-    r->min_vdso_minus_before_ns = INT64_MAX;
-    r->min_after_minus_vdso_ns = INT64_MAX;
+    step_tracker_init(&r->raw_steps);
+    step_tracker_init(&r->libc_steps);
+    step_tracker_init(&r->vdso_steps);
+    bracket_stats_init(&r->libc_bracket);
+    bracket_stats_init(&r->vdso_bracket);
 
     r->err = pin_current_thread(r->cfg.cpu);
     if (r->err != 0) {
@@ -325,14 +368,10 @@ static void *worker_main(void *arg) {
         r->err = errno;
         return NULL;
     }
-    int64_t prev_raw = ts_to_ns(start_ts);
-    bool has_prev_raw = true;
-    int64_t prev_libc = 0;
-    bool has_prev_libc = false;
-    int64_t prev_vdso = 0;
-    bool has_prev_vdso = false;
+    int64_t start_raw = ts_to_ns(start_ts);
+    step_tracker_record(&r->raw_steps, start_raw);
 
-    int64_t target = prev_raw + r->cfg.period_ns;
+    int64_t target = start_raw + r->cfg.period_ns;
 
     for (int iter = 0; iter < r->cfg.iters; iter++) {
         struct timespec req = ns_to_ts(target);
@@ -361,34 +400,12 @@ static void *worker_main(void *arg) {
         int64_t vdso_ns = ts_to_ns(vdso_ts);
         int64_t raw_a2 = ts_to_ns(raw_a2_ts);
 
-        track_raw_step(r, &prev_raw, &has_prev_raw, raw_b1);
-        track_raw_step(r, &prev_raw, &has_prev_raw, raw_a1);
-        track_raw_step(r, &prev_raw, &has_prev_raw, raw_b2);
-        track_raw_step(r, &prev_raw, &has_prev_raw, raw_a2);
-
-        if (has_prev_libc) {
-            int64_t step = libc_ns - prev_libc;
-            if (step < r->min_libc_step_ns) {
-                r->min_libc_step_ns = step;
-            }
-            if (step < 0) {
-                r->libc_regressions++;
-            }
-        }
-        prev_libc = libc_ns;
-        has_prev_libc = true;
-
-        if (has_prev_vdso) {
-            int64_t step = vdso_ns - prev_vdso;
-            if (step < r->min_vdso_step_ns) {
-                r->min_vdso_step_ns = step;
-            }
-            if (step < 0) {
-                r->vdso_regressions++;
-            }
-        }
-        prev_vdso = vdso_ns;
-        has_prev_vdso = true;
+        step_tracker_record(&r->raw_steps, raw_b1);
+        step_tracker_record(&r->raw_steps, raw_a1);
+        step_tracker_record(&r->raw_steps, raw_b2);
+        step_tracker_record(&r->raw_steps, raw_a2);
+        step_tracker_record(&r->libc_steps, libc_ns);
+        step_tracker_record(&r->vdso_steps, vdso_ns);
 
         if (rc == 0) {
             int64_t d_raw = raw_b1 - target;
@@ -414,39 +431,8 @@ static void *worker_main(void *arg) {
             }
         }
 
-        int64_t libc_before = libc_ns - raw_b1;
-        int64_t libc_after = raw_a1 - libc_ns;
-        if (libc_before < 0) {
-            r->libc_below_raw++;
-        }
-        if (libc_after < 0) {
-            r->libc_above_raw++;
-        }
-        if (libc_before < r->min_libc_minus_before_ns) {
-            r->min_libc_minus_before_ns = libc_before;
-            record_sample(&r->worst_libc_before, iter, rc, target, raw_b1, libc_ns, raw_a1);
-        }
-        if (libc_after < r->min_after_minus_libc_ns) {
-            r->min_after_minus_libc_ns = libc_after;
-            record_sample(&r->worst_libc_after, iter, rc, target, raw_b1, libc_ns, raw_a1);
-        }
-
-        int64_t vdso_before = vdso_ns - raw_b2;
-        int64_t vdso_after = raw_a2 - vdso_ns;
-        if (vdso_before < 0) {
-            r->vdso_below_raw++;
-        }
-        if (vdso_after < 0) {
-            r->vdso_above_raw++;
-        }
-        if (vdso_before < r->min_vdso_minus_before_ns) {
-            r->min_vdso_minus_before_ns = vdso_before;
-            record_sample(&r->worst_vdso_before, iter, rc, target, raw_b2, vdso_ns, raw_a2);
-        }
-        if (vdso_after < r->min_after_minus_vdso_ns) {
-            r->min_after_minus_vdso_ns = vdso_after;
-            record_sample(&r->worst_vdso_after, iter, rc, target, raw_b2, vdso_ns, raw_a2);
-        }
+        bracket_stats_record(&r->libc_bracket, iter, rc, target, raw_b1, libc_ns, raw_a1);
+        bracket_stats_record(&r->vdso_bracket, iter, rc, target, raw_b2, vdso_ns, raw_a2);
 
         r->cycles++;
         target += r->cfg.period_ns;
@@ -464,27 +450,14 @@ static int run_bench_channel(const char *name, int (*fn)(clockid_t, struct times
     if (raw_clock_gettime(CLOCK_MONOTONIC, &t0) < 0) {
         return errno;
     }
-    int64_t prev = 0;
-    bool has_prev = false;
-    int regs = 0;
-    int64_t min_step = INT64_MAX;
+    struct step_tracker steps;
+    step_tracker_init(&steps);
 
     for (int i = 0; i < iters; i++) {
         if (fn(CLOCK_MONOTONIC, &cur) < 0) {
             return errno != 0 ? errno : EINVAL;
         }
-        int64_t ns = ts_to_ns(cur);
-        if (has_prev) {
-            int64_t step = ns - prev;
-            if (step < min_step) {
-                min_step = step;
-            }
-            if (step < 0) {
-                regs++;
-            }
-        }
-        prev = ns;
-        has_prev = true;
+        step_tracker_record(&steps, ts_to_ns(cur));
     }
     if (raw_clock_gettime(CLOCK_MONOTONIC, &t1) < 0) {
         return errno;
@@ -493,8 +466,9 @@ static int run_bench_channel(const char *name, int (*fn)(clockid_t, struct times
     int64_t elapsed = ts_to_ns(t1) - ts_to_ns(t0);
     double per_call = iters > 0 ? (double)elapsed / (double)iters : 0.0;
     printf("bench channel=%s iters=%d total_ns=%" PRId64 " ns_per_call=%.2f regressions=%d min_step_ns=%" PRId64 "\n",
-           name, iters, elapsed, per_call, regs, min_step == INT64_MAX ? 0 : min_step);
-    *regressions_out = regs;
+           name, iters, elapsed, per_call, steps.regressions,
+           steps.min_step_ns == INT64_MAX ? 0 : steps.min_step_ns);
+    *regressions_out = steps.regressions;
     return 0;
 }
 
@@ -629,27 +603,23 @@ int main(int argc, char **argv) {
         int total_cycles = 0, total_nonzero_rc = 0;
         int total_early_raw = 0, total_early_libc = 0, total_early_vdso = 0;
         int total_reg_raw = 0, total_reg_libc = 0, total_reg_vdso = 0;
-        int total_libc_below = 0, total_libc_above = 0;
-        int total_vdso_below = 0, total_vdso_above = 0;
-
+        int64_t g_min_raw_step = INT64_MAX;
+        int64_t g_min_libc_step = INT64_MAX;
+        int64_t g_min_vdso_step = INT64_MAX;
         int64_t g_min_raw_target = INT64_MAX;
         int64_t g_min_libc_target = INT64_MAX;
         int64_t g_min_vdso_target = INT64_MAX;
-        int64_t g_min_libc_before = INT64_MAX;
-        int64_t g_min_after_libc = INT64_MAX;
-        int64_t g_min_vdso_before = INT64_MAX;
-        int64_t g_min_after_vdso = INT64_MAX;
 
-        struct sample_record g_worst_libc_before = {0};
-        struct sample_record g_worst_libc_after = {0};
-        struct sample_record g_worst_vdso_before = {0};
-        struct sample_record g_worst_vdso_after = {0};
+        struct bracket_stats total_libc_bracket, total_vdso_bracket;
+        bracket_stats_init(&total_libc_bracket);
+        bracket_stats_init(&total_vdso_bracket);
 
         for (int i = 0; i < threads; i++) {
             const struct thread_result *r = &results[i];
             printf("cpu=%d err=%d C=%d nonzero_rc=%d last_rc=%d "
                    "early_raw=%d early_libc=%d early_vdso=%d "
                    "reg_raw=%d reg_libc=%d reg_vdso=%d "
+                   "min_raw_step_ns=%" PRId64 " min_libc_step_ns=%" PRId64 " min_vdso_step_ns=%" PRId64 " "
                    "libc_below=%d libc_above=%d vdso_below=%d vdso_above=%d "
                    "min_raw_target_ns=%" PRId64 " min_libc_target_ns=%" PRId64
                    " min_vdso_target_ns=%" PRId64 " min_libc_minus_before_ns=%" PRId64
@@ -657,17 +627,20 @@ int main(int argc, char **argv) {
                    " min_after_minus_vdso_ns=%" PRId64 "\n",
                    r->cfg.cpu, r->err, r->cycles, r->nonzero_rc, r->last_rc,
                    r->early_raw, r->early_libc, r->early_vdso,
-                   r->raw_regressions, r->libc_regressions, r->vdso_regressions,
-                   r->libc_below_raw, r->libc_above_raw, r->vdso_below_raw, r->vdso_above_raw,
+                   r->raw_steps.regressions, r->libc_steps.regressions, r->vdso_steps.regressions,
+                   r->raw_steps.min_step_ns, r->libc_steps.min_step_ns, r->vdso_steps.min_step_ns,
+                   r->libc_bracket.below_raw, r->libc_bracket.above_raw,
+                   r->vdso_bracket.below_raw, r->vdso_bracket.above_raw,
                    r->min_raw_target_ns, r->min_libc_target_ns, r->min_vdso_target_ns,
-                   r->min_libc_minus_before_ns, r->min_after_minus_libc_ns,
-                   r->min_vdso_minus_before_ns, r->min_after_minus_vdso_ns);
+                   r->libc_bracket.min_minus_before_ns, r->libc_bracket.min_after_minus_ns,
+                   r->vdso_bracket.min_minus_before_ns, r->vdso_bracket.min_after_minus_ns);
 
             if (r->err != 0 || r->cycles != iters || r->nonzero_rc != 0 ||
                 r->early_raw != 0 || r->early_libc != 0 || r->early_vdso != 0 ||
-                r->raw_regressions != 0 || r->libc_regressions != 0 || r->vdso_regressions != 0 ||
-                r->libc_below_raw != 0 || r->libc_above_raw != 0 ||
-                r->vdso_below_raw != 0 || r->vdso_above_raw != 0) {
+                r->raw_steps.regressions != 0 || r->libc_steps.regressions != 0 ||
+                r->vdso_steps.regressions != 0 ||
+                r->libc_bracket.below_raw != 0 || r->libc_bracket.above_raw != 0 ||
+                r->vdso_bracket.below_raw != 0 || r->vdso_bracket.above_raw != 0) {
                 any_violation = true;
             }
 
@@ -676,38 +649,23 @@ int main(int argc, char **argv) {
             total_early_raw += r->early_raw;
             total_early_libc += r->early_libc;
             total_early_vdso += r->early_vdso;
-            total_reg_raw += r->raw_regressions;
-            total_reg_libc += r->libc_regressions;
-            total_reg_vdso += r->vdso_regressions;
-            total_libc_below += r->libc_below_raw;
-            total_libc_above += r->libc_above_raw;
-            total_vdso_below += r->vdso_below_raw;
-            total_vdso_above += r->vdso_above_raw;
-
+            total_reg_raw += r->raw_steps.regressions;
+            total_reg_libc += r->libc_steps.regressions;
+            total_reg_vdso += r->vdso_steps.regressions;
+            if (r->raw_steps.min_step_ns < g_min_raw_step) g_min_raw_step = r->raw_steps.min_step_ns;
+            if (r->libc_steps.min_step_ns < g_min_libc_step) g_min_libc_step = r->libc_steps.min_step_ns;
+            if (r->vdso_steps.min_step_ns < g_min_vdso_step) g_min_vdso_step = r->vdso_steps.min_step_ns;
             if (r->min_raw_target_ns < g_min_raw_target) g_min_raw_target = r->min_raw_target_ns;
             if (r->min_libc_target_ns < g_min_libc_target) g_min_libc_target = r->min_libc_target_ns;
             if (r->min_vdso_target_ns < g_min_vdso_target) g_min_vdso_target = r->min_vdso_target_ns;
 
-            if (r->min_libc_minus_before_ns < g_min_libc_before) {
-                g_min_libc_before = r->min_libc_minus_before_ns;
-                g_worst_libc_before = r->worst_libc_before;
-            }
-            if (r->min_after_minus_libc_ns < g_min_after_libc) {
-                g_min_after_libc = r->min_after_minus_libc_ns;
-                g_worst_libc_after = r->worst_libc_after;
-            }
-            if (r->min_vdso_minus_before_ns < g_min_vdso_before) {
-                g_min_vdso_before = r->min_vdso_minus_before_ns;
-                g_worst_vdso_before = r->worst_vdso_before;
-            }
-            if (r->min_after_minus_vdso_ns < g_min_after_vdso) {
-                g_min_after_vdso = r->min_after_minus_vdso_ns;
-                g_worst_vdso_after = r->worst_vdso_after;
-            }
+            bracket_stats_merge(&total_libc_bracket, &r->libc_bracket);
+            bracket_stats_merge(&total_vdso_bracket, &r->vdso_bracket);
         }
 
         printf("total C=%d nonzero_rc=%d early_raw=%d early_libc=%d early_vdso=%d "
                "reg_raw=%d reg_libc=%d reg_vdso=%d "
+               "min_raw_step_ns=%" PRId64 " min_libc_step_ns=%" PRId64 " min_vdso_step_ns=%" PRId64 " "
                "libc_below=%d libc_above=%d vdso_below=%d vdso_above=%d "
                "min_raw_target_ns=%" PRId64 " min_libc_target_ns=%" PRId64
                " min_vdso_target_ns=%" PRId64 " min_libc_minus_before_ns=%" PRId64
@@ -715,13 +673,16 @@ int main(int argc, char **argv) {
                " min_after_minus_vdso_ns=%" PRId64 "\n",
                total_cycles, total_nonzero_rc, total_early_raw, total_early_libc, total_early_vdso,
                total_reg_raw, total_reg_libc, total_reg_vdso,
-               total_libc_below, total_libc_above, total_vdso_below, total_vdso_above,
+               g_min_raw_step, g_min_libc_step, g_min_vdso_step,
+               total_libc_bracket.below_raw, total_libc_bracket.above_raw,
+               total_vdso_bracket.below_raw, total_vdso_bracket.above_raw,
                g_min_raw_target, g_min_libc_target, g_min_vdso_target,
-               g_min_libc_before, g_min_after_libc, g_min_vdso_before, g_min_after_vdso);
-        print_worst_sample("libc_before", &g_worst_libc_before);
-        print_worst_sample("libc_after", &g_worst_libc_after);
-        print_worst_sample("vdso_before", &g_worst_vdso_before);
-        print_worst_sample("vdso_after", &g_worst_vdso_after);
+               total_libc_bracket.min_minus_before_ns, total_libc_bracket.min_after_minus_ns,
+               total_vdso_bracket.min_minus_before_ns, total_vdso_bracket.min_after_minus_ns);
+        print_worst_sample("libc_before", &total_libc_bracket.worst_before);
+        print_worst_sample("libc_after", &total_libc_bracket.worst_after);
+        print_worst_sample("vdso_before", &total_vdso_bracket.worst_before);
+        print_worst_sample("vdso_after", &total_vdso_bracket.worst_after);
     }
 
     return (fail_on_violation && any_violation) ? 1 : 0;
