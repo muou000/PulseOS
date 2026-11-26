@@ -471,8 +471,17 @@ pub fn run_virtio_blk_recheck_guest_checks() -> Result<(), &'static str> {
         }
     }
 
-    let mut stats = [driver::VirtIoBlkStats::default(); 8];
-    if driver::copy_virtio_blk_stats(&mut stats) == 0 {
+    fn snapshot_virtio_blk_stats() -> Result<driver::VirtIoBlkStats, &'static str> {
+        let mut root = None;
+        driver::for_each_virtio_blk_stats(|index, stats| {
+            if index == 0 {
+                root = Some(stats);
+            }
+        });
+        root.ok_or("virtio-blk stats missing")
+    }
+
+    if snapshot_virtio_blk_stats().is_err() {
         info!("[VIRTIO_BLK_RECHECK_CHECK] no virtio-blk device registered; skipping");
         return Ok(());
     }
@@ -481,25 +490,17 @@ pub fn run_virtio_blk_recheck_guest_checks() -> Result<(), &'static str> {
         .ok_or("root block device not initialized")?
         .clone();
 
-    // 1. Baseline read sectors (0, 8, 16, 24) with normal IRQ.
-    let s0 = {
-        let mut buf = [driver::VirtIoBlkStats::default(); 8];
-        let n = driver::copy_virtio_blk_stats(&mut buf);
-        if n == 0 {
-            return Err("virtio-blk stats missing");
-        }
-        buf[0]
-    };
+    // 1. Let any boot-time lazy watchdog disarm, then read sectors
+    //    (0, 8, 16, 24) with normal IRQ and let the epoch disarm cleanly.
+    task::future::block_on(task::future::sleep(Duration::from_millis(25)));
+    let s0 = snapshot_virtio_blk_stats()?;
     let mut expected = [[0u8; 512]; 4];
     for (idx, buf) in expected.iter_mut().enumerate() {
         task::future::block_on(dev.read_block_async((idx * 8) as u64, buf))
             .map_err(|_| "normal irq read failed")?;
     }
-    let s1 = {
-        let mut buf = [driver::VirtIoBlkStats::default(); 8];
-        driver::copy_virtio_blk_stats(&mut buf);
-        buf[0]
-    };
+    task::future::block_on(task::future::sleep(Duration::from_millis(25)));
+    let s1 = snapshot_virtio_blk_stats()?;
     if s1.completions_total <= s0.completions_total || s1.in_flight_current != 0 {
         return Err("normal irq read stats mismatch");
     }
@@ -542,11 +543,7 @@ pub fn run_virtio_blk_recheck_guest_checks() -> Result<(), &'static str> {
         }
     }
 
-    let s2 = {
-        let mut buf = [driver::VirtIoBlkStats::default(); 8];
-        driver::copy_virtio_blk_stats(&mut buf);
-        buf[0]
-    };
+    let s2 = snapshot_virtio_blk_stats()?;
     if s2.irq_completions != s1.irq_completions {
         return Err("unexpected irq completions during irq suppression");
     }
@@ -557,15 +554,25 @@ pub fn run_virtio_blk_recheck_guest_checks() -> Result<(), &'static str> {
         return Err("suppressed-irq recheck counters did not advance cleanly");
     }
 
-    // 3. Idle check after restoring normal IRQ: no spurious recheck callbacks.
+    // 3. Idle check after restoring normal IRQ: no spurious recheck callbacks
+    //    and counter conservation laws hold.
     task::future::block_on(task::future::sleep(Duration::from_millis(50)));
-    let s3 = {
-        let mut buf = [driver::VirtIoBlkStats::default(); 8];
-        driver::copy_virtio_blk_stats(&mut buf);
-        buf[0]
-    };
+    let s3 = snapshot_virtio_blk_stats()?;
     if s3.recheck_callback_fired != s2.recheck_callback_fired || s3.in_flight_current != 0 {
         return Err("unexpected idle recheck callback");
+    }
+    if s3.completions_total
+        != s3.irq_completions + s3.poll_completions + s3.recheck_reclaimed_completions
+        || s3.recheck_callback_fired
+            != s3.recheck_callback_reclaimed
+                + s3.recheck_callback_already_drained
+                + s3.recheck_callback_still_pending
+        || s3.recheck_armed
+            != s3.recheck_irq_completed_before_callback
+                + s3.recheck_poll_completed_before_callback
+                + (s3.recheck_callback_fired - s3.recheck_rearmed)
+    {
+        return Err("virtio-blk watchdog counter invariant mismatch");
     }
 
     // 4. Verify normal IRQ read still works after restoring IRQ completion drain.
@@ -575,25 +582,30 @@ pub fn run_virtio_blk_recheck_guest_checks() -> Result<(), &'static str> {
     if verify_buf != expected[0] {
         return Err("post-restore read payload mismatch");
     }
-    let s4 = {
-        let mut buf = [driver::VirtIoBlkStats::default(); 8];
-        driver::copy_virtio_blk_stats(&mut buf);
-        buf[0]
-    };
+    let s4 = snapshot_virtio_blk_stats()?;
     if s4.in_flight_current != 0 || s4.completions_total <= s3.completions_total {
         return Err("post-restore read stats mismatch");
     }
-    if s4.recheck_timer_programs != 0 {
-        return Err("unexpected timer programs during recheck");
-    }
 
     info!(
-        "VIRTIO_BLK_RECHECK_CHECK normal_delta={} suppressed_reclaimed={} \
-         suppressed_callbacks={} timer_programs={} idle_callbacks_delta=0 RESULT PASS",
+        "VIRTIO_BLK_RECHECK_CHECK normal_completions={} normal_irq_completions={} \
+         normal_armed={} normal_already_armed={} normal_irq_before_cb={} normal_cb_fired={} \
+         suppressed_reclaimed={} suppressed_armed={} suppressed_already_armed={} \
+         suppressed_callbacks={} suppressed_cb_reclaimed={} suppressed_rearmed={} \
+         in_flight_max={} idle_callbacks_delta=0 RESULT PASS",
         s1.completions_total - s0.completions_total,
+        s1.irq_completions - s0.irq_completions,
+        s1.recheck_armed - s0.recheck_armed,
+        s1.recheck_already_armed - s0.recheck_already_armed,
+        s1.recheck_irq_completed_before_callback - s0.recheck_irq_completed_before_callback,
+        s1.recheck_callback_fired - s0.recheck_callback_fired,
         s2.recheck_reclaimed_completions - s1.recheck_reclaimed_completions,
+        s2.recheck_armed - s1.recheck_armed,
+        s2.recheck_already_armed - s1.recheck_already_armed,
         s2.recheck_callback_fired - s1.recheck_callback_fired,
-        s4.recheck_timer_programs,
+        s2.recheck_callback_reclaimed - s1.recheck_callback_reclaimed,
+        s2.recheck_rearmed - s1.recheck_rearmed,
+        s4.in_flight_max,
     );
     Ok(())
 }

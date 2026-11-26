@@ -940,18 +940,16 @@ fn render_filesystems() -> String {
 }
 
 fn render_virtio_blk_stats() -> String {
-    let mut stats = [driver::VirtIoBlkStats::default(); 8];
-    let count = driver::copy_virtio_blk_stats(&mut stats);
     let mut out = String::new();
-    for (idx, item) in stats[..count].iter().enumerate() {
+    driver::for_each_virtio_blk_stats(|idx, item| {
         out.push_str(&format!(
             "dev={} submissions={} completions_total={} irq_count={} irq_completions={} \
              poll_completions={} recheck_armed={} recheck_already_armed={} \
-             recheck_timer_programs={} recheck_callback_fired={} \
-             recheck_irq_completed_before_callback={} \
-             recheck_callback_irq_already_completed={} recheck_callback_reclaimed={} \
-             recheck_reclaimed_completions={} recheck_rearmed={} in_flight_current={} \
-             in_flight_max={} in_flight_submit_sum={} queue_full_waits={} \
+             recheck_callback_fired={} recheck_irq_completed_before_callback={} \
+             recheck_poll_completed_before_callback={} \
+             recheck_callback_already_drained={} recheck_callback_still_pending={} \
+             recheck_callback_reclaimed={} recheck_reclaimed_completions={} recheck_rearmed={} \
+             in_flight_current={} in_flight_max={} in_flight_submit_sum={} queue_full_waits={} \
              cancelled_detached={} cancelled_completed_recycled={}\n",
             idx,
             item.submissions,
@@ -961,10 +959,11 @@ fn render_virtio_blk_stats() -> String {
             item.poll_completions,
             item.recheck_armed,
             item.recheck_already_armed,
-            item.recheck_timer_programs,
             item.recheck_callback_fired,
             item.recheck_irq_completed_before_callback,
-            item.recheck_callback_irq_already_completed,
+            item.recheck_poll_completed_before_callback,
+            item.recheck_callback_already_drained,
+            item.recheck_callback_still_pending,
             item.recheck_callback_reclaimed,
             item.recheck_reclaimed_completions,
             item.recheck_rearmed,
@@ -975,7 +974,7 @@ fn render_virtio_blk_stats() -> String {
             item.cancelled_detached,
             item.cancelled_completed_recycled,
         ));
-    }
+    });
     out
 }
 

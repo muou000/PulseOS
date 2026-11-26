@@ -2,7 +2,7 @@ use alloc::sync::{Arc, Weak};
 use core::{
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 #[cfg(feature = "guest-checks")]
 use core::sync::atomic::AtomicBool;
@@ -575,9 +575,8 @@ mod tests {
         }
 
         #[test]
-        fn normal_irq_coalesces_recheck_and_disarms_before_tick() {
+        fn normal_irq_coalesces_recheck_and_tick_disarms_without_callback() {
             let _guard = GLOBAL_WATCHDOG_TEST_LOCK.lock().unwrap();
-            const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
             let (transport, dev_state) = MockBlkTransport::new(64, VIRTIO_BLK_F_FLUSH);
             let dev = driver_virtio::VirtIoBlkDev::<MockHal, MockBlkTransport>::try_new(transport)
                 .unwrap();
@@ -614,11 +613,11 @@ mod tests {
                 assert_eq!(s.in_flight_max, 3);
                 assert_eq!(s.recheck_armed, 1);
                 assert_eq!(s.recheck_already_armed, 2);
-                assert_eq!(s.recheck_timer_programs, 0);
 
                 assert!(complete_next_in_device(&dev_state, true));
                 assert!(complete_next_in_device(&dev_state, true));
                 assert!(complete_next_in_device(&dev_state, true));
+                let deadline = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
                 inner.handle_interrupt();
 
                 assert_eq!(wake_cnt1.0.load(Ordering::Relaxed), 1);
@@ -637,14 +636,20 @@ mod tests {
                     fut3.as_mut().poll(&mut Context::from_waker(&waker3)),
                     Poll::Ready(Ok(()))
                 ));
+
+                // First expired tick after IRQ drains lazily disarms without
+                // running the lost-IRQ recheck callback.
+                inner.poll_completion_recheck(deadline);
             }
 
-            // Subsequent tick after IRQ completion must do zero work.
+            // Subsequent tick after lazy disarm must do zero work.
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
             inner.poll_completion_recheck(hal::time::monotonic_time_nanos() + 20_000_000);
             let s = inner.counters.snapshot();
+            assert_counter_invariants(&s);
             assert_eq!(s.recheck_irq_completed_before_callback, 1);
+            assert_eq!(s.recheck_poll_completed_before_callback, 0);
             assert_eq!(s.recheck_callback_fired, 0);
-            assert_eq!(s.recheck_timer_programs, 0);
             assert_eq!(s.irq_completions, 3);
             assert_eq!(s.in_flight_current, 0);
             assert_eq!(buf1, dev_state.lock().unwrap().sectors[0]);
@@ -662,8 +667,18 @@ mod tests {
             );
             assert_eq!(
                 s.recheck_callback_fired,
-                s.recheck_callback_reclaimed + s.recheck_callback_irq_already_completed
+                s.recheck_callback_reclaimed
+                    + s.recheck_callback_already_drained
+                    + s.recheck_callback_still_pending
             );
+            if s.in_flight_current == 0 {
+                assert_eq!(
+                    s.recheck_armed,
+                    s.recheck_irq_completed_before_callback
+                        + s.recheck_poll_completed_before_callback
+                        + (s.recheck_callback_fired - s.recheck_rearmed)
+                );
+            }
         }
 
         #[test]
@@ -701,8 +716,7 @@ mod tests {
                     Poll::Pending
                 ));
 
-                armed_deadline = inner.recheck_deadline_ns.load(Ordering::Acquire);
-                assert_ne!(armed_deadline, RECHECK_IDLE);
+                armed_deadline = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
                 assert_eq!(
                     VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
                     armed_before + 1
@@ -737,7 +751,7 @@ mod tests {
             }
 
             // Watchdog returned to IDLE; further ticks are no-ops.
-            assert_eq!(inner.recheck_deadline_ns.load(Ordering::Acquire), RECHECK_IDLE);
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
             assert_eq!(
                 VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
                 armed_before
@@ -746,7 +760,6 @@ mod tests {
 
             let s = inner.counters.snapshot();
             assert_counter_invariants(&s);
-            assert_eq!(s.recheck_timer_programs, 0);
             assert_eq!(s.recheck_callback_fired, 1);
             assert_eq!(s.recheck_callback_reclaimed, 1);
             assert_eq!(s.recheck_reclaimed_completions, 3);
@@ -782,7 +795,7 @@ mod tests {
                     Poll::Pending
                 ));
 
-                let d1 = inner.recheck_deadline_ns.load(Ordering::Acquire);
+                let d1 = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
                 assert!(complete_next_in_device(&dev_state, false));
                 inner.poll_completion_recheck(d1);
                 assert_eq!(cnt1.0.load(Ordering::Relaxed), 1);
@@ -791,15 +804,16 @@ mod tests {
                 assert_eq!(inner.counters.snapshot().in_flight_current, 1);
 
                 // Empty tick while second request is still in flight.
-                let d2 = inner.recheck_deadline_ns.load(Ordering::Acquire);
-                assert_ne!(d2, RECHECK_IDLE);
+                let d2 = inner.recheck_watchdog.deadline_ns().expect("watchdog rearmed");
                 inner.poll_completion_recheck(d2);
                 assert_eq!(cnt2.0.load(Ordering::Relaxed), 0);
-                assert_eq!(inner.counters.snapshot().recheck_callback_irq_already_completed, 1);
-                assert_eq!(inner.counters.snapshot().recheck_rearmed, 2);
+                let mid = inner.counters.snapshot();
+                assert_eq!(mid.recheck_callback_still_pending, 1);
+                assert_eq!(mid.recheck_callback_already_drained, 0);
+                assert_eq!(mid.recheck_rearmed, 2);
 
                 // Second request finishes without IRQ; next tick reclaims it and idles.
-                let d3 = inner.recheck_deadline_ns.load(Ordering::Acquire);
+                let d3 = inner.recheck_watchdog.deadline_ns().expect("watchdog rearmed again");
                 assert!(complete_next_in_device(&dev_state, false));
                 inner.poll_completion_recheck(d3);
                 assert_eq!(cnt2.0.load(Ordering::Relaxed), 1);
@@ -818,10 +832,11 @@ mod tests {
             assert_counter_invariants(&s);
             assert_eq!(s.recheck_callback_fired, 3);
             assert_eq!(s.recheck_callback_reclaimed, 2);
-            assert_eq!(s.recheck_callback_irq_already_completed, 1);
+            assert_eq!(s.recheck_callback_still_pending, 1);
+            assert_eq!(s.recheck_callback_already_drained, 0);
             assert_eq!(s.recheck_reclaimed_completions, 2);
             assert_eq!(s.in_flight_current, 0);
-            assert_eq!(inner.recheck_deadline_ns.load(Ordering::Acquire), RECHECK_IDLE);
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
             assert_eq!(b1, dev_state.lock().unwrap().sectors[4]);
             assert_eq!(b2, dev_state.lock().unwrap().sectors[5]);
         }
@@ -864,7 +879,7 @@ mod tests {
                 assert_eq!(inner.counters.snapshot().in_flight_current, 5);
 
                 // Reclaim 1 slot via recheck without IRQ; submit waker for f5 must wake.
-                let d1 = inner.recheck_deadline_ns.load(Ordering::Acquire);
+                let d1 = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
                 assert!(complete_next_in_device(&dev_state, false));
                 inner.poll_completion_recheck(d1);
                 assert_eq!(cnt5.0.load(Ordering::Relaxed), 1);
@@ -874,7 +889,7 @@ mod tests {
                 assert_eq!(inner.counters.snapshot().submissions, 6);
 
                 while complete_next_in_device(&dev_state, false) {}
-                let d2 = inner.recheck_deadline_ns.load(Ordering::Acquire);
+                let d2 = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
                 inner.poll_completion_recheck(d2);
 
                 assert!(matches!(f0.as_mut().poll(&mut Context::from_waker(&w0)), Poll::Ready(Ok(()))));
@@ -895,9 +910,18 @@ mod tests {
         }
 
         #[test]
-        fn global_tick_hook_skips_when_idle_and_reclaims_when_armed() {
+        fn global_tick_hook_reclaims_a_missing_irq_on_the_seventeenth_device() {
             let _guard = GLOBAL_WATCHDOG_TEST_LOCK.lock().unwrap();
             let armed_before = VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire);
+            let mut idle_devices = Vec::new();
+            for _ in 0..16 {
+                let (transport, _) = MockBlkTransport::new(64, VIRTIO_BLK_F_FLUSH);
+                let dev = driver_virtio::VirtIoBlkDev::<MockHal, MockBlkTransport>::try_new(transport)
+                    .unwrap();
+                let idle = VirtIoBlkDevInner::new_for_test(dev, 1);
+                register_virtio_blk_device(Arc::downgrade(&idle) as Weak<dyn VirtIoBlkDeviceOps>);
+                idle_devices.push(idle);
+            }
             let (transport, dev_state) = MockBlkTransport::new(64, VIRTIO_BLK_F_FLUSH);
             let dev = driver_virtio::VirtIoBlkDev::<MockHal, MockBlkTransport>::try_new(transport)
                 .unwrap();
@@ -919,7 +943,7 @@ mod tests {
                     armed_before + 1
                 );
                 assert!(complete_next_in_device(&dev_state, false));
-                let deadline = inner.recheck_deadline_ns.load(Ordering::Acquire);
+                let deadline = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
                 virtio_blk_tick_recheck_at(deadline);
                 assert_eq!(cnt.0.load(Ordering::Relaxed), 1);
                 assert!(matches!(
@@ -930,6 +954,11 @@ mod tests {
             let s = inner.counters.snapshot();
             assert_counter_invariants(&s);
             assert_eq!(s.recheck_reclaimed_completions, 1);
+            let mut all_stats = Vec::new();
+            crate::for_each_virtio_blk_stats(|_, item| all_stats.push(item));
+            assert_eq!(all_stats.len(), idle_devices.len() + 1);
+            assert_eq!(all_stats.last(), Some(&s));
+            assert!(all_stats[..idle_devices.len()].iter().all(|item| item.recheck_callback_fired == 0));
             assert_eq!(
                 VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
                 armed_before
@@ -954,11 +983,11 @@ mod tests {
                 assert!(matches!(fut.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
             }
             assert_eq!(inner.counters.snapshot().cancelled_detached, 1);
-            let d = inner.recheck_deadline_ns.load(Ordering::Acquire);
+            let d = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
             assert!(complete_next_in_device(&dev_state, false));
             inner.poll_completion_recheck(d);
             assert_eq!(inner.counters.snapshot().in_flight_current, 0);
-            assert_eq!(inner.recheck_deadline_ns.load(Ordering::Acquire), RECHECK_IDLE);
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
 
             // (b) Cancel after already completed into `state.completed`.
             {
@@ -971,41 +1000,224 @@ mod tests {
             }
             assert_eq!(inner.counters.snapshot().cancelled_completed_recycled, 1);
 
-            // (c) Cancel pre-allocated request stalled at QueueFull, then verify Drop while armed.
+            // (c) Cancel pre-allocated requests stalled at QueueFull, drain, disarm,
+            //     then re-arm and drop `inner` while armed to verify Drop cleanup.
             let mut b0 = [0u8; SECTOR_SIZE];
             let mut b1 = [0u8; SECTOR_SIZE];
             let mut b2 = [0u8; SECTOR_SIZE];
             let mut b3 = [0u8; SECTOR_SIZE];
             let mut b4 = [0u8; SECTOR_SIZE];
             let (w, _) = make_waker();
-            let mut f0 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 0, &mut b0));
-            let mut f1 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 1, &mut b1));
-            let mut f2 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 2, &mut b2));
-            let mut f3 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 3, &mut b3));
-            let mut f4 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 4, &mut b4));
-            assert!(matches!(f0.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
-            assert!(matches!(f1.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
-            assert!(matches!(f2.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
-            assert!(matches!(f3.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
-            assert!(matches!(f4.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
+            let deadline;
             {
-                let mut b_qf = [0u8; SECTOR_SIZE];
-                let mut f_qf = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 5, &mut b_qf));
-                assert!(matches!(f_qf.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
-                assert_eq!(inner.counters.snapshot().queue_full_waits, 1);
+                let mut f0 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 0, &mut b0));
+                let mut f1 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 1, &mut b1));
+                let mut f2 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 2, &mut b2));
+                let mut f3 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 3, &mut b3));
+                let mut f4 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 4, &mut b4));
+                assert!(matches!(f0.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
+                assert!(matches!(f1.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
+                assert!(matches!(f2.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
+                assert!(matches!(f3.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
+                assert!(matches!(f4.as_mut().poll(&mut Context::from_waker(&w)), Poll::Pending));
+                {
+                    let mut b_qf = [0u8; SECTOR_SIZE];
+                    let mut f_qf =
+                        core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 5, &mut b_qf));
+                    assert!(matches!(
+                        f_qf.as_mut().poll(&mut Context::from_waker(&w)),
+                        Poll::Pending
+                    ));
+                    assert_eq!(inner.counters.snapshot().queue_full_waits, 1);
+                }
+                deadline = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
             }
-            // Drop remaining futures and inner while armed; global armed count must restore cleanly.
-            drop((f0, f1, f2, f3, f4));
             while complete_next_in_device(&dev_state, true) {}
             inner.handle_interrupt();
+            inner.poll_completion_recheck(deadline);
             let s = inner.counters.snapshot();
             assert_counter_invariants(&s);
             assert_eq!(s.in_flight_current, 0);
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
+
+            {
+                let mut b_drop = [0u8; SECTOR_SIZE];
+                let mut f_drop =
+                    core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 0, &mut b_drop));
+                assert!(matches!(
+                    f_drop.as_mut().poll(&mut Context::from_waker(&w)),
+                    Poll::Pending
+                ));
+                assert_eq!(
+                    VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
+                    armed_before + 1
+                );
+            }
             drop(inner);
             assert_eq!(
                 VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
                 armed_before
             );
+        }
+
+        #[test]
+        fn recheck_callback_racing_with_irq_counts_already_drained() {
+            let _guard = GLOBAL_WATCHDOG_TEST_LOCK.lock().unwrap();
+            let armed_before = VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire);
+            let (transport, dev_state) = MockBlkTransport::new(64, VIRTIO_BLK_F_FLUSH);
+            let dev = driver_virtio::VirtIoBlkDev::<MockHal, MockBlkTransport>::try_new(transport)
+                .unwrap();
+            let inner = VirtIoBlkDevInner::new_for_test(dev, 10_000_000);
+
+            let (w, cnt) = make_waker();
+            let mut buf = [0u8; SECTOR_SIZE];
+            {
+                let mut fut = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 2, &mut buf));
+                assert!(matches!(
+                    fut.as_mut().poll(&mut Context::from_waker(&w)),
+                    Poll::Pending
+                ));
+
+                // Watchdog claims RUNNING just before an IRQ drains the completion.
+                let deadline = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
+                assert!(inner.recheck_watchdog.try_begin_recheck(deadline));
+                assert!(complete_next_in_device(&dev_state, true));
+                inner.handle_interrupt();
+                assert_eq!(cnt.0.load(Ordering::Relaxed), 1);
+
+                // Callback body now executes against an already-drained queue.
+                inner.execute_recheck_callback(deadline);
+
+                assert!(matches!(
+                    fut.as_mut().poll(&mut Context::from_waker(&w)),
+                    Poll::Ready(Ok(()))
+                ));
+            }
+
+            let s = inner.counters.snapshot();
+            assert_counter_invariants(&s);
+            assert_eq!(s.recheck_callback_fired, 1);
+            assert_eq!(s.recheck_callback_already_drained, 1);
+            assert_eq!(s.recheck_callback_still_pending, 0);
+            assert_eq!(s.recheck_callback_reclaimed, 0);
+            assert_eq!(s.recheck_rearmed, 0);
+            assert_eq!(s.recheck_irq_completed_before_callback, 0);
+            assert_eq!(s.recheck_poll_completed_before_callback, 0);
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
+            assert_eq!(
+                VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
+                armed_before
+            );
+            assert_eq!(buf, dev_state.lock().unwrap().sectors[2]);
+        }
+
+        #[test]
+        fn poll_completion_disarms_under_poll_counter_not_irq() {
+            let _guard = GLOBAL_WATCHDOG_TEST_LOCK.lock().unwrap();
+            let armed_before = VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire);
+            let (transport, dev_state) = MockBlkTransport::new(64, VIRTIO_BLK_F_FLUSH);
+            let dev = driver_virtio::VirtIoBlkDev::<MockHal, MockBlkTransport>::try_new(transport)
+                .unwrap();
+            let inner = VirtIoBlkDevInner::new_for_test(dev, 10_000_000);
+
+            let (w, _) = make_waker();
+            let mut buf = [0u8; SECTOR_SIZE];
+            let deadline;
+            {
+                let mut fut = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 6, &mut buf));
+                assert!(matches!(
+                    fut.as_mut().poll(&mut Context::from_waker(&w)),
+                    Poll::Pending
+                ));
+                deadline = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
+
+                // Device finishes without IRQ, and future is polled directly.
+                assert!(complete_next_in_device(&dev_state, false));
+                assert!(matches!(
+                    fut.as_mut().poll(&mut Context::from_waker(&w)),
+                    Poll::Ready(Ok(()))
+                ));
+            }
+            inner.poll_completion_recheck(deadline);
+
+            let s = inner.counters.snapshot();
+            assert_counter_invariants(&s);
+            assert_eq!(s.poll_completions, 1);
+            assert_eq!(s.irq_completions, 0);
+            assert_eq!(s.recheck_poll_completed_before_callback, 1);
+            assert_eq!(s.recheck_irq_completed_before_callback, 0);
+            assert_eq!(s.recheck_callback_fired, 0);
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
+            assert_eq!(
+                VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
+                armed_before
+            );
+            assert_eq!(buf, dev_state.lock().unwrap().sectors[6]);
+        }
+
+        #[test]
+        fn active_irq_progress_refreshes_watchdog_without_callback_and_idles_cleanly() {
+            let _guard = GLOBAL_WATCHDOG_TEST_LOCK.lock().unwrap();
+            let armed_before = VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire);
+            let (transport, dev_state) = MockBlkTransport::new(64, VIRTIO_BLK_F_FLUSH);
+            let dev = driver_virtio::VirtIoBlkDev::<MockHal, MockBlkTransport>::try_new(transport)
+                .unwrap();
+            let inner = VirtIoBlkDevInner::new_for_test(dev, 10_000_000);
+
+            let (w1, cnt1) = make_waker();
+            let (w2, cnt2) = make_waker();
+            let mut b1 = [0u8; SECTOR_SIZE];
+            let mut b2 = [0u8; SECTOR_SIZE];
+            {
+                let mut f1 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 1, &mut b1));
+                let mut f2 = core::pin::pin!(VirtIoBlockFuture::read(inner.clone(), 2, &mut b2));
+                assert!(matches!(f1.as_mut().poll(&mut Context::from_waker(&w1)), Poll::Pending));
+                assert!(matches!(f2.as_mut().poll(&mut Context::from_waker(&w2)), Poll::Pending));
+                let d1 = inner.recheck_watchdog.deadline_ns().expect("watchdog armed");
+
+                // Read 1 completes via IRQ while read 2 remains in flight.
+                assert!(complete_next_in_device(&dev_state, true));
+                inner.handle_interrupt();
+                assert_eq!(cnt1.0.load(Ordering::Relaxed), 1);
+                assert_eq!(cnt2.0.load(Ordering::Relaxed), 0);
+
+                // Tick observes forward progress without firing a recheck callback.
+                inner.poll_completion_recheck(d1);
+                let d2 = inner.recheck_watchdog.deadline_ns().expect("watchdog stays armed");
+                assert!(d2 > d1);
+                assert_eq!(
+                    VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
+                    armed_before + 1
+                );
+                assert_eq!(inner.counters.snapshot().recheck_callback_fired, 0);
+
+                // Read 2 completes via IRQ and the next tick lazily disarms.
+                assert!(complete_next_in_device(&dev_state, true));
+                inner.handle_interrupt();
+                assert_eq!(cnt2.0.load(Ordering::Relaxed), 1);
+                inner.poll_completion_recheck(d2);
+
+                assert!(matches!(
+                    f1.as_mut().poll(&mut Context::from_waker(&w1)),
+                    Poll::Ready(Ok(()))
+                ));
+                assert!(matches!(
+                    f2.as_mut().poll(&mut Context::from_waker(&w2)),
+                    Poll::Ready(Ok(()))
+                ));
+            }
+
+            let s = inner.counters.snapshot();
+            assert_counter_invariants(&s);
+            assert_eq!(s.recheck_irq_completed_before_callback, 1);
+            assert_eq!(s.recheck_callback_fired, 0);
+            assert_eq!(inner.recheck_watchdog.deadline_ns(), None);
+            assert_eq!(
+                VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire),
+                armed_before
+            );
+            assert_eq!(b1, dev_state.lock().unwrap().sectors[1]);
+            assert_eq!(b2, dev_state.lock().unwrap().sectors[2]);
         }
     }
 }
@@ -1147,15 +1359,114 @@ cfg_if! {
             / virtio_drivers::PAGE_SIZE;
         const DMA_POOL_MAX_PAGES: usize =
             VIRTIO_BLK_QUEUE_SIZE * DMA_POOL_RETAINED_REQUEST_PAGES;
+        // At the default 100 Hz tick rate, inspect a busy queue after a 10 ms
+        // interval with no observed completions. A tick that sees progress
+        // starts another interval; actual recovery also depends on tick delivery.
         const COMPLETION_RECHECK_INTERVAL_NS: u64 = 10_000_000;
-        const RECHECK_IDLE: u64 = 0;
-        const RECHECK_RUNNING: u64 = u64::MAX;
-        const MAX_WATCHDOG_TICK_BATCH: usize = 8;
 
-        fn clamp_recheck_deadline(now_ns: u64, interval_ns: u64) -> u64 {
-            now_ns
-                .saturating_add(interval_ns.max(1))
-                .clamp(1, RECHECK_RUNNING - 1)
+        /// Lock-free lazy-disarm epoch watchdog for one block device.
+        struct RecheckWatchdog {
+            deadline_ns: AtomicU64,
+            observed_completions: AtomicU64,
+        }
+
+        impl RecheckWatchdog {
+            const IDLE: u64 = 0;
+            const RUNNING: u64 = u64::MAX;
+
+            const fn new() -> Self {
+                Self {
+                    deadline_ns: AtomicU64::new(Self::IDLE),
+                    observed_completions: AtomicU64::new(0),
+                }
+            }
+
+            fn clamp_deadline(now_ns: u64, interval_ns: u64) -> u64 {
+                now_ns
+                    .saturating_add(interval_ns.max(1))
+                    .clamp(1, Self::RUNNING - 1)
+            }
+
+            #[cfg(all(feature = "multitask", feature = "irq"))]
+            fn try_arm(
+                &self,
+                interval_ns: u64,
+                completions_now: u64,
+                now_ns: impl FnOnce() -> u64,
+            ) -> bool {
+                if self.deadline_ns.load(Ordering::Acquire) != Self::IDLE {
+                    return false;
+                }
+                let deadline = Self::clamp_deadline(now_ns(), interval_ns);
+                self.observed_completions
+                    .store(completions_now, Ordering::Relaxed);
+                VIRTIO_BLK_ARMED_WATCHDOGS.fetch_add(1, Ordering::AcqRel);
+                if self
+                    .deadline_ns
+                    .compare_exchange(Self::IDLE, deadline, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    VIRTIO_BLK_ARMED_WATCHDOGS.fetch_sub(1, Ordering::Release);
+                    return false;
+                }
+                true
+            }
+
+            #[cfg(all(feature = "multitask", feature = "irq"))]
+            fn try_begin_recheck(&self, now_ns: u64) -> bool {
+                let deadline = self.deadline_ns.load(Ordering::Acquire);
+                if deadline == Self::IDLE || deadline == Self::RUNNING || now_ns < deadline {
+                    return false;
+                }
+                self.deadline_ns
+                    .compare_exchange(deadline, Self::RUNNING, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            }
+
+            #[cfg(all(feature = "multitask", feature = "irq"))]
+            fn observed_completions(&self) -> u64 {
+                self.observed_completions.load(Ordering::Relaxed)
+            }
+
+            fn refresh_progress(&self, completions_now: u64, now_ns: u64, interval_ns: u64) {
+                self.observed_completions
+                    .store(completions_now, Ordering::Relaxed);
+                let next_deadline = Self::clamp_deadline(now_ns, interval_ns);
+                self.deadline_ns.store(next_deadline, Ordering::Release);
+            }
+
+            fn finish_recheck(
+                &self,
+                has_pending: bool,
+                completions_now: u64,
+                now_ns: u64,
+                interval_ns: u64,
+            ) -> bool {
+                if has_pending {
+                    self.refresh_progress(completions_now, now_ns, interval_ns);
+                    true
+                } else {
+                    self.deadline_ns.store(Self::IDLE, Ordering::Release);
+                    VIRTIO_BLK_ARMED_WATCHDOGS.fetch_sub(1, Ordering::Release);
+                    false
+                }
+            }
+
+            #[cfg(test)]
+            fn deadline_ns(&self) -> Option<u64> {
+                match self.deadline_ns.load(Ordering::Acquire) {
+                    Self::IDLE | Self::RUNNING => None,
+                    deadline => Some(deadline),
+                }
+            }
+        }
+
+        impl Drop for RecheckWatchdog {
+            fn drop(&mut self) {
+                if self.deadline_ns.swap(Self::IDLE, Ordering::AcqRel) != Self::IDLE {
+                    VIRTIO_BLK_ARMED_WATCHDOGS.fetch_sub(1, Ordering::Release);
+                }
+            }
         }
         fn push_unique_completion_waker<const N: usize>(
             wakers: &mut [Option<Waker>; N],
@@ -1194,24 +1505,37 @@ cfg_if! {
         }
 
         #[derive(Clone, Copy, PartialEq, Eq)]
+        #[repr(u8)]
         enum CompletionSource {
-            Irq,
-            Poll,
-            Recheck,
+            Irq = 0,
+            Poll = 1,
+            Recheck = 2,
+        }
+
+        impl CompletionSource {
+            fn from_u8(value: u8) -> Self {
+                match value {
+                    0 => Self::Irq,
+                    1 => Self::Poll,
+                    _ => Self::Recheck,
+                }
+            }
         }
 
         struct VirtIoBlkCounters {
             submissions: AtomicU64,
             completions_total: AtomicU64,
+            last_completion_source: AtomicU8,
             irq_count: AtomicU64,
             irq_completions: AtomicU64,
             poll_completions: AtomicU64,
             recheck_armed: AtomicU64,
             recheck_already_armed: AtomicU64,
-            recheck_timer_programs: AtomicU64,
             recheck_callback_fired: AtomicU64,
             recheck_irq_completed_before_callback: AtomicU64,
-            recheck_callback_irq_already_completed: AtomicU64,
+            recheck_poll_completed_before_callback: AtomicU64,
+            recheck_callback_already_drained: AtomicU64,
+            recheck_callback_still_pending: AtomicU64,
             recheck_callback_reclaimed: AtomicU64,
             recheck_reclaimed_completions: AtomicU64,
             recheck_rearmed: AtomicU64,
@@ -1228,15 +1552,17 @@ cfg_if! {
                 Self {
                     submissions: AtomicU64::new(0),
                     completions_total: AtomicU64::new(0),
+                    last_completion_source: AtomicU8::new(CompletionSource::Irq as u8),
                     irq_count: AtomicU64::new(0),
                     irq_completions: AtomicU64::new(0),
                     poll_completions: AtomicU64::new(0),
                     recheck_armed: AtomicU64::new(0),
                     recheck_already_armed: AtomicU64::new(0),
-                    recheck_timer_programs: AtomicU64::new(0),
                     recheck_callback_fired: AtomicU64::new(0),
                     recheck_irq_completed_before_callback: AtomicU64::new(0),
-                    recheck_callback_irq_already_completed: AtomicU64::new(0),
+                    recheck_poll_completed_before_callback: AtomicU64::new(0),
+                    recheck_callback_already_drained: AtomicU64::new(0),
+                    recheck_callback_still_pending: AtomicU64::new(0),
                     recheck_callback_reclaimed: AtomicU64::new(0),
                     recheck_reclaimed_completions: AtomicU64::new(0),
                     recheck_rearmed: AtomicU64::new(0),
@@ -1252,16 +1578,18 @@ cfg_if! {
             fn record_submission(&self, pending_count: usize, in_flight_max: usize) {
                 self.submissions.fetch_add(1, Ordering::Relaxed);
                 self.in_flight_current
-                    .store(pending_count, Ordering::Relaxed);
+                    .store(pending_count, Ordering::Release);
                 self.in_flight_max.store(in_flight_max, Ordering::Relaxed);
                 self.in_flight_submit_sum
                     .fetch_add(pending_count as u64, Ordering::Relaxed);
             }
 
             fn record_completion(&self, source: CompletionSource, pending_count: usize) {
+                self.last_completion_source
+                    .store(source as u8, Ordering::Relaxed);
                 self.in_flight_current
-                    .store(pending_count, Ordering::Relaxed);
-                self.completions_total.fetch_add(1, Ordering::Relaxed);
+                    .store(pending_count, Ordering::Release);
+                self.completions_total.fetch_add(1, Ordering::Release);
                 match source {
                     CompletionSource::Irq => {
                         self.irq_completions.fetch_add(1, Ordering::Relaxed);
@@ -1276,6 +1604,11 @@ cfg_if! {
                 }
             }
 
+            #[cfg(all(feature = "multitask", feature = "irq"))]
+            fn last_completion_source(&self) -> CompletionSource {
+                CompletionSource::from_u8(self.last_completion_source.load(Ordering::Relaxed))
+            }
+
             fn snapshot(&self) -> crate::VirtIoBlkStats {
                 crate::VirtIoBlkStats {
                     submissions: self.submissions.load(Ordering::Relaxed),
@@ -1285,13 +1618,18 @@ cfg_if! {
                     poll_completions: self.poll_completions.load(Ordering::Relaxed),
                     recheck_armed: self.recheck_armed.load(Ordering::Relaxed),
                     recheck_already_armed: self.recheck_already_armed.load(Ordering::Relaxed),
-                    recheck_timer_programs: self.recheck_timer_programs.load(Ordering::Relaxed),
                     recheck_callback_fired: self.recheck_callback_fired.load(Ordering::Relaxed),
                     recheck_irq_completed_before_callback: self
                         .recheck_irq_completed_before_callback
                         .load(Ordering::Relaxed),
-                    recheck_callback_irq_already_completed: self
-                        .recheck_callback_irq_already_completed
+                    recheck_poll_completed_before_callback: self
+                        .recheck_poll_completed_before_callback
+                        .load(Ordering::Relaxed),
+                    recheck_callback_already_drained: self
+                        .recheck_callback_already_drained
+                        .load(Ordering::Relaxed),
+                    recheck_callback_still_pending: self
+                        .recheck_callback_still_pending
                         .load(Ordering::Relaxed),
                     recheck_callback_reclaimed: self
                         .recheck_callback_reclaimed
@@ -1342,13 +1680,26 @@ cfg_if! {
         }
 
         static VIRTIO_BLK_ARMED_WATCHDOGS: AtomicUsize = AtomicUsize::new(0);
-        static VIRTIO_BLK_DEVICES: SpinNoIrq<Vec<Weak<dyn VirtIoBlkDeviceOps>>> =
-            SpinNoIrq::new(Vec::new());
+        type VirtIoBlkRegistry = Vec<Weak<dyn VirtIoBlkDeviceOps>>;
+        static VIRTIO_BLK_DEVICES: SpinNoIrq<Option<Arc<VirtIoBlkRegistry>>> =
+            SpinNoIrq::new(None);
 
         fn register_virtio_blk_device(device: Weak<dyn VirtIoBlkDeviceOps>) {
-            let mut devices = VIRTIO_BLK_DEVICES.lock();
+            let mut registry = VIRTIO_BLK_DEVICES.lock();
+            let devices = Arc::make_mut(registry.get_or_insert_with(|| Arc::new(Vec::new())));
             devices.retain(|entry| entry.strong_count() > 0);
             devices.push(device);
+        }
+
+        fn for_each_virtio_blk_device(mut visit: impl FnMut(usize, &dyn VirtIoBlkDeviceOps)) {
+            // Keep the complete registration list stable across callbacks. Only
+            // registration can allocate; each device is held alive while visited.
+            let snapshot = VIRTIO_BLK_DEVICES.lock().clone();
+            if let Some(devices) = snapshot {
+                for (index, device) in devices.iter().filter_map(Weak::upgrade).enumerate() {
+                    visit(index, device.as_ref());
+                }
+            }
         }
 
         #[cfg(all(feature = "multitask", feature = "irq"))]
@@ -1361,73 +1712,16 @@ cfg_if! {
 
         #[cfg(all(feature = "multitask", feature = "irq"))]
         fn virtio_blk_tick_recheck_at(now_ns: u64) {
-            if VIRTIO_BLK_ARMED_WATCHDOGS.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            let mut batch: [Option<Arc<dyn VirtIoBlkDeviceOps>>; MAX_WATCHDOG_TICK_BATCH] =
-                core::array::from_fn(|_| None);
-            let mut count = 0;
-            if let Some(mut devices) = VIRTIO_BLK_DEVICES.try_lock() {
-                devices.retain(|entry| {
-                    if let Some(dev) = entry.upgrade() {
-                        if count < batch.len() {
-                            batch[count] = Some(dev);
-                            count += 1;
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-            for dev in batch[..count].iter().flatten() {
-                dev.poll_completion_recheck(now_ns);
-            }
+            for_each_virtio_blk_device(|_, device| device.poll_completion_recheck(now_ns));
         }
 
-        pub(crate) fn copy_virtio_blk_stats(out: &mut [crate::VirtIoBlkStats]) -> usize {
-            let mut snapshot_buf: [Option<Arc<dyn VirtIoBlkDeviceOps>>; 8] =
-                core::array::from_fn(|_| None);
-            let mut count = 0;
-            {
-                let mut devices = VIRTIO_BLK_DEVICES.lock();
-                devices.retain(|entry| {
-                    if let Some(dev) = entry.upgrade() {
-                        if count < out.len() && count < snapshot_buf.len() {
-                            snapshot_buf[count] = Some(dev);
-                            count += 1;
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-            for (idx, dev) in snapshot_buf[..count].iter().enumerate() {
-                if let Some(dev) = dev {
-                    out[idx] = dev.stats_snapshot();
-                }
-            }
-            count
+        pub(crate) fn for_each_virtio_blk_stats(mut visit: impl FnMut(usize, crate::VirtIoBlkStats)) {
+            for_each_virtio_blk_device(|index, device| visit(index, device.stats_snapshot()));
         }
 
         #[cfg(feature = "guest-checks")]
         pub(crate) fn set_virtio_blk_irq_suppressed_for_test(suppressed: bool) {
-            let mut active = Vec::new();
-            {
-                let mut devices = VIRTIO_BLK_DEVICES.lock();
-                devices.retain(|entry| {
-                    if let Some(dev) = entry.upgrade() {
-                        active.push(dev);
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-            for dev in active {
-                dev.set_irq_suppressed(suppressed);
-            }
+            for_each_virtio_blk_device(|_, device| device.set_irq_suppressed(suppressed));
         }
 
         struct VirtIoBlkState<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
@@ -1449,20 +1743,10 @@ cfg_if! {
         pub struct VirtIoBlkDevInner<H: VirtIoHal, T: virtio_drivers::transport::Transport> {
             inner: SpinNoIrq<VirtIoBlkState<H, T>>,
             counters: VirtIoBlkCounters,
-            recheck_deadline_ns: AtomicU64,
-            recheck_interval_ns: AtomicU64,
+            recheck_watchdog: RecheckWatchdog,
+            recheck_interval_ns: u64,
             #[cfg(feature = "guest-checks")]
             suppress_irq_completion: AtomicBool,
-        }
-
-        impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> Drop
-            for VirtIoBlkDevInner<H, T>
-        {
-            fn drop(&mut self) {
-                if self.recheck_deadline_ns.swap(RECHECK_IDLE, Ordering::AcqRel) != RECHECK_IDLE {
-                    VIRTIO_BLK_ARMED_WATCHDOGS.fetch_sub(1, Ordering::Release);
-                }
-            }
         }
 
         impl<H: VirtIoHal, T: virtio_drivers::transport::Transport> VirtIoBlkDevInner<H, T> {
@@ -1485,8 +1769,8 @@ cfg_if! {
                         submit_wakers: Vec::with_capacity(VIRTIO_BLK_QUEUE_SIZE),
                     }),
                     counters: VirtIoBlkCounters::new(),
-                    recheck_deadline_ns: AtomicU64::new(RECHECK_IDLE),
-                    recheck_interval_ns: AtomicU64::new(recheck_interval_ns),
+                    recheck_watchdog: RecheckWatchdog::new(),
+                    recheck_interval_ns,
                     #[cfg(feature = "guest-checks")]
                     suppress_irq_completion: AtomicBool::new(false),
                 })
@@ -1950,6 +2234,20 @@ cfg_if! {
             }
         }
 
+        struct DrainBatch<H: VirtIoHal> {
+            completed: usize,
+            remaining_pending: usize,
+            extracted: Option<PendingBlockRequest<H>>,
+            request_wakers: [Option<Waker>; VIRTIO_BLK_QUEUE_SIZE],
+            submit_wakers: Vec<Waker>,
+        }
+
+        struct DrainSummary<H: VirtIoHal> {
+            completed: usize,
+            remaining_pending: usize,
+            extracted: Option<PendingBlockRequest<H>>,
+        }
+
         impl<H: VirtIoHal, T: virtio_drivers::transport::Transport>
             VirtIoBlkDevInner<H, T>
         {
@@ -1985,30 +2283,10 @@ cfg_if! {
                 }
             }
 
-            fn disarm_recheck_if_idle_locked(&self, state: &VirtIoBlkState<H, T>) {
-                if state.pending_count > 0 {
-                    return;
-                }
-                let current = self.recheck_deadline_ns.load(Ordering::Acquire);
-                if current == RECHECK_IDLE || current == RECHECK_RUNNING {
-                    return;
-                }
-                if self
-                    .recheck_deadline_ns
-                    .compare_exchange(current, RECHECK_IDLE, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    VIRTIO_BLK_ARMED_WATCHDOGS.fetch_sub(1, Ordering::Release);
-                    self.counters
-                        .recheck_irq_completed_before_callback
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-            }
-
             fn handle_interrupt(&self) {
                 kernel_log::debug!("virtio-blk interrupt handler: checking interrupt");
                 self.counters.irq_count.fetch_add(1, Ordering::Relaxed);
-                let (request_wakers, submit_wakers) = {
+                let batch = {
                     let mut state = self.inner.lock();
                     let acked = state.device.ack_interrupt();
                     kernel_log::debug!("virtio-blk interrupt handler: acked={}", acked);
@@ -2020,11 +2298,9 @@ cfg_if! {
                     // the interrupt only when I/O completes; `acked` reflects
                     // whether the legacy ISR STATUS bit was set, which is NOT
                     // reliable under MSI-X (QEMU may return false even on completion).
-                    let (_, _, request_wakers, submit_wakers) =
-                        self.drain_completions_locked(&mut state, None, CompletionSource::Irq, None);
-                    (request_wakers, submit_wakers)
+                    self.drain_completions_locked(&mut state, None, CompletionSource::Irq, None)
                 };
-                Self::wake_completion_batch(request_wakers, submit_wakers);
+                Self::wake_completion_batch(batch.request_wakers, batch.submit_wakers);
             }
 
             fn drain_completions_locked(
@@ -2033,12 +2309,7 @@ cfg_if! {
                 extract_request_id: Option<u64>,
                 source: CompletionSource,
                 recheck_now_ns: Option<u64>,
-            ) -> (
-                usize,
-                Option<PendingBlockRequest<H>>,
-                [Option<Waker>; VIRTIO_BLK_QUEUE_SIZE],
-                Vec<Waker>,
-            ) {
+            ) -> DrainBatch<H> {
                 let mut completed = 0;
                 let mut extracted =
                     extract_request_id.and_then(|request_id| state.take_completed(request_id));
@@ -2077,23 +2348,26 @@ cfg_if! {
                 } else {
                     core::mem::take(&mut state.submit_wakers)
                 };
+                let remaining_pending = state.pending_count;
                 if source == CompletionSource::Recheck {
-                    if state.pending_count > 0 {
-                        let now_ns = recheck_now_ns.unwrap_or_else(hal::time::monotonic_time_nanos);
-                        let interval = self.recheck_interval_ns.load(Ordering::Relaxed);
-                        let next_deadline = clamp_recheck_deadline(now_ns, interval);
-                        self.recheck_deadline_ns
-                            .store(next_deadline, Ordering::Release);
+                    let now_ns = recheck_now_ns.unwrap_or_else(hal::time::monotonic_time_nanos);
+                    let completions_now = self.counters.completions_total.load(Ordering::Relaxed);
+                    if self.recheck_watchdog.finish_recheck(
+                        remaining_pending > 0,
+                        completions_now,
+                        now_ns,
+                        self.recheck_interval_ns,
+                    ) {
                         self.counters.recheck_rearmed.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        self.recheck_deadline_ns
-                            .store(RECHECK_IDLE, Ordering::Release);
-                        VIRTIO_BLK_ARMED_WATCHDOGS.fetch_sub(1, Ordering::Release);
                     }
-                } else if completed > 0 {
-                    self.disarm_recheck_if_idle_locked(state);
                 }
-                (completed, extracted, request_wakers, submit_wakers)
+                DrainBatch {
+                    completed,
+                    remaining_pending,
+                    extracted,
+                    request_wakers,
+                    submit_wakers,
+                }
             }
 
             fn drain_completions_inner(
@@ -2101,8 +2375,8 @@ cfg_if! {
                 extract_request_id: Option<u64>,
                 source: CompletionSource,
                 recheck_now_ns: Option<u64>,
-            ) -> (usize, Option<PendingBlockRequest<H>>) {
-                let (completed, extracted, request_wakers, submit_wakers) = {
+            ) -> DrainSummary<H> {
+                let batch = {
                     let mut state = self.inner.lock();
                     self.drain_completions_locked(
                         &mut state,
@@ -2111,82 +2385,122 @@ cfg_if! {
                         recheck_now_ns,
                     )
                 };
-                Self::wake_completion_batch(request_wakers, submit_wakers);
-                (completed, extracted)
+                Self::wake_completion_batch(batch.request_wakers, batch.submit_wakers);
+                DrainSummary {
+                    completed: batch.completed,
+                    remaining_pending: batch.remaining_pending,
+                    extracted: batch.extracted,
+                }
             }
 
             #[cfg(all(feature = "multitask", feature = "irq"))]
-            fn arm_completion_recheck(&self) {
-                if self.recheck_deadline_ns.load(Ordering::Acquire) != RECHECK_IDLE {
+            fn arm_completion_recheck_locked(&self, state: &VirtIoBlkState<H, T>) {
+                if state.pending_count == 0 {
+                    return;
+                }
+                let completions_now = self.counters.completions_total.load(Ordering::Relaxed);
+                if self.recheck_watchdog.try_arm(
+                    self.recheck_interval_ns,
+                    completions_now,
+                    hal::time::monotonic_time_nanos,
+                ) {
+                    self.counters.recheck_armed.fetch_add(1, Ordering::Relaxed);
+                } else {
                     self.counters
                         .recheck_already_armed
                         .fetch_add(1, Ordering::Relaxed);
-                    return;
                 }
-                self.arm_completion_recheck_at(hal::time::monotonic_time_nanos());
-            }
-
-            #[cfg(all(feature = "multitask", feature = "irq"))]
-            fn arm_completion_recheck_at(&self, now_ns: u64) {
-                if self.recheck_deadline_ns.load(Ordering::Acquire) != RECHECK_IDLE {
-                    self.counters
-                        .recheck_already_armed
-                        .fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                let interval = self.recheck_interval_ns.load(Ordering::Relaxed);
-                let deadline = clamp_recheck_deadline(now_ns, interval);
-                VIRTIO_BLK_ARMED_WATCHDOGS.fetch_add(1, Ordering::AcqRel);
-                if self
-                    .recheck_deadline_ns
-                    .compare_exchange(RECHECK_IDLE, deadline, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-                {
-                    VIRTIO_BLK_ARMED_WATCHDOGS.fetch_sub(1, Ordering::Release);
-                    self.counters
-                        .recheck_already_armed
-                        .fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                self.counters.recheck_armed.fetch_add(1, Ordering::Relaxed);
             }
 
             #[cfg(all(feature = "multitask", feature = "irq"))]
             fn poll_completion_recheck(&self, now_ns: u64) {
-                let deadline = self.recheck_deadline_ns.load(Ordering::Acquire);
-                if deadline == RECHECK_IDLE || deadline == RECHECK_RUNNING || now_ns < deadline {
+                if self.recheck_watchdog.try_begin_recheck(now_ns) {
+                    self.run_claimed_completion_recheck(now_ns);
+                }
+            }
+
+            #[cfg(all(feature = "multitask", feature = "irq"))]
+            fn run_claimed_completion_recheck(&self, now_ns: u64) {
+                let observed = self.recheck_watchdog.observed_completions();
+                let cur_completions = self.counters.completions_total.load(Ordering::Acquire);
+                let in_flight = self.counters.in_flight_current.load(Ordering::Acquire);
+
+                // Healthy busy queue: completions kept flowing via IRQ/poll,
+                // so advance the epoch without acquiring `self.inner`.
+                if in_flight > 0 && cur_completions != observed {
+                    self.recheck_watchdog.refresh_progress(
+                        cur_completions,
+                        now_ns,
+                        self.recheck_interval_ns,
+                    );
                     return;
                 }
-                if self
-                    .recheck_deadline_ns
-                    .compare_exchange(
-                        deadline,
-                        RECHECK_RUNNING,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_err()
-                {
-                    return;
+
+                // Device looks idle: confirm under `self.inner` lock before
+                // lazily disarming so no in-flight submission can miss a check.
+                if in_flight == 0 {
+                    let state = self.inner.lock();
+                    if state.pending_count == 0 {
+                        let latest = self.counters.completions_total.load(Ordering::Relaxed);
+                        self.recheck_watchdog.finish_recheck(
+                            false,
+                            latest,
+                            now_ns,
+                            self.recheck_interval_ns,
+                        );
+                        match self.counters.last_completion_source() {
+                            CompletionSource::Poll => {
+                                self.counters
+                                    .recheck_poll_completed_before_callback
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            CompletionSource::Irq | CompletionSource::Recheck => {
+                                self.counters
+                                    .recheck_irq_completed_before_callback
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        return;
+                    }
+                    let latest = self.counters.completions_total.load(Ordering::Relaxed);
+                    if latest != observed {
+                        self.recheck_watchdog.refresh_progress(
+                            latest,
+                            now_ns,
+                            self.recheck_interval_ns,
+                        );
+                        return;
+                    }
                 }
+
+                // Stalled or suspected lost IRQ: drain the used ring.
+                self.execute_recheck_callback(now_ns);
+            }
+
+            #[cfg(all(feature = "multitask", feature = "irq"))]
+            fn execute_recheck_callback(&self, now_ns: u64) {
                 self.counters
                     .recheck_callback_fired
                     .fetch_add(1, Ordering::Relaxed);
-                let (completed, _) =
+                let summary =
                     self.drain_completions_inner(None, CompletionSource::Recheck, Some(now_ns));
-                if completed > 0 {
+                if summary.completed > 0 {
                     self.counters
                         .recheck_callback_reclaimed
                         .fetch_add(1, Ordering::Relaxed);
+                } else if summary.remaining_pending == 0 {
+                    self.counters
+                        .recheck_callback_already_drained
+                        .fetch_add(1, Ordering::Relaxed);
                 } else {
                     self.counters
-                        .recheck_callback_irq_already_completed
+                        .recheck_callback_still_pending
                         .fetch_add(1, Ordering::Relaxed);
                 }
             }
 
             #[cfg(not(all(feature = "multitask", feature = "irq")))]
-            fn arm_completion_recheck(&self) {}
+            fn arm_completion_recheck_locked(&self, _state: &VirtIoBlkState<H, T>) {}
 
             fn cancel_request(&self, token: u16, request_id: u64) {
                 let mut state = self.inner.lock();
@@ -2364,7 +2678,7 @@ cfg_if! {
                                 CompletionSource::Poll,
                                 None,
                             )
-                            .1
+                            .extracted
                     } else if !can_suspend {
                         if this.request.is_some() {
                             let _ = this.inner.drain_completions_inner(
@@ -2388,7 +2702,6 @@ cfg_if! {
                             let mut submit_wakers_to_wake = Vec::new();
                             let mut state = this.inner.inner.lock();
                             let mut completed = state.take_completed(request_id);
-                            let mut completed_via_poll = false;
                             if completed.is_none()
                                 && let Some((request, submit_wakers)) = state
                                     .complete_current_if_used(
@@ -2399,7 +2712,6 @@ cfg_if! {
                             {
                                 completed = Some(request);
                                 submit_wakers_to_wake = submit_wakers;
-                                completed_via_poll = true;
                             }
                             if completed.is_none() {
                                 if !state.register_request_waker(
@@ -2426,11 +2738,12 @@ cfg_if! {
                                 {
                                     completed = Some(request);
                                     submit_wakers_to_wake = submit_wakers;
-                                    completed_via_poll = true;
                                 }
                             }
-                            if completed_via_poll {
-                                this.inner.disarm_recheck_if_idle_locked(&state);
+                            if completed.is_none() && can_suspend {
+                                // Arm while holding `state` so an IRQ draining
+                                // the queue cannot race past an idle check.
+                                this.inner.arm_completion_recheck_locked(&state);
                             }
                             drop(state);
                             for waker in submit_wakers_to_wake {
@@ -2452,10 +2765,6 @@ cfg_if! {
                             return Poll::Ready(result);
                         }
                         if can_suspend {
-                            // The IRQ path remains primary. The shared device
-                            // timer rechecks the ring and wakes the registered
-                            // request if a PCI interrupt is lost.
-                            this.inner.arm_completion_recheck();
                             #[cfg(feature = "multitask")]
                             this.record_request_wait(token);
                             return Poll::Pending;
@@ -2568,6 +2877,9 @@ cfg_if! {
                                     .counters
                                     .queue_full_waits
                                     .fetch_add(1, Ordering::Relaxed);
+                                if can_suspend {
+                                    this.inner.arm_completion_recheck_locked(&state);
+                                }
                                 Err(request)
                             }
                             Err(error) => {
@@ -2590,7 +2902,6 @@ cfg_if! {
                         Err(request) => {
                             this.request = Some(request);
                             if can_suspend {
-                                this.inner.arm_completion_recheck();
                                 #[cfg(feature = "multitask")]
                                 this.record_queue_full_wait();
                                 return Poll::Pending;

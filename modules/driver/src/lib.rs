@@ -151,6 +151,12 @@ impl AllDevices {
 }
 
 /// Snapshot of VirtIO block driver completion and recheck counters for one device.
+///
+/// Counters are sampled independently. Once submissions and completions have
+/// stopped and the tick has disarmed the watchdog, the counters obey:
+/// - `completions_total == irq_completions + poll_completions + recheck_reclaimed_completions`
+/// - `recheck_callback_fired == recheck_callback_reclaimed + recheck_callback_already_drained + recheck_callback_still_pending`
+/// - `recheck_armed == recheck_irq_completed_before_callback + recheck_poll_completed_before_callback + (recheck_callback_fired - recheck_rearmed)`
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct VirtIoBlkStats {
     pub submissions: u64,
@@ -158,14 +164,25 @@ pub struct VirtIoBlkStats {
     pub irq_count: u64,
     pub irq_completions: u64,
     pub poll_completions: u64,
+    /// Number of times an idle watchdog transitioned to armed with a pending deadline.
     pub recheck_armed: u64,
+    /// Number of arm attempts coalesced while a watchdog deadline was already active.
     pub recheck_already_armed: u64,
-    pub recheck_timer_programs: u64,
+    /// Number of expired watchdog ticks that inspected the device used ring.
     pub recheck_callback_fired: u64,
+    /// Number of watchdog epochs closed by a tick after an IRQ drained the queue.
     pub recheck_irq_completed_before_callback: u64,
-    pub recheck_callback_irq_already_completed: u64,
+    /// Number of watchdog epochs closed by a tick after a poll drained the queue.
+    pub recheck_poll_completed_before_callback: u64,
+    /// Number of fired callbacks that found the queue already drained by an in-flight race with IRQ/poll.
+    pub recheck_callback_already_drained: u64,
+    /// Number of fired callbacks that found 0 new completions while requests remained in flight and re-armed.
+    pub recheck_callback_still_pending: u64,
+    /// Number of fired callbacks that reclaimed at least one completion.
     pub recheck_callback_reclaimed: u64,
+    /// Total completed requests reclaimed across all watchdog callbacks.
     pub recheck_reclaimed_completions: u64,
+    /// Number of watchdog callbacks that re-armed because requests remained in flight.
     pub recheck_rearmed: u64,
     pub in_flight_current: usize,
     pub in_flight_max: usize,
@@ -175,19 +192,12 @@ pub struct VirtIoBlkStats {
     pub cancelled_completed_recycled: u64,
 }
 
-/// Copies a lock-free stats snapshot for each active VirtIO block device into `out`.
-///
-/// Returns the number of devices written (at most `out.len()`).
-pub fn copy_virtio_blk_stats(out: &mut [VirtIoBlkStats]) -> usize {
+/// Visits every active VirtIO block device in registration order with its counters.
+pub fn for_each_virtio_blk_stats(visit: impl FnMut(usize, VirtIoBlkStats)) {
     #[cfg(block_dev = "virtio-blk")]
-    {
-        virtio::copy_virtio_blk_stats(out)
-    }
+    virtio::for_each_virtio_blk_stats(visit);
     #[cfg(not(block_dev = "virtio-blk"))]
-    {
-        let _ = out;
-        0
-    }
+    let _ = visit;
 }
 
 /// Suppresses or restores completion draining inside the VirtIO block IRQ handler
