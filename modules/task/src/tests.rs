@@ -630,3 +630,31 @@ fn test_kernel_executor_wake_during_poll_and_cancel_safety() {
     assert!(handle.is_done());
     assert_eq!(exec.pending_count(), 0);
 }
+
+#[test]
+fn test_register_timer_hook_dispatches_multiple_idempotently() {
+    let _lock = SERIAL.lock();
+    task::init_scheduler_for_test();
+
+    static HOOK_A_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static HOOK_B_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn hook_a() {
+        HOOK_A_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn hook_b() {
+        HOOK_B_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    HOOK_A_COUNT.store(0, Ordering::Relaxed);
+    HOOK_B_COUNT.store(0, Ordering::Relaxed);
+
+    task::register_timer_hook(hook_a);
+    task::register_timer_hook(hook_b);
+    task::register_timer_hook(hook_a);
+
+    task::invoke_timer_hooks_for_test();
+    assert_eq!(HOOK_A_COUNT.load(Ordering::Relaxed), 1);
+    assert_eq!(HOOK_B_COUNT.load(Ordering::Relaxed), 1);
+}

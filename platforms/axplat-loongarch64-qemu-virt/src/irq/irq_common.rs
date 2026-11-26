@@ -1,4 +1,5 @@
 pub const EIOINTC_VECTOR_COUNT: usize = 256;
+pub const MSI_VECTOR_START: usize = 64;
 pub const EIOINTC_CPU_IRQ: usize = 3;
 pub const CPU_LOCAL_IRQ_FLAG: usize = 1 << (usize::BITS - 1);
 pub const RAW_TIMER_IRQ: usize = 11;
@@ -23,6 +24,10 @@ pub const fn eiointc_reg_bit(irq: usize) -> (usize, u64) {
 
 pub const fn is_external_irq(irq: usize) -> bool {
     irq < EIOINTC_VECTOR_COUNT
+}
+
+pub const fn is_msi_irq(irq: usize) -> bool {
+    irq >= MSI_VECTOR_START && irq < EIOINTC_VECTOR_COUNT
 }
 
 pub const fn update_enable_mask(old: u64, bit: u64, enabled: bool) -> u64 {
@@ -69,5 +74,14 @@ mod tests {
     fn updates_one_enable_bit_without_losing_others() {
         assert_eq!(update_enable_mask(0b1010, 0b0100, true), 0b1110);
         assert_eq!(update_enable_mask(0b1110, 0b0100, false), 0b1010);
+    }
+
+    #[test]
+    fn classifies_pch_msi_vectors_for_ack_ordering() {
+        assert!(!is_msi_irq(0));
+        assert!(!is_msi_irq(63));
+        assert!(is_msi_irq(64));
+        assert!(is_msi_irq(255));
+        assert!(!is_msi_irq(256));
     }
 }

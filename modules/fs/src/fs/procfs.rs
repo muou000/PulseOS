@@ -44,7 +44,8 @@ const CPUINFO_INO: u64 = 12;
 const UPTIME_INO: u64 = 13;
 const BPF_STATS_INO: u64 = 14;
 const BPF_MAPPINGS_INO: u64 = 15;
-const NEXT_DYNAMIC_INO: u64 = BPF_MAPPINGS_INO + 1;
+const VIRTIO_BLK_STATS_INO: u64 = 16;
+const NEXT_DYNAMIC_INO: u64 = VIRTIO_BLK_STATS_INO + 1;
 const PROCFS_INODE_SHARDS: usize = 32;
 const PROCFS_PID_MAP_SHARDS: usize = 32;
 
@@ -170,6 +171,7 @@ enum ProcLiveFileKind {
     Uptime,
     BpfStats,
     BpfMappings,
+    VirtioBlkStats,
     PidChildren(u64),
     ThreadStatus(u64, u64),
     ThreadComm(u64, u64),
@@ -437,6 +439,11 @@ impl ProcFilesystem {
             NodePermission::from_bits_truncate(0o444));
         let bpf_mappings = new_live_file(BPF_MAPPINGS_INO, ProcLiveFileKind::BpfMappings,
             NodePermission::from_bits_truncate(0o444));
+        let virtio_blk_stats = new_live_file(
+            VIRTIO_BLK_STATS_INO,
+            ProcLiveFileKind::VirtioBlkStats,
+            NodePermission::from_bits_truncate(0o444),
+        );
 
         root.metadata.lock().nlink = 3;
         sys_dir.metadata.lock().nlink = 3;
@@ -457,6 +464,7 @@ impl ProcFilesystem {
         self.insert_inode(UPTIME_INO, uptime);
         self.insert_inode(BPF_STATS_INO, bpf_stats);
         self.insert_inode(BPF_MAPPINGS_INO, bpf_mappings);
+        self.insert_inode(VIRTIO_BLK_STATS_INO, virtio_blk_stats);
 
         {
             let mut entries = inode_as_dir(&root)
@@ -473,6 +481,7 @@ impl ProcFilesystem {
             entries.insert("uptime".into(), UPTIME_INO);
             entries.insert("pulse_bpf_stats".into(), BPF_STATS_INO);
             entries.insert("pulse_bpf_mappings".into(), BPF_MAPPINGS_INO);
+            entries.insert("pulse_virtio_blk_stats".into(), VIRTIO_BLK_STATS_INO);
         }
 
         {
@@ -930,6 +939,45 @@ fn render_filesystems() -> String {
     out
 }
 
+fn render_virtio_blk_stats() -> String {
+    let mut out = String::new();
+    driver::for_each_virtio_blk_stats(|idx, item| {
+        out.push_str(&format!(
+            "dev={} submissions={} completions_total={} irq_count={} irq_completions={} \
+             poll_completions={} recheck_armed={} recheck_already_armed={} \
+             recheck_callback_fired={} recheck_irq_completed_before_callback={} \
+             recheck_poll_completed_before_callback={} \
+             recheck_callback_already_drained={} recheck_callback_still_pending={} \
+             recheck_callback_reclaimed={} recheck_reclaimed_completions={} recheck_rearmed={} \
+             in_flight_current={} in_flight_max={} in_flight_submit_sum={} queue_full_waits={} \
+             cancelled_detached={} cancelled_completed_recycled={}\n",
+            idx,
+            item.submissions,
+            item.completions_total,
+            item.irq_count,
+            item.irq_completions,
+            item.poll_completions,
+            item.recheck_armed,
+            item.recheck_already_armed,
+            item.recheck_callback_fired,
+            item.recheck_irq_completed_before_callback,
+            item.recheck_poll_completed_before_callback,
+            item.recheck_callback_already_drained,
+            item.recheck_callback_still_pending,
+            item.recheck_callback_reclaimed,
+            item.recheck_reclaimed_completions,
+            item.recheck_rearmed,
+            item.in_flight_current,
+            item.in_flight_max,
+            item.in_flight_submit_sum,
+            item.queue_full_waits,
+            item.cancelled_detached,
+            item.cancelled_completed_recycled,
+        ));
+    });
+    out
+}
+
 fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
     match kind {
         ProcLiveFileKind::Meminfo => render_meminfo(),
@@ -1015,6 +1063,7 @@ fn render_proc_file(fs: &ProcFilesystem, kind: ProcLiveFileKind) -> String {
             .and_then(|provider| provider.bpf_stats()).unwrap_or_default(),
         ProcLiveFileKind::BpfMappings => PROCESS_PROVIDER.get()
             .and_then(|provider| provider.bpf_mappings()).unwrap_or_default(),
+        ProcLiveFileKind::VirtioBlkStats => render_virtio_blk_stats(),
         ProcLiveFileKind::Uptime => {
             let mono = hal::time::monotonic_time();
             let secs = mono.as_secs();

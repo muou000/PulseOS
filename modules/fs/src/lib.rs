@@ -454,6 +454,162 @@ fn mount_builtin_fs(
     }
 }
 
+#[cfg(feature = "guest-checks")]
+static ROOT_BLOCK_DEVICE: spin::Once<disk::SharedBlockDevice> = spin::Once::new();
+
+/// Runs in-kernel verification of VirtIO block completion and recheck behavior
+/// under normal IRQ, controlled missing completion IRQ, and idle periods.
+#[cfg(feature = "guest-checks")]
+pub fn run_virtio_blk_recheck_guest_checks() -> Result<(), &'static str> {
+    use driver::prelude::AsyncBlockDriverOps;
+    use futures_util::future::join_all;
+
+    struct IrqSuppressGuard;
+    impl Drop for IrqSuppressGuard {
+        fn drop(&mut self) {
+            driver::set_virtio_blk_irq_suppressed_for_test(false);
+        }
+    }
+
+    fn snapshot_virtio_blk_stats() -> Result<driver::VirtIoBlkStats, &'static str> {
+        let mut root = None;
+        driver::for_each_virtio_blk_stats(|index, stats| {
+            if index == 0 {
+                root = Some(stats);
+            }
+        });
+        root.ok_or("virtio-blk stats missing")
+    }
+
+    if snapshot_virtio_blk_stats().is_err() {
+        info!("[VIRTIO_BLK_RECHECK_CHECK] no virtio-blk device registered; skipping");
+        return Ok(());
+    }
+    let dev = ROOT_BLOCK_DEVICE
+        .get()
+        .ok_or("root block device not initialized")?
+        .clone();
+
+    // 1. Let any boot-time lazy watchdog disarm, then read sectors
+    //    (0, 8, 16, 24) with normal IRQ and let the epoch disarm cleanly.
+    task::future::block_on(task::future::sleep(Duration::from_millis(25)));
+    let s0 = snapshot_virtio_blk_stats()?;
+    let mut expected = [[0u8; 512]; 4];
+    for (idx, buf) in expected.iter_mut().enumerate() {
+        task::future::block_on(dev.read_block_async((idx * 8) as u64, buf))
+            .map_err(|_| "normal irq read failed")?;
+    }
+    task::future::block_on(task::future::sleep(Duration::from_millis(25)));
+    let s1 = snapshot_virtio_blk_stats()?;
+    if s1.completions_total <= s0.completions_total || s1.in_flight_current != 0 {
+        return Err("normal irq read stats mismatch");
+    }
+
+    // 2. Controlled missing completion IRQ: 16 async reads + 4 non-destructive
+    //    async writes + 4 async flushes must all complete via recheck.
+    {
+        let _guard = IrqSuppressGuard;
+        driver::set_virtio_blk_irq_suppressed_for_test(true);
+
+        let mut read_bufs = alloc::vec![[0u8; 512]; 16];
+        {
+            let read_futs: Vec<_> = read_bufs
+                .iter_mut()
+                .enumerate()
+                .map(|(i, buf)| dev.read_block_async((i * 8) as u64, buf))
+                .collect();
+            for res in task::future::block_on(join_all(read_futs)) {
+                res.map_err(|_| "suppressed-irq async read failed")?;
+            }
+        }
+        for (i, exp) in expected.iter().enumerate() {
+            if &read_bufs[i] != exp {
+                return Err("suppressed-irq read payload mismatch");
+            }
+        }
+
+        let write_futs: Vec<_> = expected
+            .iter()
+            .enumerate()
+            .map(|(i, buf)| dev.write_block_async((i * 8) as u64, buf))
+            .collect();
+        for res in task::future::block_on(join_all(write_futs)) {
+            res.map_err(|_| "suppressed-irq async write failed")?;
+        }
+
+        let flush_futs: Vec<_> = (0..4).map(|_| dev.flush_async()).collect();
+        for res in task::future::block_on(join_all(flush_futs)) {
+            res.map_err(|_| "suppressed-irq async flush failed")?;
+        }
+    }
+
+    let s2 = snapshot_virtio_blk_stats()?;
+    if s2.irq_completions != s1.irq_completions {
+        return Err("unexpected irq completions during irq suppression");
+    }
+    if s2.recheck_callback_fired <= s1.recheck_callback_fired
+        || s2.recheck_reclaimed_completions <= s1.recheck_reclaimed_completions
+        || s2.in_flight_current != 0
+    {
+        return Err("suppressed-irq recheck counters did not advance cleanly");
+    }
+
+    // 3. Idle check after restoring normal IRQ: no spurious recheck callbacks
+    //    and counter conservation laws hold.
+    task::future::block_on(task::future::sleep(Duration::from_millis(50)));
+    let s3 = snapshot_virtio_blk_stats()?;
+    if s3.recheck_callback_fired != s2.recheck_callback_fired || s3.in_flight_current != 0 {
+        return Err("unexpected idle recheck callback");
+    }
+    if s3.completions_total
+        != s3.irq_completions + s3.poll_completions + s3.recheck_reclaimed_completions
+        || s3.recheck_callback_fired
+            != s3.recheck_callback_reclaimed
+                + s3.recheck_callback_already_drained
+                + s3.recheck_callback_still_pending
+        || s3.recheck_armed
+            != s3.recheck_irq_completed_before_callback
+                + s3.recheck_poll_completed_before_callback
+                + (s3.recheck_callback_fired - s3.recheck_rearmed)
+    {
+        return Err("virtio-blk watchdog counter invariant mismatch");
+    }
+
+    // 4. Verify normal IRQ read still works after restoring IRQ completion drain.
+    let mut verify_buf = [0u8; 512];
+    task::future::block_on(dev.read_block_async(0, &mut verify_buf))
+        .map_err(|_| "post-restore read failed")?;
+    if verify_buf != expected[0] {
+        return Err("post-restore read payload mismatch");
+    }
+    let s4 = snapshot_virtio_blk_stats()?;
+    if s4.in_flight_current != 0 || s4.completions_total <= s3.completions_total {
+        return Err("post-restore read stats mismatch");
+    }
+
+    info!(
+        "VIRTIO_BLK_RECHECK_CHECK normal_completions={} normal_irq_completions={} \
+         normal_armed={} normal_already_armed={} normal_irq_before_cb={} normal_cb_fired={} \
+         suppressed_reclaimed={} suppressed_armed={} suppressed_already_armed={} \
+         suppressed_callbacks={} suppressed_cb_reclaimed={} suppressed_rearmed={} \
+         in_flight_max={} idle_callbacks_delta=0 RESULT PASS",
+        s1.completions_total - s0.completions_total,
+        s1.irq_completions - s0.irq_completions,
+        s1.recheck_armed - s0.recheck_armed,
+        s1.recheck_already_armed - s0.recheck_already_armed,
+        s1.recheck_irq_completed_before_callback - s0.recheck_irq_completed_before_callback,
+        s1.recheck_callback_fired - s0.recheck_callback_fired,
+        s2.recheck_reclaimed_completions - s1.recheck_reclaimed_completions,
+        s2.recheck_armed - s1.recheck_armed,
+        s2.recheck_already_armed - s1.recheck_already_armed,
+        s2.recheck_callback_fired - s1.recheck_callback_fired,
+        s2.recheck_callback_reclaimed - s1.recheck_callback_reclaimed,
+        s2.recheck_rearmed - s1.recheck_rearmed,
+        s4.in_flight_max,
+    );
+    Ok(())
+}
+
 pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     info!("Initialize filesystem subsystem...");
     reset_mount_records();
@@ -467,6 +623,8 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
     let root_device = disk::SharedBlockDevice::new(
         block_devs.take_one().expect("root block device is required"),
     );
+    #[cfg(feature = "guest-checks")]
+    ROOT_BLOCK_DEVICE.call_once(|| root_device.clone());
     let root = task::future::block_on(fs::new_default(root_device.clone()))
         .expect("failed to mount root filesystem on device0");
     info!(
