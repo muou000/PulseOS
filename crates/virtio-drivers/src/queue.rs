@@ -534,6 +534,9 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
                     .used_event
                     .store(self.last_used_idx, Ordering::Release);
             }
+            // VirtIO 1.1 §2.7.7.2: ensure the updated `used_event` store is
+            // globally visible before the driver re-checks `used.idx`.
+            fence(Ordering::SeqCst);
         }
 
         Ok(len)

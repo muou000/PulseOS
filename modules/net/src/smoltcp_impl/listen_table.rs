@@ -1,5 +1,8 @@
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
-use core::ops::{Deref, DerefMut};
+use core::{
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use axerrno::{AxError, AxResult, ax_err};
 use sync::Mutex;
@@ -20,14 +23,20 @@ const PORT_NUM: usize = 65536;
 
 struct ListenTableEntry {
     listen_endpoint: IpListenEndpoint,
+    nagle_enabled: Arc<AtomicBool>,
     syn_queue: VecDeque<SocketHandle>,
     wait_queues: Arc<SocketWaitQueues>,
 }
 
 impl ListenTableEntry {
-    pub fn new(listen_endpoint: IpListenEndpoint, wait_queues: Arc<SocketWaitQueues>) -> Self {
+    pub fn new(
+        listen_endpoint: IpListenEndpoint,
+        nagle_enabled: Arc<AtomicBool>,
+        wait_queues: Arc<SocketWaitQueues>,
+    ) -> Self {
         Self {
             listen_endpoint,
+            nagle_enabled,
             syn_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
             wait_queues,
         }
@@ -73,6 +82,7 @@ impl ListenTable {
     pub fn listen(
         &self,
         listen_endpoint: IpListenEndpoint,
+        nagle_enabled: Arc<AtomicBool>,
         wait_queues: Arc<SocketWaitQueues>,
     ) -> AxResult {
         let port = listen_endpoint.port;
@@ -81,6 +91,7 @@ impl ListenTable {
         if entry.is_none() {
             *entry = Some(Box::new(ListenTableEntry::new(
                 listen_endpoint,
+                nagle_enabled,
                 wait_queues,
             )));
             Ok(())
@@ -186,6 +197,7 @@ impl ListenTable {
             }
             let mut socket = SocketSetWrapper::new_tcp_socket();
             if socket.listen(entry.listen_endpoint).is_ok() {
+                socket.set_nagle_enabled(entry.nagle_enabled.load(Ordering::Relaxed));
                 let handle = sockets.add(socket);
                 debug!(
                     "TCP socket {}: prepare for connection {} -> {}",

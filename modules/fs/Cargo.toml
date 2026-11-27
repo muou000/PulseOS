@@ -16,6 +16,7 @@ times = []
 std = []
 mapping-lifecycle-test = []
 file-io-test = ["task/multitask"]
+guest-checks = ["driver/guest-checks"]
 
 [dependencies]
 kernel_alloc.workspace = true
