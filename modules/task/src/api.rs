@@ -335,6 +335,26 @@ pub fn set_priority(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
 }
 
+/// Sets the scheduler priority for a task in any lifecycle state.
+///
+/// Running and ready tasks are updated through the run queue that owns them so
+/// queue ordering and EEVDF accounting remain consistent. Blocked tasks are
+/// not present in a run queue, so their scheduler-side priority is updated
+/// directly and becomes effective when they wake.
+pub fn set_task_priority(task: AxTaskRef, prio: isize) -> bool {
+    if current_may_uninit().is_some_and(|current| current.ptr_eq(&task)) {
+        return current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio);
+    }
+
+    let updated =
+        crate::run_queue::task_run_queue::<NoPreemptIrqSave>(&task).set_task_priority(&task, prio);
+    #[cfg(all(feature = "smp", feature = "ipi"))]
+    if updated {
+        crate::run_queue::kick_remote_cpu(task.cpu_id() as usize);
+    }
+    updated
+}
+
 /// Sets the current task's real-time policy.
 ///
 /// EEVDF distinguishes FIFO and round-robin behavior for tasks with an RT
@@ -345,6 +365,27 @@ pub fn set_current_rt_policy(policy: RtPolicy) {
     #[cfg(not(feature = "sched-eevdf"))]
     let _ = policy;
 }
+
+/// Sets the real-time policy for a task in any lifecycle state.
+#[cfg(feature = "sched-eevdf")]
+pub fn set_task_rt_policy(task: AxTaskRef, policy: RtPolicy) {
+    if current_may_uninit().is_some_and(|current| current.ptr_eq(&task)) {
+        current_run_queue::<NoPreemptIrqSave>().set_current_rt_policy(policy);
+        return;
+    }
+
+    if task.is_ready() || task.is_running() {
+        crate::run_queue::task_run_queue::<NoPreemptIrqSave>(&task)
+            .set_task_rt_policy(&task, policy);
+        #[cfg(all(feature = "smp", feature = "ipi"))]
+        crate::run_queue::kick_remote_cpu(task.cpu_id() as usize);
+    } else {
+        task.set_rt_policy(policy);
+    }
+}
+
+#[cfg(not(feature = "sched-eevdf"))]
+pub fn set_task_rt_policy(_task: AxTaskRef, _policy: RtPolicy) {}
 
 /// Returns the real-time round-robin time slice exposed to user space.
 pub const fn rt_time_slice_ns() -> u64 {
@@ -361,33 +402,36 @@ pub const fn rt_time_slice_ns() -> u64 {
 /// Set the affinity for the current task.
 /// [`AxCpuMask`] is used to specify the CPU affinity.
 /// Returns `true` if the affinity is set successfully.
-///
-/// TODO: support set the affinity for other tasks.
 pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
+    set_task_affinity(current().clone(), cpumask)
+}
+
+/// Sets the affinity for a task in any lifecycle state.
+pub fn set_task_affinity(task: AxTaskRef, cpumask: AxCpuMask) -> bool {
     let has_online_cpu =
         (0..hal::cpu_num()).any(|cpu_id| cpumask.get(cpu_id) && hal::is_cpu_online(cpu_id));
     if !has_online_cpu {
         return false;
     }
-    let curr = current().clone();
-    let effective = curr.set_cpumask(cpumask);
+    let effective = crate::run_queue::set_task_affinity_mask(&task, cpumask);
     if effective.is_empty() {
         return false;
     }
-    #[cfg(feature = "smp")]
-    if !effective.get(hal::percpu::this_cpu_id()) {
-        // Migration executes scheduler and IPI paths on this stack.
-        let migration_task = TaskInner::new(
-            move || crate::run_queue::migrate_entry(curr),
-            "migration-task".into(),
-            config::TASK_STACK_SIZE,
-        )
-        .into_arc();
-        current_run_queue::<NoPreemptIrqSave>().migrate_current(migration_task);
-        assert!(
-            effective.get(hal::percpu::this_cpu_id()),
-            "Migration failed"
-        );
+    crate::run_queue::migrate_task_for_affinity(task.clone());
+    if current_may_uninit().is_some_and(|current| current.ptr_eq(&task)) {
+        #[cfg(feature = "smp")]
+        if !effective.get(hal::percpu::this_cpu_id()) {
+            let migration_task = TaskInner::new(
+                move || crate::run_queue::migrate_entry(task),
+                "migration-task".into(),
+                config::TASK_STACK_SIZE,
+            )
+            .into_arc();
+            current_run_queue::<NoPreemptIrqSave>().migrate_current(migration_task);
+        }
+    } else {
+        #[cfg(all(feature = "smp", feature = "ipi"))]
+        crate::run_queue::kick_remote_cpu(task.cpu_id() as usize);
     }
     true
 }
