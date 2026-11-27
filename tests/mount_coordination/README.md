@@ -37,3 +37,29 @@ Host tests exercise injected registry failures and topology rollback
 separately; this guest validates the actual syscall wiring. The existing LTP
 matrix is listed in `tests/ltp/runtest/fs_bind` (bind, rbind, move and mount
 namespace scenarios); these focused syscall checks do not replace that matrix.
+
+## Process mount tables (#295)
+
+Build each probe with its target Linux C compiler and install it in a private
+copy of the scheduler test image. Run from the repository root with both cross
+compilers on `PATH`.
+
+```sh
+scratch=$(mktemp -d)
+for arch in riscv64 loongarch64; do
+    image=disk.img
+    if [ "$arch" = loongarch64 ]; then image=disk-la.img; fi
+    "${arch}-linux-gnu-gcc" -O2 -Wall -Wextra -Werror -static \
+        tests/mount_coordination/proc_mounts.c -o "$scratch/proc-mounts-$arch"
+    cp --reflink=auto --sparse=always "$image" "$scratch/$arch.img"
+    scripts/install_to_rootfs.sh "$scratch/$arch.img" "$scratch/proc-mounts-$arch" /opt/proc-mounts
+done
+```
+
+Boot each kernel with its QEMU command in [AGENTS.md](../../AGENTS.md), using
+the matching image from `$scratch`. At the guest shell run `/opt/proc-mounts`.
+It mounts a temporary tmpfs with special characters in both the source and
+target, compares one full read with 7-byte reads through EOF for the root,
+self, numeric current PID, PID 1 and live child paths, and checks directory
+entries and `ENOENT` after reaping the child. Success ends with
+`PASS complete six-field rows and mount field escapes` and exit status 0.
