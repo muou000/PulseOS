@@ -17,6 +17,18 @@ LARGE = 65536
 SLOW = 2 * 1024 * 1024
 
 
+def read_status(reply):
+    line = reply.readline(65537)
+    if not line:
+        raise EOFError('peer closed before status line')
+    fields = line.rstrip(b'\r\n').split(b' ', 2)
+    if (len(line) > 65536 or not line.endswith(b'\r\n') or len(fields) < 2
+            or fields[0] not in (b'HTTP/1.0', b'HTTP/1.1')
+            or len(fields[1]) != 3 or not fields[1].isdigit()):
+        raise http.client.BadStatusLine(line)
+    return int(fields[1])
+
+
 def request(port, tag, size=LARGE, delay=0, stream=None, close=True):
     """Return the observed HTTP result, including short EOF and partial data."""
     row = dict(tag=tag, expected=size)
@@ -37,10 +49,7 @@ def request(port, tag, size=LARGE, delay=0, stream=None, close=True):
         if delay:
             time.sleep(delay)
         with sock.makefile('rb') as reply:
-            status = reply.readline()
-            if not status:
-                raise EOFError('peer closed before status line')
-            row['status'] = int(status.split()[1])
+            row['status'] = read_status(reply)
             headers = http.client.parse_headers(reply)
             declared = int(headers.get('Content-Length', -1))
             row['content_length'] = declared
@@ -71,7 +80,7 @@ def abort_request(port):
         sock.sendall(b'GET /slow.bin HTTP/1.1\r\nHost: localhost\r\n'
                      b'Connection: close\r\nUser-Agent: check-peer-abort\r\n\r\n')
         with sock.makefile('rb') as response:
-            if not response.readline().startswith(b'HTTP/1.1 200'):
+            if read_status(response) != 200:
                 raise RuntimeError('abort control had no HTTP 200 status')
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
 
