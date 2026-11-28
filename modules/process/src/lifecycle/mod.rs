@@ -17,8 +17,8 @@ use task::{AxTaskRef, WaitContext, WaitQueue, WaitReason, WakeContext, WakeSourc
 use kernel_guard::NoPreemptIrqSave;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::{
-    RLIMIT_AS, RLIMIT_CORE, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_NOFILE,
-    RLIMIT_SIGPENDING, RLIMIT_STACK, SIGCHLD, itimerspec, rlimit64, sigevent,
+    RLIMIT_AS, RLIMIT_CORE, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_NICE, RLIMIT_NOFILE,
+    RLIMIT_RTPRIO, RLIMIT_SIGPENDING, RLIMIT_STACK, SIGCHLD, itimerspec, rlimit64, sigevent,
 };
 use memory_addr::{MemoryAddr, PhysAddr, VirtAddr, va};
 use spin::{Lazy, Mutex, RwLock};
@@ -162,6 +162,10 @@ pub struct RlimitState {
     as_hard: u64,
     sigpending_soft: u64,
     sigpending_hard: u64,
+    nice_soft: u64,
+    nice_hard: u64,
+    rtprio_soft: u64,
+    rtprio_hard: u64,
 }
 
 impl Default for RlimitState {
@@ -181,6 +185,10 @@ impl Default for RlimitState {
             as_hard: u64::MAX,
             sigpending_soft: DEFAULT_SIGPENDING_LIMIT,
             sigpending_hard: DEFAULT_SIGPENDING_LIMIT,
+            nice_soft: 0,
+            nice_hard: 0,
+            rtprio_soft: 0,
+            rtprio_hard: 0,
         }
     }
 }
