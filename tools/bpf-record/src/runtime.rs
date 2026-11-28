@@ -538,16 +538,13 @@ impl Session {
                     }
                 }
                 let trace_queue_state = global_number(&stats, "trace_queued");
-                if let Some(queued) = trace_queue_state {
-                    ready &= queued == 0;
-                }
+                // The handoff queue is part of the stop barrier. A snapshot
+                // without its occupancy field cannot prove that accepted
+                // tracepoint records have reached the consumer.
+                ready &= trace_queue_state == Some(0);
                 ready &= detached;
                 if ready {
-                    if trace_queue_state.is_some() {
-                        log("QUIESCENT inflight=0 trace_queued=0");
-                    } else {
-                        log("QUIESCENT inflight=0 trace_queued=unknown");
-                    }
+                    log("QUIESCENT inflight=0 trace_queued=0");
                     return true;
                 }
             }
