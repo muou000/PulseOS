@@ -190,7 +190,26 @@ const IP_PREFIX: u8 = 24;
 
 static ETH0: LazyInit<InterfaceWrapper> = LazyInit::new();
 
-struct SocketSetWrapper<'a>(Mutex<SocketSet<'a>>);
+struct SocketSetWrapper<'a>(Mutex<SocketTable<'a>>);
+
+struct SocketTable<'a> {
+    sockets: SocketSet<'a>,
+    // These handles belong to the network stack after the last FD closes.
+    closing_tcp: Vec<tcp::ClosingTcp>,
+}
+
+impl SocketTable<'_> {
+    fn reap_closed_tcp(&mut self, now: TimeValue) {
+        self.closing_tcp.retain_mut(|closing| {
+            if closing.poll_close(self.sockets.get_mut(closing.handle), now) {
+                self.sockets.remove(closing.handle);
+                false
+            } else {
+                true
+            }
+        });
+    }
+}
 
 struct DeviceWrapper {
     inner: RefCell<AxNetDevice>, /* use `RefCell` is enough since it's wrapped in `Mutex` in `InterfaceWrapper`. */
@@ -205,7 +224,10 @@ struct InterfaceWrapper {
 
 impl<'a> SocketSetWrapper<'a> {
     fn new() -> Self {
-        Self(Mutex::new(SocketSet::new(vec![])))
+        Self(Mutex::new(SocketTable {
+            sockets: SocketSet::new(vec![]),
+            closing_tcp: Vec::new(),
+        }))
     }
 
     pub fn new_tcp_socket() -> socket::tcp::Socket<'a> {
@@ -244,7 +266,7 @@ impl<'a> SocketSetWrapper<'a> {
     }
 
     pub fn add<T: AnySocket<'a>>(&self, socket: T) -> SocketHandle {
-        let handle = self.0.lock().add(socket);
+        let handle = self.0.lock().sockets.add(socket);
         debug!("socket {}: created", handle);
         handle
     }
@@ -254,7 +276,7 @@ impl<'a> SocketSetWrapper<'a> {
         F: FnOnce(&T) -> R,
     {
         let set = self.0.lock();
-        let socket = set.get(handle);
+        let socket = set.sockets.get(handle);
         f(socket)
     }
 
@@ -263,7 +285,7 @@ impl<'a> SocketSetWrapper<'a> {
         F: FnOnce(&mut T) -> R,
     {
         let mut set = self.0.lock();
-        let socket = set.get_mut(handle);
+        let socket = set.sockets.get_mut(handle);
         f(socket)
     }
 
@@ -273,8 +295,8 @@ impl<'a> SocketSetWrapper<'a> {
         port: u16,
         self_handle: Option<SocketHandle>,
     ) -> AxResult {
-        let mut sockets = self.0.lock();
-        for item in sockets.iter_mut() {
+        let mut table = self.0.lock();
+        for item in table.sockets.iter_mut() {
             if Some(item.0) == self_handle {
                 continue;
             }
@@ -312,7 +334,7 @@ impl<'a> SocketSetWrapper<'a> {
             readiness_may_have_changed |= LOOPBACK.lock().poll(
                 timestamp,
                 LOOPBACK_DEV.lock().deref_mut(),
-                &mut self.0.lock(),
+                &mut self.0.lock().sockets,
             );
         }
 
@@ -323,11 +345,13 @@ impl<'a> SocketSetWrapper<'a> {
         // Waking a task may enter the scheduler synchronously and must not leave
         // the global socket set locked if scheduling is delayed.
         let ready_wait_queues: Vec<_> = {
-            let mut sockets = self.0.lock();
+            let mut table = self.0.lock();
+            table.reap_closed_tcp(monotonic_time());
             // Incoming TCP packets register listener children while holding
             // this lock, so all paths acquire the socket set before the map.
             let wq_map = SOCKET_WAIT_QUEUES.lock();
-            sockets
+            table
+                .sockets
                 .iter_mut()
                 .filter_map(|(handle, socket)| {
                     let entry = wq_map.get(&handle)?;
@@ -390,15 +414,33 @@ impl<'a> SocketSetWrapper<'a> {
     }
 
     pub fn remove(&self, handle: SocketHandle) {
-        self.0.lock().remove(handle);
+        self.0.lock().sockets.remove(handle);
         debug!("socket {}: destroyed", handle);
+    }
+
+    fn close_tcp(&self, handle: SocketHandle) {
+        let mut table = self.0.lock();
+        SOCKET_WAIT_QUEUES.lock().remove(&handle);
+        let socket = table.sockets.get_mut::<socket::tcp::Socket>(handle);
+        socket.close();
+        if socket.remote_endpoint().is_none() {
+            table.sockets.remove(handle);
+            return;
+        }
+
+        let closing = tcp::ClosingTcp::new(handle, socket, monotonic_time());
+        table.closing_tcp.push(closing);
+        drop(table);
+        schedule_poll();
+        #[cfg(not(feature = "multitask"))]
+        self.poll_interfaces();
     }
 
     /// Removes a socket and its readiness registration under the same lock
     /// order used by `poll_interfaces`.
     pub fn remove_and_unregister(&self, handle: SocketHandle) {
-        let mut sockets = self.0.lock();
-        sockets.remove(handle);
+        let mut table = self.0.lock();
+        table.sockets.remove(handle);
         SOCKET_WAIT_QUEUES.lock().remove(&handle);
         debug!("socket {}: destroyed", handle);
     }
@@ -446,13 +488,13 @@ impl InterfaceWrapper {
         };
     }
 
-    pub fn poll(&self, sockets: &Mutex<SocketSet>) -> bool {
+    pub fn poll(&self, table: &Mutex<SocketTable>) -> bool {
         let mut dev = self.dev.lock();
         dev.inner.borrow().poll_device();
         let mut iface = self.iface.lock();
-        let mut sockets = sockets.lock();
+        let mut table = table.lock();
         let timestamp = Self::current_time();
-        iface.poll(timestamp, dev.deref_mut(), &mut sockets)
+        iface.poll(timestamp, dev.deref_mut(), &mut table.sockets)
     }
 }
 
@@ -600,8 +642,8 @@ pub(crate) fn poll_delay() -> Option<smoltcp::time::Duration> {
             // then the global socket set. Reversing this order can deadlock
             // with an application task polling the network stack.
             let mut iface = LOOPBACK.lock();
-            let sockets = SOCKET_SET.0.lock();
-            iface.poll_delay(timestamp, &sockets)
+            let table = SOCKET_SET.0.lock();
+            iface.poll_delay(timestamp, &table.sockets)
         } else {
             None
         }
@@ -611,8 +653,8 @@ pub(crate) fn poll_delay() -> Option<smoltcp::time::Duration> {
 
     let delay_eth0 = if ETH0.is_inited() {
         let mut iface = ETH0.iface.lock();
-        let sockets = SOCKET_SET.0.lock();
-        iface.poll_delay(timestamp, &sockets)
+        let table = SOCKET_SET.0.lock();
+        iface.poll_delay(timestamp, &table.sockets)
     } else {
         None
     };
@@ -636,11 +678,18 @@ fn next_poll_delay() -> Option<core::time::Duration> {
         None
     };
 
-    match (protocol_delay, device_interval) {
-        (Some(protocol), Some(device)) => Some(protocol.min(device)),
-        (Some(delay), None) | (None, Some(delay)) => Some(delay),
-        (None, None) => None,
-    }
+    let deadline = SOCKET_SET
+        .0
+        .lock()
+        .closing_tcp
+        .iter()
+        .map(|closing| closing.deadline)
+        .min();
+    let close_delay = deadline.map(|end| end.saturating_sub(monotonic_time()));
+    [protocol_delay, device_interval, close_delay]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 /// Benchmark raw socket transmit bandwidth.

@@ -998,6 +998,18 @@ impl<'a> Socket<'a> {
         }
     }
 
+    /// Release both stream buffers once the application has dropped the socket
+    /// and only TIME-WAIT remains. The socket can still acknowledge a repeated FIN.
+    /// A socket retired this way must be removed after TIME-WAIT, never reopened.
+    pub fn discard_time_wait_buffers(&mut self) {
+        if self.state == State::TimeWait {
+            // The ACK number includes contiguous receive data the owner never read.
+            self.remote_seq_no += self.rx_buffer.len();
+            self.rx_buffer = SocketBuffer::new(&mut [][..]);
+            self.tx_buffer = SocketBuffer::new(&mut [][..]);
+        }
+    }
+
     /// Aborts the connection, if any.
     ///
     /// This function instantly closes the socket. One reset packet will be sent to the remote
@@ -4725,6 +4737,32 @@ mod test {
                 expires_at: Instant::from_secs(5) + CLOSE_DELAY
             }
         );
+    }
+
+    #[test]
+    fn test_retired_time_wait_acks_repeated_fin_after_unread_data() {
+        let mut s = socket_fin_wait_2();
+        send!(s, time 1_000, TcpRepr {
+            control: TcpControl::Fin,
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 2),
+            payload: b"abc",
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.recv_queue(), 3);
+        s.discard_time_wait_buffers();
+        assert_eq!((s.recv_capacity(), s.send_capacity()), (0, 0));
+        send!(s, time 5_000, TcpRepr {
+            control: TcpControl::Fin,
+            seq_number: REMOTE_SEQ + 4,
+            ack_number: Some(LOCAL_SEQ + 2),
+            ..SEND_TEMPL
+        }, Some(TcpRepr {
+            seq_number: LOCAL_SEQ + 2,
+            ack_number: Some(REMOTE_SEQ + 5),
+            window_len: 0,
+            ..RECV_TEMPL
+        }));
     }
 
     #[test]

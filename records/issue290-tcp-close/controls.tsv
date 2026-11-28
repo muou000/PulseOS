@@ -1,0 +1,45 @@
+kernel	arch	probe	case	exit	guest_output
+3f8b3396	rv	control-5s	drain	1	accepted=393216 received=262140 final_recv=0 | FAIL complete stream followed by EOF (errno 0)
+3f8b3396	rv	control-5s	orphan	1	FAIL orphan retains its source port while waiting for peer FIN (errno 0)
+3f8b3396	rv	control-5s	abort	0	released port=49157 after 0 one-second intervals | PASS abort
+3f8b3396	la	control-5s	drain	1	accepted=393216 received=262141 final_recv=0 | FAIL complete stream followed by EOF (errno 0)
+3f8b3396	la	control-5s	orphan	1	FAIL orphan retains its source port while waiting for peer FIN (errno 0)
+3f8b3396	la	control-5s	abort	0	released port=49157 after 0 one-second intervals | PASS abort
+3f8b3396	rv	slow-5s	drain	1	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=262140 final_recv=0 | FAIL complete stream followed by EOF (errno 0)
+3f8b3396	la	slow-5s	drain	1	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=262140 final_recv=0 | FAIL complete stream followed by EOF (errno 0)
+0d059ca2	rv	control-5s	drain	0	accepted=393216 received=393216 final_recv=0 | released port=49154 after 10 one-second intervals | PASS drain
+0d059ca2	rv	control-5s	orphan	0	PASS orphan
+0d059ca2	rv	control-5s	abort	0	released port=49157 after 1 one-second intervals | PASS abort
+0d059ca2	la	control-5s	drain	1	accepted=393216 received=376831 final_recv=-1 | FAIL complete stream followed by EOF (errno 110)
+0d059ca2	la	control-5s	orphan	0	PASS orphan
+0d059ca2	la	control-5s	abort	0	released port=49157 after 1 one-second intervals | PASS abort
+0d059ca2	rv	slow-5s	drain	1	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=401404 final_recv=-1 | FAIL complete stream followed by EOF (errno 110)
+0d059ca2	la	slow-5s	drain	1	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=401404 final_recv=-1 | FAIL complete stream followed by EOF (errno 110)
+0d059ca2	rv	slow-60s-diagnostic	drain	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 elapsed=70 | released port=49154 after 10 one-second intervals | PASS drain
+0d059ca2	la	slow-60s-diagnostic	drain	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 elapsed=120 | released port=49154 after 10 one-second intervals | PASS drain
+516bff19	rv	control-5s	drain1	0	accepted=393216 received=393216 final_recv=0 | released port=49154 after 10 one-second intervals | PASS drain
+516bff19	rv	control-5s	drain2	0	accepted=393216 received=393216 final_recv=0 | released port=49156 after 10 one-second intervals | PASS drain
+516bff19	rv	control-5s	drain3	0	accepted=393216 received=393216 final_recv=0 | released port=49158 after 10 one-second intervals | PASS drain
+516bff19	rv	control-5s	drain4	0	accepted=393216 received=393216 final_recv=0 | released port=49160 after 10 one-second intervals | PASS drain
+516bff19	rv	control-5s	drain5	0	accepted=393216 received=393216 final_recv=0 | released port=49162 after 10 one-second intervals | PASS drain
+516bff19	rv	control-5s	orphan	0	PASS orphan
+516bff19	rv	control-5s	abort	0	released port=49165 after 1 one-second intervals | PASS abort
+516bff19	rv	control-5s	epoll	0	epoll closed local fd rc=1 events=18 elapsed=523ms | PASS epoll
+516bff19	rv	control-5s	reconnect	0	early reconnect rc=-1 errno=110 | PASS reconnect
+516bff19	la	control-5s	drain1	0	accepted=393216 received=393216 final_recv=0 | released port=49154 after 10 one-second intervals | PASS drain
+516bff19	la	control-5s	drain2	0	accepted=393216 received=393216 final_recv=0 | released port=49156 after 10 one-second intervals | PASS drain
+516bff19	la	control-5s	drain3	0	accepted=393216 received=393216 final_recv=0 | released port=49158 after 10 one-second intervals | PASS drain
+516bff19	la	control-5s	drain4	0	accepted=393216 received=393216 final_recv=0 | released port=49160 after 10 one-second intervals | PASS drain
+516bff19	la	control-5s	drain5	0	accepted=393216 received=393216 final_recv=0 | released port=49162 after 10 one-second intervals | PASS drain
+516bff19	la	control-5s	orphan	0	PASS orphan
+516bff19	la	control-5s	abort	0	released port=49165 after 1 one-second intervals | PASS abort
+516bff19	la	control-5s	epoll	0	epoll closed local fd rc=1 events=18 elapsed=509ms | PASS epoll
+516bff19	la	control-5s	reconnect	0	early reconnect rc=-1 errno=110 | PASS reconnect
+516bff19	rv	slow-5s	slow1	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 | released port=49154 after 10 one-second intervals | PASS drain
+516bff19	rv	slow-5s	slow2	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 | released port=49156 after 10 one-second intervals | PASS drain
+516bff19	la	slow-5s	slow1	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 | released port=49154 after 10 one-second intervals | PASS drain
+516bff19	la	slow-5s	slow2	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 | released port=49156 after 10 one-second intervals | PASS drain
+516bff19	rv	final-source-5s	drain	0	accepted=393216 received=393216 final_recv=0 | released port=49154 after 10 one-second intervals | PASS drain
+516bff19	rv	final-source-5s	slow	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 | released port=49156 after 10 one-second intervals | PASS slow
+516bff19	la	final-source-5s	drain	0	accepted=393216 received=393216 final_recv=0 | released port=49154 after 10 one-second intervals | PASS drain
+516bff19	la	final-source-5s	slow	0	read 131072 bytes after 35 seconds, pausing 35 more | accepted=491520 received=491520 final_recv=0 | released port=49156 after 10 one-second intervals | PASS slow

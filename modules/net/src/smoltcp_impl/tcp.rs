@@ -517,7 +517,7 @@ impl TcpSocket {
     }
 
     fn recv_once_raw(handle: SocketHandle, buf: &mut [u8], peek: bool) -> AxResult<usize> {
-        SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
+        let result = SOCKET_SET.with_socket_mut::<tcp::Socket, _, _>(handle, |socket| {
             if socket.recv_queue() > 0 {
                 let res = if peek {
                     socket.peek_slice(buf)
@@ -530,7 +530,13 @@ impl TcpSocket {
             } else {
                 Err(AxError::WouldBlock)
             }
-        })
+        });
+        // Consuming data opens the receive window. The peer may be waiting for
+        // our window update, with no incoming packet to wake the poller.
+        if !peek && result.as_ref().is_ok_and(|len| *len != 0) {
+            schedule_poll();
+        }
+        result
     }
 
     /// Attempts to receive data once without blocking or mutating `self.nonblock`.
@@ -978,8 +984,63 @@ impl Write for TcpSocket {
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        self.shutdown().ok();
-        SOCKET_SET.remove_and_unregister(self.handle);
+        if self.is_listening() {
+            LISTEN_TABLE.unlisten(self.endpoints.read().local.port);
+        }
+        SOCKET_SET.close_tcp(self.handle);
+        // A poll registration can outlive the last file reference.
+        self.notify_wait_queues(IoEvents::IN | IoEvents::OUT | IoEvents::HUP);
+    }
+}
+
+/// A TCP connection whose last application reference has been dropped.
+/// Its queued bytes and FIN can still need acknowledgements or retransmission.
+pub(super) struct ClosingTcp {
+    pub(super) handle: SocketHandle,
+    pub(super) deadline: hal::time::TimeValue,
+    state: tcp::State,
+    unacked: usize,
+}
+
+impl ClosingTcp {
+    pub(super) fn new(
+        handle: SocketHandle,
+        socket: &mut tcp::Socket,
+        now: hal::time::TimeValue,
+    ) -> Self {
+        let state = socket.state();
+        socket.discard_time_wait_buffers();
+        // CLOSED with a peer still has a reset to dispatch. Bound that last
+        // attempt as well, since the route or device may have disappeared.
+        let timeout = if state == tcp::State::Closed { 1 } else { 60 };
+        Self {
+            handle,
+            deadline: now + core::time::Duration::from_secs(timeout),
+            state,
+            unacked: socket.send_queue(),
+        }
+    }
+
+    /// Advance the detached close and return true when the handle can be removed.
+    pub(super) fn poll_close(
+        &mut self,
+        socket: &mut tcp::Socket,
+        now: hal::time::TimeValue,
+    ) -> bool {
+        if socket.remote_endpoint().is_none() {
+            return true;
+        }
+        if self.state != socket.state() || self.unacked != socket.send_queue() {
+            // Even a slow reader can keep draining while its ACKs advance.
+            *self = Self::new(self.handle, socket, now);
+        } else if now >= self.deadline {
+            if self.state == tcp::State::Closed {
+                return true;
+            }
+            socket.abort();
+            *self = Self::new(self.handle, socket, now);
+        }
+        false
     }
 }
 

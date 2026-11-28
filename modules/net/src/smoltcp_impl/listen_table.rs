@@ -8,7 +8,10 @@ use axerrno::{AxError, AxResult, ax_err};
 use sync::Mutex;
 use smoltcp::{
     iface::{SocketHandle, SocketSet},
-    socket::tcp::{self, State},
+    socket::{
+        Socket,
+        tcp::{self, State},
+    },
     wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
 
@@ -177,6 +180,15 @@ impl ListenTable {
             log::debug!("incoming_tcp_packet: found entry for port {}", dst.port);
             if !entry.can_accept(dst.addr) {
                 log::warn!("incoming_tcp_packet: cannot accept address {}", dst.addr);
+                return;
+            }
+            // A retransmitted SYN, or a new SYN during TIME-WAIT, belongs
+            // to the existing four-tuple. A second listener child would either
+            // shadow that connection or stay in the backlog without a SYN.
+            if sockets.iter().any(|(_, socket)| {
+                matches!(socket, Socket::Tcp(s) if s.state() != State::Closed
+                    && s.local_endpoint() == Some(dst) && s.remote_endpoint() == Some(src))
+            }) {
                 return;
             }
             if entry.syn_queue.len() >= LISTEN_QUEUE_SIZE {
