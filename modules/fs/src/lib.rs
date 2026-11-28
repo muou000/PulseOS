@@ -34,7 +34,8 @@ use mounts::{reset_mount_records, reset_mounted_mountpoints};
 
 pub use disk::{flush_all_disks, flush_all_disks_async};
 pub use fs::{
-    TtyCallbacks, devfs::DevNode, new_default, new_procfs, new_tmpfs, register_tty_callbacks,
+    TtyCallbacks, devfs::DevNode, new_default, new_procfs, new_sysfs, new_tmpfs,
+    register_tty_callbacks,
 };
 
 /// Fills `buf` with bytes from the kernel random stream.
@@ -680,6 +681,14 @@ pub fn init_filesystems(mut block_devs: AxDeviceContainer<AxBlockDevice>) {
         "/proc",
         &proc_fs,
         "proc",
+        "rw,nosuid,nodev,noexec,relatime",
+    );
+    let sys_fs = fs::new_sysfs();
+    mount_builtin_fs(
+        &cx,
+        "/sys",
+        &sys_fs,
+        "sysfs",
         "rw,nosuid,nodev,noexec,relatime",
     );
     let dev_fs = fs::new_devfs(dev_nodes);

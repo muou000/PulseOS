@@ -9,6 +9,7 @@ pub mod ext4;
 pub(crate) mod devfs;
 pub mod loop_dev;
 pub mod procfs;
+pub mod sysfs;
 pub(crate) mod tmpfs;
 
 use driver::prelude::AsyncBlockDriverOps;
@@ -37,6 +38,10 @@ pub fn new_devfs(block_devices: Vec<BlockDeviceSpec>) -> Filesystem {
 
 pub fn new_procfs() -> Filesystem {
     procfs::ProcFilesystem::new()
+}
+
+pub fn new_sysfs() -> Filesystem {
+    sysfs::SysFilesystem::new()
 }
 
 pub use procfs::{ProcfsProcessProvider, register_process_provider};
