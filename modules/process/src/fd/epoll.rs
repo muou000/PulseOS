@@ -30,6 +30,7 @@ impl EpollObject {
         &self,
         process: &crate::Process,
         thread: Option<&crate::Thread>,
+        advance_network: bool,
     ) -> LinuxResult<PollState> {
         let monitored: Vec<(usize, u32)> = {
             let events = self.events.lock();
@@ -40,7 +41,12 @@ impl EpollObject {
         };
         for (fd, ev_events) in monitored {
             if let Ok(entry) = process.get_fd_entry(fd) {
-                if let Ok(st) = entry.object.poll_readiness_with_context(process, thread) {
+                let readiness = if advance_network {
+                    entry.object.poll_readiness_with_context(process, thread)
+                } else {
+                    entry.object.poll_readiness_without_network_with_context(process, thread)
+                };
+                if let Ok(st) = readiness {
                     let mut revents = 0u32;
                     if st.readable && (ev_events & EPOLLIN != 0) {
                         revents |= EPOLLIN;
@@ -129,7 +135,22 @@ impl FdObject for EpollObject {
 
     fn poll(&self) -> LinuxResult<PollState> {
         let process = crate::current_process()?;
-        self.poll_for_process(&process, None)
+        self.poll_for_process(&process, None, true)
+    }
+
+    fn poll_without_network(&self) -> LinuxResult<PollState> {
+        let process = crate::current_process()?;
+        self.poll_for_process(&process, None, false)
+    }
+
+    fn needs_network_poll(&self) -> bool {
+        let process = match crate::current_process() {
+            Ok(process) => process,
+            Err(_) => return false,
+        };
+        self.events.lock().keys().any(|fd| {
+            process.get_fd_entry(*fd).is_ok_and(|entry| entry.object.needs_network_poll())
+        })
     }
 
     fn poll_with_context(
@@ -137,7 +158,15 @@ impl FdObject for EpollObject {
         process: &crate::Process,
         thread: Option<&crate::Thread>,
     ) -> LinuxResult<PollState> {
-        self.poll_for_process(process, thread)
+        self.poll_for_process(process, thread, true)
+    }
+
+    fn poll_without_network_with_context(
+        &self,
+        process: &crate::Process,
+        thread: Option<&crate::Thread>,
+    ) -> LinuxResult<PollState> {
+        self.poll_for_process(process, thread, false)
     }
 
     fn register_poll(

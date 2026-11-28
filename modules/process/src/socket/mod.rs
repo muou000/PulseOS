@@ -1234,6 +1234,56 @@ impl Socket {
     }
 }
 
+impl Socket {
+    fn poll_state(&self, advance_network: bool) -> Result<PollState, LinuxError> {
+        if advance_network {
+            net::poll_interfaces();
+        } else {
+            net::record_socket_readiness_visit();
+        }
+        let mut state = match &self.inner {
+            SocketInner::Tcp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Udp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Icmp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
+            SocketInner::Local(s) => {
+                let peer_write_closed = s.peer_closed.load(Ordering::Acquire)
+                    || s.rx.write_closed.load(Ordering::Acquire);
+                let peer_read_closed = s.peer_closed.load(Ordering::Acquire)
+                    || s.tx.read_closed.load(Ordering::Acquire);
+                // poll can execute beneath epoll's bookkeeping lock, so a
+                // contended ring is conservatively reported as ready instead
+                // of yielding while that lock is held.
+                let readable = s.rx.buffer.try_lock().map_or(true, |rx_ring| {
+                    rx_ring.available_read() > 0 || peer_write_closed
+                });
+                let writable = s.tx.buffer.try_lock().map_or(true, |tx_ring| {
+                    tx_ring.available_write() > 0 || peer_read_closed
+                });
+                Ok(PollState {
+                    readable,
+                    writable,
+                })
+            }
+            SocketInner::Packet(_) => Ok(PollState { readable: false, writable: true }),
+            SocketInner::Netlink(s) => {
+                let rx = s.rx_data.lock();
+                let offset = s.read_offset.lock();
+                Ok(PollState {
+                    readable: *offset < rx.len(),
+                    writable: true,
+                })
+            }
+        }?;
+        if self.rx_shutdown.load(Ordering::Acquire) {
+            state.readable = true;
+        }
+        if self.tx_shutdown.load(Ordering::Acquire) {
+            state.writable = true;
+        }
+        Ok(state)
+    }
+}
+
 impl FdObject for Socket {
     fn as_any(&self) -> &dyn Any {
         self
@@ -1525,47 +1575,15 @@ impl FdObject for Socket {
     }
 
     fn poll(&self) -> Result<PollState, LinuxError> {
-        net::poll_interfaces();
-        let mut state = match &self.inner {
-            SocketInner::Tcp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
-            SocketInner::Udp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
-            SocketInner::Icmp(s) => s.poll().map_err(|e| LinuxError::from(e.canonicalize())),
-            SocketInner::Local(s) => {
-                let peer_write_closed = s.peer_closed.load(Ordering::Acquire)
-                    || s.rx.write_closed.load(Ordering::Acquire);
-                let peer_read_closed = s.peer_closed.load(Ordering::Acquire)
-                    || s.tx.read_closed.load(Ordering::Acquire);
-                // poll can execute beneath epoll's bookkeeping lock, so a
-                // contended ring is conservatively reported as ready instead
-                // of yielding while that lock is held.
-                let readable = s.rx.buffer.try_lock().map_or(true, |rx_ring| {
-                    rx_ring.available_read() > 0 || peer_write_closed
-                });
-                let writable = s.tx.buffer.try_lock().map_or(true, |tx_ring| {
-                    tx_ring.available_write() > 0 || peer_read_closed
-                });
-                Ok(PollState {
-                    readable,
-                    writable,
-                })
-            }
-            SocketInner::Packet(_) => Ok(PollState { readable: false, writable: true }),
-            SocketInner::Netlink(s) => {
-                let rx = s.rx_data.lock();
-                let offset = s.read_offset.lock();
-                Ok(PollState {
-                    readable: *offset < rx.len(),
-                    writable: true,
-                })
-            }
-        }?;
-        if self.rx_shutdown.load(Ordering::Acquire) {
-            state.readable = true;
-        }
-        if self.tx_shutdown.load(Ordering::Acquire) {
-            state.writable = true;
-        }
-        Ok(state)
+        self.poll_state(true)
+    }
+
+    fn poll_without_network(&self) -> Result<PollState, LinuxError> {
+        self.poll_state(false)
+    }
+
+    fn needs_network_poll(&self) -> bool {
+        matches!(&self.inner, SocketInner::Tcp(_) | SocketInner::Udp(_) | SocketInner::Icmp(_))
     }
 
     fn get_wait_queues<'a>(

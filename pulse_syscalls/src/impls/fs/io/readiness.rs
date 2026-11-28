@@ -151,13 +151,6 @@ pub fn sys_ppoll(
         Err(e) => return -e.code() as isize,
     };
 
-    // Linux poll reports an invalid descriptor in-band through POLLNVAL. Do
-    // this scan before waiting so the blocking path never turns it into EBADF.
-    if readiness_scan_once(&mut pollfds, &objects) > 0 {
-        let ready = pollfds.iter().filter(|pfd| pfd.revents != 0).count();
-        return write_back(&pollfds, ready as isize);
-    }
-
     match wait_for_readiness(thread.as_ref(), &mut pollfds, &objects, deadline) {
         ReadinessWaitResult::Ready(ready) => write_back(&pollfds, ready as isize),
         ReadinessWaitResult::Interrupted => {

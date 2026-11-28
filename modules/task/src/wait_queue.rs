@@ -625,11 +625,17 @@ impl WaitQueue {
     /// If `resched` is true, the current task will be preempted when the
     /// preemption is enabled.
     pub fn notify_all(&self, resched: bool) {
-        self.notify_all_with_context(resched, WakeContext::unknown());
+        let _ = self.notify_all_with_context_count(resched, WakeContext::unknown());
     }
 
     /// Wakes all waiters and records an explicitly typed wake source.
     pub fn notify_all_with_context(&self, resched: bool, context: WakeContext) {
+        let _ = self.notify_all_with_context_count(resched, context);
+    }
+
+    /// Wakes all waiters and returns the number of tasks or wakers notified.
+    pub fn notify_all_with_context_count(&self, resched: bool, context: WakeContext) -> usize {
+        let mut wake_count = 0;
         let tasks = {
             let mut wq = self.queue.lock();
             core::mem::take(&mut *wq)
@@ -643,6 +649,7 @@ impl WaitQueue {
                 task.set_in_wait_queue_seqcst(false);
                 if task.state_seqcst() == crate::task::TaskState::Blocked {
                     unblock_one_task_locked(task, resched, context);
+                    wake_count += 1;
                 }
             }
         }
@@ -656,7 +663,9 @@ impl WaitQueue {
         };
         for entry in wakers.into_values() {
             entry.waker.wake();
+            wake_count += 1;
         }
+        wake_count
     }
 
     /// Wake up the given task in the wait queue.
