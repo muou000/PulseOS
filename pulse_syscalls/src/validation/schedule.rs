@@ -13,6 +13,10 @@ pub(crate) const SCHED_ATTR_MAX_SIZE: usize = 4096;
 pub(crate) const SCHED_FLAG_RESET_ON_FORK_U64: u64 = SCHED_FLAG_RESET_ON_FORK as u64;
 const SUPPORTED_SCHED_FLAGS: u64 = SCHED_FLAG_RESET_ON_FORK_U64;
 
+pub(crate) fn normalize_nice(nice: i32) -> i32 {
+    nice.clamp(MIN_NICE, MAX_NICE)
+}
+
 pub(crate) const fn has_reset_on_fork(flags: u64) -> bool {
     (flags & SCHED_FLAG_RESET_ON_FORK_U64) != 0
 }
@@ -326,7 +330,7 @@ pub(crate) fn validate_sched_setattr(
     if (attr.sched_flags & !SUPPORTED_SCHED_FLAGS) != 0 {
         return Err(LinuxError::EINVAL);
     }
-    attr.sched_nice = attr.sched_nice.clamp(MIN_NICE, MAX_NICE);
+    attr.sched_nice = normalize_nice(attr.sched_nice);
 
     let policy = SchedPolicy::from_u32(attr.sched_policy)?;
     let rt_priority = validate_rt_or_zero_priority(policy, attr.sched_priority)?;
@@ -370,7 +374,7 @@ pub(crate) fn validate_sched_setattr(
 }
 
 pub(crate) fn nice_to_rlimit(nice: i32) -> u64 {
-    (MAX_NICE - nice.clamp(MIN_NICE, MAX_NICE) + 1) as u64
+    (MAX_NICE - normalize_nice(nice) + 1) as u64
 }
 
 pub(crate) fn rlimit_permits_nice(rlim_nice: u64, nice: i32) -> bool {
@@ -434,7 +438,7 @@ pub(crate) fn authorize_sched_change(
 pub(crate) fn eevdf_priority_for_request(req: &SchedChangeRequest) -> isize {
     match req.policy {
         SchedPolicy::Fifo | SchedPolicy::Rr => req.rt_priority as isize,
-        SchedPolicy::Normal | SchedPolicy::Batch => req.nice.clamp(MIN_NICE, MAX_NICE) as isize - 100,
+        SchedPolicy::Normal | SchedPolicy::Batch => normalize_nice(req.nice) as isize - 100,
         SchedPolicy::Idle => MAX_NICE as isize - 100,
         // PulseOS records SCHED_DEADLINE metadata without CBS/EDF scheduling;
         // keep it in the ordinary EEVDF class.
@@ -490,6 +494,21 @@ mod tests {
         CallerCreds {
             euid,
             has_cap_sys_nice: false,
+        }
+    }
+
+    #[test]
+    fn normalize_nice_saturates_linux_bounds_without_overflow() {
+        for (requested, expected) in [
+            (i32::MIN, MIN_NICE),
+            (-21, MIN_NICE),
+            (MIN_NICE, MIN_NICE),
+            (0, 0),
+            (MAX_NICE, MAX_NICE),
+            (20, MAX_NICE),
+            (i32::MAX, MAX_NICE),
+        ] {
+            assert_eq!(normalize_nice(requested), expected);
         }
     }
 

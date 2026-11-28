@@ -20,7 +20,7 @@ use crate::{
         authorize_sched_change, check_zeroed_extension_bytes, decode_sched_setattr_size,
         eevdf_priority_for_request, format_sched_attr_for_policy,
         format_sched_getscheduler_policy, is_same_sched_owner, rlimit_permits_nice,
-        sched_priority_max, sched_priority_min, validate_sched_getattr_args,
+        normalize_nice, sched_priority_max, sched_priority_min, validate_sched_getattr_args,
         validate_sched_param_args, validate_sched_setattr, validate_sched_setattr_args,
         validate_sched_setattr_policy_sign, validate_sched_setparam, validate_sched_setscheduler,
         validate_sched_setscheduler_args,
@@ -318,29 +318,22 @@ fn may_set_priority(caller: &Process, target: &Thread, nice: i32) -> Result<(), 
     Ok(())
 }
 
-fn apply_thread_nice(thread: &Thread, nice: i32) {
+fn apply_thread_nice(thread: &Thread, nice: i32) -> bool {
     let priority = nice as isize - 100;
-    let is_current = current_thread()
-        .map(|current| current.tid() == thread.tid())
-        .unwrap_or(false);
-    if is_current {
-        let _ = task::set_priority(priority);
-    } else if let Some(task) = thread.process().task_ref_by_tid(thread.tid()) {
-        // A blocked task is not owned by a run queue, so the EEVDF priority
-        // can be updated directly before the next wakeup enqueues it.
-        if !task.is_ready() && !task.is_running() {
-            let _ = task.set_priority(priority);
-        }
+    let Some(task) = thread.process().task_ref_by_tid(thread.tid()) else {
+        return false;
+    };
+    if !task::set_task_priority(task, priority) {
+        return false;
     }
     thread
         .sched_nice
         .store(nice, core::sync::atomic::Ordering::Release);
+    true
 }
 
 pub fn sys_setpriority(which: i32, who: i32, priority: i32) -> isize {
-    if !(-20..=19).contains(&priority) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
+    let nice = normalize_nice(priority);
     let caller = match current_process() {
         Ok(process) => process,
         Err(e) => return -e.code() as isize,
@@ -355,14 +348,15 @@ pub fn sys_setpriority(which: i32, who: i32, priority: i32) -> isize {
         Ok(threads) => threads,
         Err(e) => return -e.code() as isize,
     };
-    let nice = priority;
     for thread in &threads {
         if let Err(e) = may_set_priority(caller.as_ref(), thread.as_ref(), nice) {
             return -e.code() as isize;
         }
     }
     for thread in threads {
-        apply_thread_nice(thread.as_ref(), nice);
+        if !apply_thread_nice(thread.as_ref(), nice) {
+            return -LinuxError::EINVAL.code() as isize;
+        }
     }
     0
 }
