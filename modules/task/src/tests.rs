@@ -658,3 +658,22 @@ fn test_register_timer_hook_dispatches_multiple_idempotently() {
     assert_eq!(HOOK_A_COUNT.load(Ordering::Relaxed), 1);
     assert_eq!(HOOK_B_COUNT.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn test_into_arc_with_sched_overrides_parent_sched() {
+    use crate::task::{InitialTaskSched, TaskInner};
+
+    let _lock = SERIAL.lock();
+    task::init_scheduler_for_test();
+
+    let default_sched = InitialTaskSched::normal_default();
+    assert_eq!(default_sched.priority, -100);
+    assert_eq!(default_sched.rt_policy, crate::RtPolicy::RoundRobin);
+
+    let custom = InitialTaskSched {
+        priority: 15,
+        rt_policy: crate::RtPolicy::Fifo,
+    };
+    let task_ref = TaskInner::new_init("custom-sched".into()).into_arc_with_sched(custom);
+    assert_eq!(task_ref.name(), "custom-sched");
+}

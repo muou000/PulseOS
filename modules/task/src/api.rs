@@ -79,7 +79,7 @@ pub(crate) use crate::run_queue::{
     current_run_queue, select_run_queue, select_wake_run_queue, yield_current,
 };
 #[doc(cfg(feature = "multitask"))]
-pub use crate::task::{CurrentTask, TaskId, TaskInner};
+pub use crate::task::{CurrentTask, InitialTaskSched, TaskId, TaskInner};
 #[doc(cfg(feature = "multitask"))]
 pub use crate::task_ext::{TaskExtMut, TaskExtRef, TaskExtSwitch};
 #[doc(cfg(feature = "multitask"))]
@@ -333,6 +333,21 @@ where
 /// Returns `true` if the priority is set successfully.
 pub fn set_priority(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
+}
+
+/// Returns the current task's scheduler priority encoding, or `-100`
+/// (ordinary nice 0) when the active scheduler does not track priorities.
+pub fn current_priority() -> isize {
+    #[cfg(any(feature = "sched-rr", feature = "sched-eevdf"))]
+    {
+        current_may_uninit()
+            .map(|curr| curr.as_task_ref().priority())
+            .unwrap_or(-100)
+    }
+    #[cfg(not(any(feature = "sched-rr", feature = "sched-eevdf")))]
+    {
+        -100
+    }
 }
 
 /// Sets the scheduler priority for a task in any lifecycle state.

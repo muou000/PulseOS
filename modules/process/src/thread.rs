@@ -10,7 +10,10 @@ use task::{
     AxTaskRef, AxTaskWeak, TaskExtSwitch, TaskId, WaitQueue, WakeContext, WakeSource, def_task_ext,
 };
 use kspin::SpinNoIrq;
-use linux_raw_sys::general::SCHED_NORMAL;
+use linux_raw_sys::general::{
+    SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO, SCHED_FLAG_RESET_ON_FORK, SCHED_IDLE, SCHED_NORMAL,
+    SCHED_RR,
+};
 use spin::Mutex;
 
 use super::{Process, SignalAltStack, ThreadSignal};
@@ -44,6 +47,103 @@ pub struct Thread {
 const IO_BUFFER_CACHE_MAX_CAPACITY: usize = 64 * 1024;
 
 const NOT_IN_USER_MODE: u64 = u64::MAX;
+const MIN_NICE: i32 = -20;
+const MAX_NICE: i32 = 19;
+const NORMAL_NICE_0_PRIORITY: isize = -100;
+const IDLE_TASK_PRIORITY: isize = MAX_NICE as isize - 100;
+const SCHED_FLAG_RESET_ON_FORK_U64: u64 = SCHED_FLAG_RESET_ON_FORK as u64;
+
+/// Parent scheduler snapshot used to compute a child thread's initial state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadSchedSnapshot {
+    pub policy: u32,
+    pub flags: u64,
+    pub nice: i32,
+    pub runtime: u64,
+    pub deadline: u64,
+    pub period: u64,
+    pub task_priority: isize,
+}
+
+/// Inherited child thread metadata and pre-enqueue scheduler parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChildThreadSched {
+    pub policy: u32,
+    pub flags: u64,
+    pub nice: i32,
+    pub runtime: u64,
+    pub deadline: u64,
+    pub period: u64,
+    pub initial_task_sched: task::InitialTaskSched,
+}
+
+impl ChildThreadSched {
+    /// Computes child scheduler metadata and pre-enqueue EEVDF state following
+    /// Linux `sched_fork` reset-on-fork semantics.
+    pub fn from_parent(parent: ThreadSchedSnapshot) -> Self {
+        let reset_on_fork = (parent.flags & SCHED_FLAG_RESET_ON_FORK_U64) != 0;
+        let mut policy = parent.policy;
+        let mut flags = parent.flags;
+        let mut nice = parent.nice.clamp(MIN_NICE, MAX_NICE);
+        let mut runtime = parent.runtime;
+        let mut deadline = parent.deadline;
+        let mut period = parent.period;
+
+        if reset_on_fork {
+            if matches!(policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE) {
+                policy = SCHED_NORMAL;
+                nice = 0;
+                runtime = 0;
+                deadline = 0;
+                period = 0;
+            } else if nice < 0 {
+                nice = 0;
+            }
+            flags &= !SCHED_FLAG_RESET_ON_FORK_U64;
+        }
+
+        let initial_task_sched = match policy {
+            SCHED_FIFO => task::InitialTaskSched {
+                priority: if (1..=99).contains(&parent.task_priority) {
+                    parent.task_priority
+                } else {
+                    1
+                },
+                rt_policy: task::RtPolicy::Fifo,
+            },
+            SCHED_RR => task::InitialTaskSched {
+                priority: if (1..=99).contains(&parent.task_priority) {
+                    parent.task_priority
+                } else {
+                    1
+                },
+                rt_policy: task::RtPolicy::RoundRobin,
+            },
+            SCHED_IDLE => task::InitialTaskSched {
+                priority: IDLE_TASK_PRIORITY,
+                rt_policy: task::RtPolicy::RoundRobin,
+            },
+            SCHED_DEADLINE => task::InitialTaskSched {
+                priority: NORMAL_NICE_0_PRIORITY,
+                rt_policy: task::RtPolicy::RoundRobin,
+            },
+            SCHED_NORMAL | SCHED_BATCH | _ => task::InitialTaskSched {
+                priority: nice as isize - 100,
+                rt_policy: task::RtPolicy::RoundRobin,
+            },
+        };
+
+        Self {
+            policy,
+            flags,
+            nice,
+            runtime,
+            deadline,
+            period,
+            initial_task_sched,
+        }
+    }
+}
 
 pub struct ThreadHandle(Arc<Thread>);
 def_task_ext!(ThreadHandle);
@@ -131,30 +231,30 @@ impl Thread {
         })
     }
 
-    /// Copies scheduler attributes when a child thread is created.
-    pub fn inherit_scheduler_from(&self, parent: &Self) {
-        self.sched_policy.store(
-            parent.sched_policy.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        self.sched_flags.store(
-            parent.sched_flags.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        self.sched_nice
-            .store(parent.sched_nice.load(Ordering::Acquire), Ordering::Release);
-        self.sched_runtime.store(
-            parent.sched_runtime.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        self.sched_deadline.store(
-            parent.sched_deadline.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        self.sched_period.store(
-            parent.sched_period.load(Ordering::Acquire),
-            Ordering::Release,
-        );
+    /// Copies scheduler attributes when a child thread is created, applying
+    /// `SCHED_FLAG_RESET_ON_FORK` semantics and returning the child's initial
+    /// pre-enqueue task scheduling state.
+    pub fn inherit_scheduler_from(
+        &self,
+        parent: &Self,
+        parent_task_priority: isize,
+    ) -> task::InitialTaskSched {
+        let child = ChildThreadSched::from_parent(ThreadSchedSnapshot {
+            policy: parent.sched_policy.load(Ordering::Acquire),
+            flags: parent.sched_flags.load(Ordering::Acquire),
+            nice: parent.sched_nice.load(Ordering::Acquire),
+            runtime: parent.sched_runtime.load(Ordering::Acquire),
+            deadline: parent.sched_deadline.load(Ordering::Acquire),
+            period: parent.sched_period.load(Ordering::Acquire),
+            task_priority: parent_task_priority,
+        });
+        self.sched_policy.store(child.policy, Ordering::Release);
+        self.sched_flags.store(child.flags, Ordering::Release);
+        self.sched_nice.store(child.nice, Ordering::Release);
+        self.sched_runtime.store(child.runtime, Ordering::Release);
+        self.sched_deadline.store(child.deadline, Ordering::Release);
+        self.sched_period.store(child.period, Ordering::Release);
+        child.initial_task_sched
     }
 
     pub fn take_io_buffer(&self) -> alloc::vec::Vec<u8> {

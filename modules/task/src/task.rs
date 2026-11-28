@@ -26,6 +26,24 @@ use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue, task_ext::AxTaskExt};
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct TaskId(u64);
 
+/// Explicit initial scheduling parameters applied to an unpublished task
+/// before it enters any run queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitialTaskSched {
+    pub priority: isize,
+    pub rt_policy: crate::RtPolicy,
+}
+
+impl InitialTaskSched {
+    /// Default ordinary-class scheduling parameters (nice 0, non-RT).
+    pub const fn normal_default() -> Self {
+        Self {
+            priority: -100,
+            rt_policy: crate::RtPolicy::RoundRobin,
+        }
+    }
+}
+
 /// The possible states of a task.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -461,6 +479,26 @@ impl TaskInner {
             #[cfg(feature = "sched-eevdf")]
             task_ref.set_rt_policy(curr.as_task_ref().rt_policy());
         }
+        task_ref
+    }
+
+    /// Converts this unpublished task into an [`AxTaskRef`] with explicit
+    /// initial scheduler priority and RT policy instead of inheriting from the
+    /// current task.
+    pub fn into_arc_with_sched(self, sched: InitialTaskSched) -> AxTaskRef {
+        let task_ref = Arc::new(AxTask::new(self));
+        #[cfg(feature = "sched-eevdf")]
+        {
+            let ok = task_ref.set_priority(sched.priority);
+            debug_assert!(ok, "invalid initial EEVDF priority: {}", sched.priority);
+            task_ref.set_rt_policy(sched.rt_policy);
+        }
+        #[cfg(feature = "sched-rr")]
+        {
+            task_ref.set_priority(sched.priority);
+        }
+        #[cfg(not(any(feature = "sched-rr", feature = "sched-eevdf")))]
+        let _ = sched;
         task_ref
     }
 
