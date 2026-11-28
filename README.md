@@ -200,7 +200,7 @@ taskset -c 0 /usr/bin/cyclictest -S --default-system --policy=other -d 0 -i 1000
 taskset -c 0 /usr/bin/cyclictest -S --default-system --policy=fifo -p 10 -d 0 -i 1000 -l 200 -q
 ```
 
-省略 `-S` 会启用 libnuma 自动探测，当前来宾缺少 CPU 到 NUMA 节点的拓扑，可能在采样前报告 `invalid cpu passed to numa_node_of_cpu(0)`。
+省略 `-S` 会启用 libnuma 自动探测。单节点来宾通过 `/sys/devices/system/node/node0/cpumap` 提供 CPU 到 NUMA 节点的拓扑，因此可以直接运行默认路径。
 
 **测调度交接与锁争用。** lmbench 的 `lat_ctx` 用管道在 2 个或 8 个进程之间传递令牌，报告扣除估计开销后的每次交接时间（µs）。sysbench 的 `threads` 工作负载让线程在共享互斥锁下循环调用 `sched_yield`。用相同时间窗比较 1 个和 8 个线程时的 events/s 与第 95 百分位事件延迟。
 

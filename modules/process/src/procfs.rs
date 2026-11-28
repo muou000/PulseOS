@@ -7,6 +7,54 @@ use core::fmt::Write;
 
 use crate::{current_process, process_by_pid, processes_snapshot, thread_handle_from_task};
 
+fn render_cpu_mask(mask: task::AxCpuMask) -> String {
+    let bytes = mask.as_bytes();
+    let groups = bytes.len().div_ceil(4);
+    let mut output = String::new();
+    for group in (0..groups).rev() {
+        let mut value = 0u32;
+        for byte in 0..4 {
+            let index = group * 4 + byte;
+            if index < bytes.len() {
+                value |= u32::from(bytes[index]) << (byte * 8);
+            }
+        }
+        write!(&mut output, "{value:08x}").ok();
+    }
+    if output.is_empty() {
+        output.push_str("00000000");
+    }
+    output
+}
+
+fn render_cpu_list(mask: task::AxCpuMask) -> String {
+    let mut output = String::new();
+    let mut range_start = None;
+    let mut previous = 0;
+    let limit = hal::cpu_num().min(mask.as_bytes().len() * 8);
+    for cpu in 0..=limit {
+        let selected = cpu < limit && mask.get(cpu);
+        if selected {
+            if range_start.is_none() {
+                range_start = Some(cpu);
+            }
+            previous = cpu;
+            continue;
+        }
+        if let Some(start) = range_start.take() {
+            if !output.is_empty() {
+                output.push(',');
+            }
+            if start == previous {
+                output.push_str(&start.to_string());
+            } else {
+                write!(&mut output, "{start}-{previous}").ok();
+            }
+        }
+    }
+    output
+}
+
 struct PulseProcessProvider;
 
 impl fs::ProcfsProcessProvider for PulseProcessProvider {
@@ -127,16 +175,13 @@ impl fs::ProcfsProcessProvider for PulseProcessProvider {
 
     fn status(&self, pid: u64) -> Option<String> {
         let proc = process_by_pid(pid)?;
+        let task = proc.task_ref_by_tid(pid);
         let name = proc.name();
 
         let state = if proc.is_zombie() {
             "Z (zombie)"
-        } else if let Some(task) = proc.task_ref_by_tid(pid) {
-            if task.is_running() || task.is_ready() {
-                "R (running)"
-            } else {
-                "S (sleeping)"
-            }
+        } else if task.as_ref().is_some_and(|task| task.is_running() || task.is_ready()) {
+            "R (running)"
         } else {
             "S (sleeping)"
         };
@@ -146,6 +191,12 @@ impl fs::ProcfsProcessProvider for PulseProcessProvider {
         let (ruid, euid, suid) = proc.uid_snapshot();
         let (rgid, egid, sgid) = proc.gid_snapshot();
         let threads = proc.thread_count();
+        let cpus_allowed = task
+            .as_ref()
+            .map(|task| task.cpumask())
+            .unwrap_or_else(task::AxCpuMask::full);
+        let cpus_allowed_hex = render_cpu_mask(cpus_allowed);
+        let cpus_allowed_list = render_cpu_list(cpus_allowed);
 
         let mut vm_size = 0;
         proc.aspace_handle().read().for_each_area(|start, end, _| {
@@ -158,7 +209,7 @@ impl fs::ProcfsProcessProvider for PulseProcessProvider {
 
         Some(alloc::format!(
             "Name:\t{}\nUmask:\t{:04o}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{} {} \
-             {} {}\nGid:\t{} {} {} {}\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} \
+             {} {}\nGid:\t{} {} {} {}\nCpus_allowed:\t{}\nCpus_allowed_list:\t{}\nMems_allowed:\t00000001\nMems_allowed_list:\t0\nThreads:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} \
              kB\n",
             name,
             umask,
@@ -174,6 +225,8 @@ impl fs::ProcfsProcessProvider for PulseProcessProvider {
             egid,
             sgid,
             egid,
+            cpus_allowed_hex,
+            cpus_allowed_list,
             threads,
             vm_size_kb,
             vm_rss_kb,

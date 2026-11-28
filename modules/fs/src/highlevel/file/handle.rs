@@ -1079,7 +1079,7 @@ impl File {
             && self.location().node_type() == NodeType::RegularFile
             && !matches!(
                 self.location().filesystem().name(),
-                "proc" | "devfs" | "tmpfs"
+                "proc" | "devfs" | "sysfs" | "tmpfs"
             )
     }
 

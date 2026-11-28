@@ -24,6 +24,9 @@ fn lookup_or_probe_fs(
     if fstype == "proc" {
         return Ok(fs::new_procfs());
     }
+    if fstype == "sysfs" {
+        return Ok(fs::new_sysfs());
+    }
 
     // Preserve the boot aliases (device0, /dev/vda) and reuse the same
     // mounted filesystem, but only for an explicitly compatible format.
