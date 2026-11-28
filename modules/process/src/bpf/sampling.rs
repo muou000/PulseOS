@@ -41,7 +41,7 @@ mod runtime {
 
     /// Drain enough records per CPU to keep the bounded trace queues below
     /// their producer-side burst window during one worker round.
-    const TRACE_DRAIN_BATCH: usize = 64;
+    const TRACE_DRAIN_BATCH: usize = 256;
     const DRAIN_PER_ROUND: usize = SampleQueue::CAPACITY;
 
     struct CpuStats {

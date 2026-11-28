@@ -82,6 +82,9 @@ fn delta(before: Option<&str>, after: Option<&str>, key: &str) -> Option<u64> {
         .zip(after.and_then(|line| number(line, key)))
         .and_then(|(before, after)| after.checked_sub(before))
 }
+fn snapshot_value(after: Option<&str>, key: &str) -> Option<u64> {
+    after.and_then(|line| number(line, key))
+}
 
 #[derive(Default)]
 struct Hooks {
@@ -710,6 +713,7 @@ fn diagnostics(
         "timer_full",
         "timer_busy",
         "trace_enqueued",
+        "trace_dequeued",
         "trace_full",
         "trace_recursive",
         "fault_started",
@@ -725,6 +729,18 @@ fn diagnostics(
                 "fault_clock_errors" => CounterKind::Error,
                 _ => CounterKind::Activity,
             },
+        });
+    }
+    for (name, kind) in [
+        ("trace_queued", CounterKind::Activity),
+        ("trace_high_water", CounterKind::Activity),
+        ("trace_queue_capacity", CounterKind::Activity),
+    ] {
+        d.counters.push(DiagnosticCounter {
+            name: name.into(),
+            scope: "system".into(),
+            value: snapshot_value(after_global, name),
+            kind,
         });
     }
     d.counters.push(DiagnosticCounter {

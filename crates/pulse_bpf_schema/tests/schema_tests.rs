@@ -259,6 +259,11 @@ fn bounded_queue_drain_batch_preserves_generation_and_remaining_fifo() {
         .enqueue_with_generation(TracepointId::TaskWake, &[3], 13)
         .unwrap();
 
+    let initial_stats = queue.queue_stats();
+    assert_eq!(initial_stats.queued, 3);
+    assert_eq!(initial_stats.high_water, 3);
+    assert_eq!(initial_stats.total_dequeued, 0);
+
     let mut first_batch = Vec::new();
     assert_eq!(
         queue.drain_with_generation(2, |id, bytes, generation| {
@@ -273,6 +278,10 @@ fn bounded_queue_drain_batch_preserves_generation_and_remaining_fifo() {
             (TracepointId::TaskWake, 2, 12),
         ]
     );
+    let partial_stats = queue.queue_stats();
+    assert_eq!(partial_stats.total_dequeued, 2);
+    assert_eq!(partial_stats.queued, 1);
+    assert_eq!(partial_stats.high_water, 3);
 
     let mut remaining = Vec::new();
     assert_eq!(
@@ -282,6 +291,10 @@ fn bounded_queue_drain_batch_preserves_generation_and_remaining_fifo() {
         1
     );
     assert_eq!(remaining, vec![(TracepointId::TaskWake, 3, 13)]);
+    let final_stats = queue.queue_stats();
+    assert_eq!(final_stats.total_dequeued, 3);
+    assert_eq!(final_stats.queued, 0);
+    assert_eq!(final_stats.high_water, 3);
 }
 
 #[test]

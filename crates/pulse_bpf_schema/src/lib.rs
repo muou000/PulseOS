@@ -753,6 +753,23 @@ pub struct DropStats {
     pub total_enqueued: u64,
 }
 
+/// Queue progress and occupancy in addition to drop accounting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TraceQueueStats {
+    /// Count of events dropped because the buffer was full.
+    pub dropped_full: u64,
+    /// Count of events dropped because of re-entrant tracepoint execution.
+    pub dropped_recursive: u64,
+    /// Total count of events successfully enqueued.
+    pub total_enqueued: u64,
+    /// Total count of events removed by consumers.
+    pub total_dequeued: u64,
+    /// Number of records currently waiting in the queue.
+    pub queued: u64,
+    /// Highest observed queue occupancy.
+    pub high_water: u64,
+}
+
 /// Bounded, allocation-free, lock-free handoff queue for critical tracepoint paths.
 pub struct BoundedTraceQueue<const CAP: usize> {
     head: core::sync::atomic::AtomicUsize,
@@ -762,6 +779,8 @@ pub struct BoundedTraceQueue<const CAP: usize> {
     dropped_full: core::sync::atomic::AtomicU64,
     dropped_recursive: core::sync::atomic::AtomicU64,
     total_enqueued: core::sync::atomic::AtomicU64,
+    total_dequeued: core::sync::atomic::AtomicU64,
+    high_water: core::sync::atomic::AtomicUsize,
     slots: [core::cell::UnsafeCell<EventRecord>; CAP],
 }
 
@@ -789,6 +808,8 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
             dropped_full: core::sync::atomic::AtomicU64::new(0),
             dropped_recursive: core::sync::atomic::AtomicU64::new(0),
             total_enqueued: core::sync::atomic::AtomicU64::new(0),
+            total_dequeued: core::sync::atomic::AtomicU64::new(0),
+            high_water: core::sync::atomic::AtomicUsize::new(0),
             slots: [const { core::cell::UnsafeCell::new(EventRecord::empty()) }; CAP],
         }
     }
@@ -833,10 +854,13 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
             record.generation = generation;
             record.len = copy_len as u32;
             record.data[..copy_len].copy_from_slice(&slice[..copy_len]);
+            let next_head = head.wrapping_add(1);
             self.head
-                .store(head.wrapping_add(1), core::sync::atomic::Ordering::Release);
+                .store(next_head, core::sync::atomic::Ordering::Release);
             self.total_enqueued
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            self.high_water
+                .fetch_max(next_head.wrapping_sub(tail), core::sync::atomic::Ordering::Relaxed);
             Ok(())
         };
 
@@ -867,6 +891,7 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
             let record = unsafe { *slot.get() };
             tail = tail.wrapping_add(1);
             self.tail.store(tail, Ordering::Release);
+            self.total_dequeued.fetch_add(1, Ordering::Relaxed);
             drained += 1;
             consumer(record.id, record.as_bytes(), record.generation);
         }
@@ -886,6 +911,26 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
         }
     }
 
+    /// Query drop, progress and occupancy statistics.
+    pub fn queue_stats(&self) -> TraceQueueStats {
+        let head = self.head.load(core::sync::atomic::Ordering::Acquire);
+        let tail = self.tail.load(core::sync::atomic::Ordering::Acquire);
+        TraceQueueStats {
+            dropped_full: self.dropped_full.load(core::sync::atomic::Ordering::Relaxed),
+            dropped_recursive: self
+                .dropped_recursive
+                .load(core::sync::atomic::Ordering::Relaxed),
+            total_enqueued: self
+                .total_enqueued
+                .load(core::sync::atomic::Ordering::Relaxed),
+            total_dequeued: self
+                .total_dequeued
+                .load(core::sync::atomic::Ordering::Relaxed),
+            queued: head.wrapping_sub(tail).min(CAP) as u64,
+            high_water: self.high_water.load(core::sync::atomic::Ordering::Relaxed) as u64,
+        }
+    }
+
     /// Reset drop statistics.
     pub fn reset_drop_stats(&self) {
         self.dropped_full
@@ -894,6 +939,15 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
             .store(0, core::sync::atomic::Ordering::Relaxed);
         self.total_enqueued
             .store(0, core::sync::atomic::Ordering::Relaxed);
+        self.total_dequeued
+            .store(0, core::sync::atomic::Ordering::Relaxed);
+        let queued = self
+            .head
+            .load(core::sync::atomic::Ordering::Acquire)
+            .wrapping_sub(self.tail.load(core::sync::atomic::Ordering::Acquire))
+            .min(CAP);
+        self.high_water
+            .store(queued, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Check if reentrancy flag is currently set (for testing / diagnostics).

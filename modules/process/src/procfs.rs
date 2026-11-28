@@ -80,7 +80,7 @@ impl fs::ProcfsProcessProvider for PulseProcessProvider {
                 locked.numbered_entries_snapshot()
             };
             let timer = crate::bpf::sampling::stats_snapshot();
-            let trace = task::bpf_trace::total_drop_stats();
+            let trace = task::bpf_trace::total_queue_stats();
             let fault = task::bpf_trace::page_fault_stats();
             // Capability version is independent of the diagnostics row format.
             // Freeze the actual online set rather than the configured maximum.
@@ -88,9 +88,11 @@ impl fs::ProcfsProcessProvider for PulseProcessProvider {
                 process.pid(), hal::online_cpu_mask(), pulse_bpf_schema::DEFAULT_STACK_DEPTH,
                 pulse_bpf_schema::DEFAULT_STACK_BYTE_LIMIT, bpf::registered_perf_event_count(),
                 bpf::tracepoint_subscription_count());
-            writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_full={} trace_recursive={} fault_started={} fault_completed={} fault_clock_errors={}",
+            writeln!(&mut text, "GLOBAL timer_enqueued={} timer_dequeued={} timer_full={} timer_busy={} trace_enqueued={} trace_dequeued={} trace_queued={} trace_high_water={} trace_queue_capacity={} trace_full={} trace_recursive={} fault_started={} fault_completed={} fault_clock_errors={}",
                 timer.enqueued, timer.dequeued, timer.full, timer.busy,
-                trace.total_enqueued, trace.dropped_full, trace.dropped_recursive, fault.started, fault.completed, fault.clock_errors).ok()?;
+                trace.total_enqueued, trace.total_dequeued, trace.queued, trace.high_water,
+                task::bpf_trace::TRACE_QUEUE_CAPACITY * hal::online_cpu_mask().count_ones() as usize,
+                trace.dropped_full, trace.dropped_recursive, fault.started, fault.completed, fault.clock_errors).ok()?;
             let mut programs = BTreeMap::new();
             let mut events = 0usize;
             for (fd, entry) in entries {
