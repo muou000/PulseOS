@@ -426,13 +426,8 @@ impl TimeContext {
 /// `sched_get*` syscalls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ZombieSchedSnapshot {
-    pub policy: u32,
-    pub flags: u64,
-    pub nice: i32,
+    pub attrs: crate::ThreadSchedAttrs,
     pub rt_priority: u32,
-    pub runtime: u64,
-    pub deadline: u64,
-    pub period: u64,
     pub cpumask: task::AxCpuMask,
 }
 

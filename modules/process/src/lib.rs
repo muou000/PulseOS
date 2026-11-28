@@ -58,7 +58,7 @@ pub use timers::{
     adjust_absolute_timers, init_itimer_hook, is_stdin_polling_enabled, schedule_itimer_event,
     schedule_posix_timer_event, set_stdin_polling_enabled,
 };
-pub use thread::{SignalMaskGuard, Thread, ThreadHandle};
+pub use thread::{SignalMaskGuard, Thread, ThreadHandle, ThreadSchedAttrs};
 #[cfg(feature = "guest-checks")]
 pub(crate) use thread::user_dispatches;
 

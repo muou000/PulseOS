@@ -335,19 +335,26 @@ pub fn set_priority(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
 }
 
-/// Returns the current task's scheduler priority encoding, or `-100`
+/// Returns the scheduler priority encoding for `task`, or `-100`
 /// (ordinary nice 0) when the active scheduler does not track priorities.
-pub fn current_priority() -> isize {
+pub fn task_priority(task: &AxTaskRef) -> isize {
     #[cfg(any(feature = "sched-rr", feature = "sched-eevdf"))]
     {
-        current_may_uninit()
-            .map(|curr| curr.as_task_ref().priority())
-            .unwrap_or(-100)
+        task.priority()
     }
     #[cfg(not(any(feature = "sched-rr", feature = "sched-eevdf")))]
     {
+        let _ = task;
         -100
     }
+}
+
+/// Returns the current task's scheduler priority encoding, or `-100`
+/// (ordinary nice 0) when the active scheduler does not track priorities.
+pub fn current_priority() -> isize {
+    current_may_uninit()
+        .map(|curr| task_priority(curr.as_task_ref()))
+        .unwrap_or(-100)
 }
 
 /// Sets the scheduler priority for a task in any lifecycle state.

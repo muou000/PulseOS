@@ -49,31 +49,46 @@ const IO_BUFFER_CACHE_MAX_CAPACITY: usize = 64 * 1024;
 const NOT_IN_USER_MODE: u64 = u64::MAX;
 const MIN_NICE: i32 = -20;
 const MAX_NICE: i32 = 19;
+const RT_PRIORITY_MIN: isize = 1;
+const RT_PRIORITY_MAX: isize = 99;
 const NORMAL_NICE_0_PRIORITY: isize = -100;
 const IDLE_TASK_PRIORITY: isize = MAX_NICE as isize - 100;
 const SCHED_FLAG_RESET_ON_FORK_U64: u64 = SCHED_FLAG_RESET_ON_FORK as u64;
 
-/// Parent scheduler snapshot used to compute a child thread's initial state.
+/// Per-thread Linux scheduling metadata stored across live and zombie states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ThreadSchedSnapshot {
+pub struct ThreadSchedAttrs {
     pub policy: u32,
     pub flags: u64,
     pub nice: i32,
     pub runtime: u64,
     pub deadline: u64,
     pub period: u64,
+}
+
+/// Returns the RT priority in `1..=99` when `policy` is `SCHED_FIFO` or
+/// `SCHED_RR` and `task_priority` falls within the valid RT range, else `0`.
+pub(crate) fn rt_priority_for_task(policy: u32, task_priority: isize) -> u32 {
+    if matches!(policy, SCHED_FIFO | SCHED_RR)
+        && (RT_PRIORITY_MIN..=RT_PRIORITY_MAX).contains(&task_priority)
+    {
+        task_priority as u32
+    } else {
+        0
+    }
+}
+
+/// Parent scheduler snapshot used to compute a child thread's initial state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadSchedSnapshot {
+    pub attrs: ThreadSchedAttrs,
     pub task_priority: isize,
 }
 
 /// Inherited child thread metadata and pre-enqueue scheduler parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChildThreadSched {
-    pub policy: u32,
-    pub flags: u64,
-    pub nice: i32,
-    pub runtime: u64,
-    pub deadline: u64,
-    pub period: u64,
+    pub attrs: ThreadSchedAttrs,
     pub initial_task_sched: task::InitialTaskSched,
 }
 
@@ -81,44 +96,40 @@ impl ChildThreadSched {
     /// Computes child scheduler metadata and pre-enqueue EEVDF state following
     /// Linux `sched_fork` reset-on-fork semantics.
     pub fn from_parent(parent: ThreadSchedSnapshot) -> Self {
-        let reset_on_fork = (parent.flags & SCHED_FLAG_RESET_ON_FORK_U64) != 0;
-        let mut policy = parent.policy;
-        let mut flags = parent.flags;
-        let mut nice = parent.nice.clamp(MIN_NICE, MAX_NICE);
-        let mut runtime = parent.runtime;
-        let mut deadline = parent.deadline;
-        let mut period = parent.period;
+        let reset_on_fork = (parent.attrs.flags & SCHED_FLAG_RESET_ON_FORK_U64) != 0;
+        let mut attrs = parent.attrs;
+        attrs.nice = attrs.nice.clamp(MIN_NICE, MAX_NICE);
 
         if reset_on_fork {
-            if matches!(policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE) {
-                policy = SCHED_NORMAL;
-                nice = 0;
-                runtime = 0;
-                deadline = 0;
-                period = 0;
-            } else if nice < 0 {
-                nice = 0;
+            if matches!(attrs.policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE) {
+                attrs.policy = SCHED_NORMAL;
+                attrs.nice = 0;
+                attrs.runtime = 0;
+                attrs.deadline = 0;
+                attrs.period = 0;
+            } else if attrs.nice < 0 {
+                attrs.nice = 0;
             }
-            flags &= !SCHED_FLAG_RESET_ON_FORK_U64;
+            attrs.flags &= !SCHED_FLAG_RESET_ON_FORK_U64;
         }
 
-        let initial_task_sched = match policy {
-            SCHED_FIFO => task::InitialTaskSched {
-                priority: if (1..=99).contains(&parent.task_priority) {
-                    parent.task_priority
+        let initial_task_sched = match attrs.policy {
+            SCHED_FIFO | SCHED_RR => {
+                let rt_prio = rt_priority_for_task(attrs.policy, parent.task_priority);
+                let rt_policy = if attrs.policy == SCHED_FIFO {
+                    task::RtPolicy::Fifo
                 } else {
-                    1
-                },
-                rt_policy: task::RtPolicy::Fifo,
-            },
-            SCHED_RR => task::InitialTaskSched {
-                priority: if (1..=99).contains(&parent.task_priority) {
-                    parent.task_priority
-                } else {
-                    1
-                },
-                rt_policy: task::RtPolicy::RoundRobin,
-            },
+                    task::RtPolicy::RoundRobin
+                };
+                task::InitialTaskSched {
+                    priority: if rt_prio != 0 {
+                        rt_prio as isize
+                    } else {
+                        RT_PRIORITY_MIN
+                    },
+                    rt_policy,
+                }
+            }
             SCHED_IDLE => task::InitialTaskSched {
                 priority: IDLE_TASK_PRIORITY,
                 rt_policy: task::RtPolicy::RoundRobin,
@@ -128,18 +139,13 @@ impl ChildThreadSched {
                 rt_policy: task::RtPolicy::RoundRobin,
             },
             SCHED_NORMAL | SCHED_BATCH | _ => task::InitialTaskSched {
-                priority: nice as isize - 100,
+                priority: attrs.nice as isize - 100,
                 rt_policy: task::RtPolicy::RoundRobin,
             },
         };
 
         Self {
-            policy,
-            flags,
-            nice,
-            runtime,
-            deadline,
-            period,
+            attrs,
             initial_task_sched,
         }
     }
@@ -231,6 +237,18 @@ impl Thread {
         })
     }
 
+    /// Snapshots this thread's Linux scheduling attributes atomically per field.
+    pub fn sched_attrs_snapshot(&self) -> ThreadSchedAttrs {
+        ThreadSchedAttrs {
+            policy: self.sched_policy.load(Ordering::Acquire),
+            flags: self.sched_flags.load(Ordering::Acquire),
+            nice: self.sched_nice.load(Ordering::Acquire),
+            runtime: self.sched_runtime.load(Ordering::Acquire),
+            deadline: self.sched_deadline.load(Ordering::Acquire),
+            period: self.sched_period.load(Ordering::Acquire),
+        }
+    }
+
     /// Copies scheduler attributes when a child thread is created, applying
     /// `SCHED_FLAG_RESET_ON_FORK` semantics and returning the child's initial
     /// pre-enqueue task scheduling state.
@@ -240,20 +258,18 @@ impl Thread {
         parent_task_priority: isize,
     ) -> task::InitialTaskSched {
         let child = ChildThreadSched::from_parent(ThreadSchedSnapshot {
-            policy: parent.sched_policy.load(Ordering::Acquire),
-            flags: parent.sched_flags.load(Ordering::Acquire),
-            nice: parent.sched_nice.load(Ordering::Acquire),
-            runtime: parent.sched_runtime.load(Ordering::Acquire),
-            deadline: parent.sched_deadline.load(Ordering::Acquire),
-            period: parent.sched_period.load(Ordering::Acquire),
+            attrs: parent.sched_attrs_snapshot(),
             task_priority: parent_task_priority,
         });
-        self.sched_policy.store(child.policy, Ordering::Release);
-        self.sched_flags.store(child.flags, Ordering::Release);
-        self.sched_nice.store(child.nice, Ordering::Release);
-        self.sched_runtime.store(child.runtime, Ordering::Release);
-        self.sched_deadline.store(child.deadline, Ordering::Release);
-        self.sched_period.store(child.period, Ordering::Release);
+        self.sched_policy.store(child.attrs.policy, Ordering::Release);
+        self.sched_flags.store(child.attrs.flags, Ordering::Release);
+        self.sched_nice.store(child.attrs.nice, Ordering::Release);
+        self.sched_runtime
+            .store(child.attrs.runtime, Ordering::Release);
+        self.sched_deadline
+            .store(child.attrs.deadline, Ordering::Release);
+        self.sched_period
+            .store(child.attrs.period, Ordering::Release);
         child.initial_task_sched
     }
 
