@@ -245,6 +245,46 @@ fn test_bounded_queue_fifo_and_drain() {
 }
 
 #[test]
+fn bounded_queue_drain_batch_preserves_generation_and_remaining_fifo() {
+    use pulse_bpf_schema::*;
+
+    let queue = BoundedTraceQueue::<8>::new();
+    queue
+        .enqueue_with_generation(TracepointId::TaskWake, &[1], 11)
+        .unwrap();
+    queue
+        .enqueue_with_generation(TracepointId::TaskWake, &[2], 12)
+        .unwrap();
+    queue
+        .enqueue_with_generation(TracepointId::TaskWake, &[3], 13)
+        .unwrap();
+
+    let mut first_batch = Vec::new();
+    assert_eq!(
+        queue.drain_with_generation(2, |id, bytes, generation| {
+            first_batch.push((id, bytes[0], generation));
+        }),
+        2
+    );
+    assert_eq!(
+        first_batch,
+        vec![
+            (TracepointId::TaskWake, 1, 11),
+            (TracepointId::TaskWake, 2, 12),
+        ]
+    );
+
+    let mut remaining = Vec::new();
+    assert_eq!(
+        queue.drain_with_generation(8, |id, bytes, generation| {
+            remaining.push((id, bytes[0], generation));
+        }),
+        1
+    );
+    assert_eq!(remaining, vec![(TracepointId::TaskWake, 3, 13)]);
+}
+
+#[test]
 fn test_bounded_queue_overflow_drop_accounting() {
     use pulse_bpf_schema::*;
 

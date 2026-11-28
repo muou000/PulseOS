@@ -5,7 +5,12 @@ pub use pulse_bpf_schema::*;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::{TaskInner, WaitContext, WakeContext};
 
-pub const TRACE_QUEUE_CAPACITY: usize = 128;
+/// Per-CPU handoff capacity for semantic tracepoint records.
+///
+/// The queue runs on the scheduler hot path, so it stays bounded and
+/// allocation-free. A 256-record window absorbs one worker interval of
+/// scheduler contention while keeping the producer contract unchanged.
+pub const TRACE_QUEUE_CAPACITY: usize = 256;
 pub const MAX_CPUS: usize = config::plat::MAX_CPU_NUM;
 
 static SUBSCRIBER_MASK: AtomicU32 = AtomicU32::new(0);
