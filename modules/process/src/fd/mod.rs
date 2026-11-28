@@ -104,6 +104,14 @@ pub trait FdObject: Send + Sync {
 
     fn poll(&self) -> LinuxResult<PollState>;
 
+    fn poll_without_network(&self) -> LinuxResult<PollState> {
+        self.poll()
+    }
+
+    fn needs_network_poll(&self) -> bool {
+        false
+    }
+
     /// Waits until this object is likely ready for `events`.
     ///
     /// Returns:
@@ -168,6 +176,14 @@ pub trait FdObject: Send + Sync {
         self.poll()
     }
 
+    fn poll_without_network_with_context(
+        &self,
+        _process: &crate::Process,
+        _thread: Option<&crate::Thread>,
+    ) -> LinuxResult<PollState> {
+        self.poll_without_network()
+    }
+
     /// Registers a poll waker using an explicit submitting `process` and `thread` context.
     fn register_poll_with_context(
         self: Arc<Self>,
@@ -201,6 +217,21 @@ pub trait FdObject: Send + Sync {
         thread: Option<&crate::Thread>,
     ) -> LinuxResult<io_uring_core::poll::PollReadiness> {
         let state = self.poll_with_context(process, thread)?;
+        Ok(io_uring_core::poll::PollReadiness {
+            readable: state.readable,
+            writable: state.writable,
+            rdhup: self.is_rdhup(),
+            hup: self.poll_hup(),
+            err: self.poll_err(),
+        })
+    }
+
+    fn poll_readiness_without_network_with_context(
+        &self,
+        process: &crate::Process,
+        thread: Option<&crate::Thread>,
+    ) -> LinuxResult<io_uring_core::poll::PollReadiness> {
+        let state = self.poll_without_network_with_context(process, thread)?;
         Ok(io_uring_core::poll::PollReadiness {
             readable: state.readable,
             writable: state.writable,

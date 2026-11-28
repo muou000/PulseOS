@@ -71,6 +71,40 @@ pub static NET_WAIT_QUEUE: task::WaitQueue = task::WaitQueue::new();
 // successful stack poll cannot wake the poller into a self-sustaining loop.
 static NET_POLL_WAIT_QUEUE: task::WaitQueue = task::WaitQueue::new();
 static NET_POLL_EPOCH: AtomicU64 = AtomicU64::new(0);
+static READINESS_INTERFACE_POLLS: AtomicU64 = AtomicU64::new(0);
+static READINESS_SOCKET_VISITS: AtomicU64 = AtomicU64::new(0);
+static READINESS_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReadinessStats {
+    pub interface_polls: u64,
+    pub socket_visits: u64,
+    pub wakeups: u64,
+}
+
+pub fn readiness_stats_snapshot() -> ReadinessStats {
+    ReadinessStats {
+        interface_polls: READINESS_INTERFACE_POLLS.load(Ordering::Relaxed),
+        socket_visits: READINESS_SOCKET_VISITS.load(Ordering::Relaxed),
+        wakeups: READINESS_WAKEUPS.load(Ordering::Relaxed),
+    }
+}
+
+pub fn readiness_stats_delta(before: ReadinessStats, after: ReadinessStats) -> ReadinessStats {
+    ReadinessStats {
+        interface_polls: after.interface_polls.saturating_sub(before.interface_polls),
+        socket_visits: after.socket_visits.saturating_sub(before.socket_visits),
+        wakeups: after.wakeups.saturating_sub(before.wakeups),
+    }
+}
+
+pub fn record_socket_readiness_visit() {
+    READINESS_SOCKET_VISITS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_readiness_interface_poll() {
+    READINESS_INTERFACE_POLLS.fetch_add(1, Ordering::Relaxed);
+}
 
 pub(crate) struct SocketWaitQueues {
     read: task::WaitQueue,
@@ -96,16 +130,24 @@ impl SocketWaitQueues {
         }
     }
 
-    fn notify(&self, events: IoEvents) {
+    fn notify(&self, events: IoEvents) -> usize {
+        let mut wakeups = 0;
         if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
-            self.read.notify_all(true);
+            wakeups += self
+                .read
+                .notify_all_with_context_count(true, task::WakeContext::unknown());
         }
         if events.intersects(IoEvents::OUT) {
-            self.write.notify_all(true);
+            wakeups += self
+                .write
+                .notify_all_with_context_count(true, task::WakeContext::unknown());
         }
         if !events.is_empty() {
-            self.any.notify_all(true);
+            wakeups += self
+                .any
+                .notify_all_with_context_count(true, task::WakeContext::unknown());
         }
+        wakeups
     }
 
     fn register(&self, context: &mut core::task::Context<'_>, events: IoEvents) {
@@ -406,7 +448,7 @@ impl<'a> SocketSetWrapper<'a> {
                 .collect()
         };
         for (queues, events) in ready_wait_queues {
-            queues.notify(events);
+            READINESS_WAKEUPS.fetch_add(queues.notify(events) as u64, Ordering::Relaxed);
         }
         if readiness_may_have_changed {
             NET_WAIT_QUEUE.notify_all(true);

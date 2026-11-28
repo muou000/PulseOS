@@ -10,6 +10,7 @@ use linux_raw_sys::general::{
     epoll_event, EPOLLERR, EPOLLHUP, EPOLLIN, EPOLLOUT, EPOLL_CLOEXEC, EPOLL_CTL_ADD,
     EPOLL_CTL_DEL, EPOLL_CTL_MOD, EPOLLET, EPOLLONESHOT, EPOLLRDHUP,
 };
+use net;
 use process::fd::{
     EpollObject, EpollRegistration, EventFdObject, FdEntry, FdFlags, FdObject, PidfdObject,
     PipeObject, PollRegistration, SignalFdObject, StdinObject, StdoutObject, TimerFdObject,
@@ -178,6 +179,19 @@ struct EpollFuture {
     epoll: Arc<dyn FdObject>,
     maxevents: usize,
     registrations: Vec<PollRegistration>,
+    network_polled: bool,
+    stats_before: net::ReadinessStats,
+}
+
+impl Drop for EpollFuture {
+    fn drop(&mut self) {
+        let stats_after = net::readiness_stats_snapshot();
+        let stats = net::readiness_stats_delta(self.stats_before, stats_after);
+        kernel_log::debug!(
+            "readiness_stats interface_polls={} socket_visits={} wakeups={}",
+            stats.interface_polls, stats.socket_visits, stats.wakeups,
+        );
+    }
 }
 
 impl Future for EpollFuture {
@@ -186,6 +200,11 @@ impl Future for EpollFuture {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.as_mut().get_mut();
         this.registrations.clear();
+        if !this.network_polled && this.epoll.needs_network_poll() {
+            net::record_readiness_interface_poll();
+            net::poll_interfaces();
+        }
+        this.network_polled = true;
         let epoll = this.epoll.clone();
         let Some(epoll_obj) = epoll.as_any().downcast_ref::<EpollObject>() else {
             return Poll::Ready(Err(LinuxError::EINVAL));
@@ -213,7 +232,7 @@ impl Future for EpollFuture {
                         }
                     }
                     Ok(entry) => {
-                        match entry.object.poll() {
+                        match entry.object.poll_without_network() {
                             Ok(state) => {
                                 let mut revents = 0u32;
                                 let sequence = entry.object.poll_event_sequence();
@@ -405,6 +424,8 @@ fn sys_epoll_pwait_inner(
         epoll: epoll_entry.object.clone(),
         maxevents,
         registrations: Vec::new(),
+        network_polled: false,
+        stats_before: net::readiness_stats_snapshot(),
     };
 
     match task::future::block_on(task::future::timeout_at(deadline, future)) {

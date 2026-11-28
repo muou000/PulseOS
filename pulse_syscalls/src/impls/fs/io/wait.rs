@@ -4,6 +4,7 @@ use core::time::Duration;
 use axerrno::LinuxError;
 use linux_raw_sys::general::{POLLERR, POLLNVAL, pollfd};
 use process::{fd::FdObject, Thread};
+use net;
 
 use super::requested_poll_revents;
 use crate::impls::fs::common::get_fd_objects;
@@ -27,7 +28,7 @@ pub(super) fn snapshot_poll_objects(
 }
 
 fn object_revents(object: &PollObject, events: i16) -> i16 {
-    match object.poll() {
+    match object.poll_without_network() {
         Ok(state) => requested_poll_revents(events, state),
         Err(_) => POLLERR as i16,
     }
@@ -239,11 +240,29 @@ pub(super) fn wait_for_readiness(
     objects: &[Option<PollObject>],
     deadline: Option<hal::time::TimeValue>,
 ) -> ReadinessWaitResult {
+    let stats_before = net::readiness_stats_snapshot();
+    if objects.iter().flatten().any(|object| object.needs_network_poll()) {
+        net::record_readiness_interface_poll();
+        net::poll_interfaces();
+    }
     let ready = readiness_scan_once(pollfds, objects);
     if ready > 0 {
+        let stats_after = net::readiness_stats_snapshot();
+        let stats = net::readiness_stats_delta(stats_before, stats_after);
+        kernel_log::debug!(
+            "readiness_stats interface_polls={} socket_visits={} wakeups={}",
+            stats.interface_polls, stats.socket_visits, stats.wakeups,
+        );
         return ReadinessWaitResult::Ready(ready);
     }
 
-    wait_event_driven(thread, pollfds, objects, deadline)
-        .unwrap_or_else(|| wait_fallback(thread, pollfds, objects, deadline))
+    let result = wait_event_driven(thread, pollfds, objects, deadline)
+        .unwrap_or_else(|| wait_fallback(thread, pollfds, objects, deadline));
+    let stats_after = net::readiness_stats_snapshot();
+    let stats = net::readiness_stats_delta(stats_before, stats_after);
+    kernel_log::debug!(
+        "readiness_stats interface_polls={} socket_visits={} wakeups={}",
+        stats.interface_polls, stats.socket_visits, stats.wakeups,
+    );
+    result
 }
