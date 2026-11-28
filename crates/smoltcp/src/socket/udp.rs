@@ -316,6 +316,20 @@ impl<'a> Socket<'a> {
         self.tx_buffer.payload_capacity()
     }
 
+    /// Replace both packet queues before any packet has been queued.
+    pub fn replace_buffers(
+        &mut self,
+        rx_buffer: PacketBuffer<'a>,
+        tx_buffer: PacketBuffer<'a>,
+    ) -> Result<(), ()> {
+        if !self.rx_buffer.is_empty() || !self.tx_buffer.is_empty() {
+            return Err(());
+        }
+        self.rx_buffer = rx_buffer;
+        self.tx_buffer = tx_buffer;
+        Ok(())
+    }
+
     /// Enqueue a packet to be sent to a given remote endpoint, and return a pointer
     /// to its payload.
     ///

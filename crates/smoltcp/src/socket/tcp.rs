@@ -1135,6 +1135,29 @@ impl<'a> Socket<'a> {
         self.tx_buffer.capacity()
     }
 
+    /// Replace both queues while preserving queued bytes.
+    pub fn replace_buffers(
+        &mut self,
+        rx_buffer: SocketBuffer<'a>,
+        tx_buffer: SocketBuffer<'a>,
+    ) -> Result<(), ()> {
+        let rx_capacity = rx_buffer.capacity();
+        if rx_capacity > (1 << 30)
+            || rx_capacity < self.rx_buffer.len()
+            || tx_buffer.capacity() < self.tx_buffer.len()
+        {
+            return Err(());
+        }
+        self.rx_buffer.replace(rx_buffer)?;
+        self.tx_buffer.replace(tx_buffer)?;
+        if matches!(self.state, State::Closed | State::Listen) {
+            let rx_cap_log2 = mem::size_of::<usize>() * 8
+                - self.rx_buffer.capacity().leading_zeros() as usize;
+            self.remote_win_shift = rx_cap_log2.saturating_sub(16) as u8;
+        }
+        Ok(())
+    }
+
     /// Check whether the receive half of the full-duplex connection buffer is open
     /// (see [may_recv](#method.may_recv)), and the receive buffer is not empty.
     #[inline]

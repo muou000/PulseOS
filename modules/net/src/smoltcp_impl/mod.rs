@@ -53,10 +53,14 @@ const DNS_SEVER: &str = "8.8.8.8";
 
 const RANDOM_SEED: u64 = 0xA2CE_05A2_CE05_A2CE;
 const STANDARD_MTU: usize = 1500;
+const TCP_IDLE_BUF_LEN: usize = 16 * 1024;
 const TCP_RX_BUF_LEN: usize = 256 * 1024;
 const TCP_TX_BUF_LEN: usize = 256 * 1024;
+const UDP_IDLE_BUF_LEN: usize = 16 * 1024;
 const UDP_RX_BUF_LEN: usize = 4 * 1024 * 1024;
 const UDP_TX_BUF_LEN: usize = 4 * 1024 * 1024;
+const UDP_IDLE_PACKET_QUEUE_LEN: usize = 16;
+const UDP_PACKET_QUEUE_LEN: usize = 4096;
 const ICMP_RX_BUF_LEN: usize = 64 * 1024;
 const ICMP_TX_BUF_LEN: usize = 64 * 1024;
 const ICMP_PACKET_QUEUE_LEN: usize = 64;
@@ -231,21 +235,73 @@ impl<'a> SocketSetWrapper<'a> {
     }
 
     pub fn new_tcp_socket() -> socket::tcp::Socket<'a> {
-        let tcp_rx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]);
-        let tcp_tx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]);
+        let tcp_rx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_IDLE_BUF_LEN]);
+        let tcp_tx_buffer = socket::tcp::SocketBuffer::new(vec![0; TCP_IDLE_BUF_LEN]);
         socket::tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer)
+    }
+
+    fn active_tcp_buffers(
+    ) -> AxResult<(
+        socket::tcp::SocketBuffer<'a>,
+        socket::tcp::SocketBuffer<'a>,
+    )> {
+        Ok((
+            socket::tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]),
+            socket::tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]),
+        ))
+    }
+
+    pub fn grow_tcp_socket(&self, handle: SocketHandle) -> AxResult {
+        self.with_socket_mut::<socket::tcp::Socket, _, _>(handle, |socket| {
+            if socket.recv_capacity() >= TCP_RX_BUF_LEN {
+                return Ok(());
+            }
+            let (rx_buffer, tx_buffer) = Self::active_tcp_buffers()?;
+            socket
+                .replace_buffers(rx_buffer, tx_buffer)
+                .map_err(|_| AxError::WouldBlock)
+        })
     }
 
     pub fn new_udp_socket() -> socket::udp::Socket<'a> {
         let udp_rx_buffer = socket::udp::PacketBuffer::new(
-            vec![socket::udp::PacketMetadata::EMPTY; 4096],
-            vec![0; UDP_RX_BUF_LEN],
+            vec![socket::udp::PacketMetadata::EMPTY; UDP_IDLE_PACKET_QUEUE_LEN],
+            vec![0; UDP_IDLE_BUF_LEN],
         );
         let udp_tx_buffer = socket::udp::PacketBuffer::new(
-            vec![socket::udp::PacketMetadata::EMPTY; 4096],
-            vec![0; UDP_TX_BUF_LEN],
+            vec![socket::udp::PacketMetadata::EMPTY; UDP_IDLE_PACKET_QUEUE_LEN],
+            vec![0; UDP_IDLE_BUF_LEN],
         );
         socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer)
+    }
+
+    fn active_udp_buffers(
+    ) -> AxResult<(
+        socket::udp::PacketBuffer<'a>,
+        socket::udp::PacketBuffer<'a>,
+    )> {
+        Ok((
+            socket::udp::PacketBuffer::new(
+                vec![socket::udp::PacketMetadata::EMPTY; UDP_PACKET_QUEUE_LEN],
+                vec![0; UDP_RX_BUF_LEN],
+            ),
+            socket::udp::PacketBuffer::new(
+                vec![socket::udp::PacketMetadata::EMPTY; UDP_PACKET_QUEUE_LEN],
+                vec![0; UDP_TX_BUF_LEN],
+            ),
+        ))
+    }
+
+    pub fn grow_udp_socket(&self, handle: SocketHandle) -> AxResult {
+        self.with_socket_mut::<socket::udp::Socket, _, _>(handle, |socket| {
+            if socket.payload_recv_capacity() >= UDP_RX_BUF_LEN {
+                return Ok(());
+            }
+            let (rx_buffer, tx_buffer) = Self::active_udp_buffers()?;
+            socket
+                .replace_buffers(rx_buffer, tx_buffer)
+                .map_err(|_| AxError::WouldBlock)
+        })
     }
 
     pub fn new_icmp_socket() -> socket::icmp::Socket<'a> {

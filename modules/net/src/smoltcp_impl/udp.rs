@@ -219,6 +219,8 @@ impl UdpSocket {
             SOCKET_SET.bind_check(local_endpoint.addr, local_endpoint.port, Some(self.handle))?;
         }
 
+        SOCKET_SET.grow_udp_socket(self.handle)?;
+
         SOCKET_SET.with_socket_mut::<udp::Socket, _, _>(self.handle, |socket| {
             socket.bind(endpoint).or_else(|e| match e {
                 BindError::InvalidState => ax_err!(AlreadyExists, "socket bind() failed"),

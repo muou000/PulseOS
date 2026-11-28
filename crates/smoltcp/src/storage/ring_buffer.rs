@@ -56,6 +56,33 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
         self.storage.len()
     }
 
+    /// Replace the backing storage while preserving queued elements.
+    pub fn replace(&mut self, mut replacement: RingBuffer<'a, T>) -> Result<(), ()>
+    where
+        T: Copy,
+    {
+        if replacement.capacity() < self.len() {
+            return Err(());
+        }
+        let old_len = self.len();
+        let mut offset = 0;
+        while offset < old_len {
+            let chunk = self.get_allocated(offset, old_len - offset);
+            if chunk.is_empty() {
+                return Err(());
+            }
+            let copied = replacement.enqueue_slice(chunk);
+            if copied != chunk.len() {
+                return Err(());
+            }
+            offset += copied;
+        }
+        self.storage = replacement.storage;
+        self.read_at = 0;
+        self.length = old_len;
+        Ok(())
+    }
+
     /// Clear the ring buffer, and reset every element.
     pub fn reset(&mut self)
     where
@@ -799,5 +826,20 @@ mod test {
 
         let large = ring.enqueue_many(8);
         assert_eq!(large.len(), 8);
+    }
+
+    #[test]
+    fn test_buffer_replace_preserves_wrapped_data() {
+        let mut ring = RingBuffer::new(vec![0; 4]);
+        ring.enqueue_slice(&[1, 2, 3]);
+        let mut discarded = [0; 2];
+        ring.dequeue_slice(&mut discarded);
+        ring.enqueue_slice(&[4, 5]);
+
+        ring.replace(RingBuffer::new(vec![0; 8])).unwrap();
+
+        let mut output = [0; 3];
+        assert_eq!(ring.dequeue_slice(&mut output), 3);
+        assert_eq!(output, [3, 4, 5]);
     }
 }

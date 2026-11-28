@@ -218,6 +218,7 @@ impl TcpSocket {
     fn begin_connect_common(&self, remote_addr: SocketAddr) -> AxResult<()> {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             let handle = self.handle;
+            SOCKET_SET.grow_tcp_socket(handle)?;
 
             let remote_endpoint = from_core_sockaddr(remote_addr);
             let mut bound_endpoint = self.bound_endpoint()?;
@@ -446,6 +447,10 @@ impl TcpSocket {
     fn accept_once_locked(&self, local_port: u16) -> AxResult<TcpSocket> {
         match LISTEN_TABLE.accept(local_port) {
             Ok((handle, (local_addr, peer_addr))) => {
+                if let Err(error) = SOCKET_SET.grow_tcp_socket(handle) {
+                    SOCKET_SET.remove_and_unregister(handle);
+                    return Err(error);
+                }
                 debug!("TCP socket accepted a new connection {}", peer_addr);
                 let wait_queues = Arc::new(SocketWaitQueues::new());
                 register_wait_queue(handle, wait_queues.clone());
