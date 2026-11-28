@@ -76,11 +76,19 @@ fn system_counts(text: &str) -> Result<(u64, u64)> {
         number(header, "trace_subscriptions").ok_or("missing trace subscription diagnostics")?,
     ))
 }
+fn global_number(text: &str, key: &str) -> Option<u64> {
+    text.lines()
+        .find(|line| line.starts_with("GLOBAL "))
+        .and_then(|line| number(line, key))
+}
 fn delta(before: Option<&str>, after: Option<&str>, key: &str) -> Option<u64> {
     before
         .and_then(|line| number(line, key))
         .zip(after.and_then(|line| number(line, key)))
         .and_then(|(before, after)| after.checked_sub(before))
+}
+fn snapshot_value(after: Option<&str>, key: &str) -> Option<u64> {
+    after.and_then(|line| number(line, key))
 }
 
 #[derive(Default)]
@@ -511,6 +519,9 @@ impl Session {
                 }
             }
         }
+        // Detach immediately after disabling so no new tracepoint records can
+        // enter the handoff queues while the final drain barrier is observed.
+        let detached = self.detach_sources(errors);
         let start = errors.observe(sys::now());
         // The poll bound also prevents an unbounded retry if the clock itself
         // is broken. It is not presented as measured elapsed time.
@@ -526,8 +537,14 @@ impl Session {
                         None => ready = false,
                     }
                 }
+                let trace_queue_state = global_number(&stats, "trace_queued");
+                // The handoff queue is part of the stop barrier. A snapshot
+                // without its occupancy field cannot prove that accepted
+                // tracepoint records have reached the consumer.
+                ready &= trace_queue_state == Some(0);
+                ready &= detached;
                 if ready {
-                    log("QUIESCENT inflight=0");
+                    log("QUIESCENT inflight=0 trace_queued=0");
                     return true;
                 }
             }
@@ -636,12 +653,14 @@ impl Session {
         }
         Ok(true)
     }
-    fn detach_sources(&self, errors: &mut ControlErrors) {
+    fn detach_sources(&self, errors: &mut ControlErrors) -> bool {
+        let mut detached = true;
         for source in self.sources.iter().rev() {
             if let Some(link) = source.link {
-                errors.observe(self.fd(link).detach_link());
+                detached &= errors.observe(self.fd(link).detach_link()).is_some();
             }
         }
+        detached
     }
 }
 impl Drop for Session {
@@ -710,6 +729,7 @@ fn diagnostics(
         "timer_full",
         "timer_busy",
         "trace_enqueued",
+        "trace_dequeued",
         "trace_full",
         "trace_recursive",
         "fault_started",
@@ -725,6 +745,18 @@ fn diagnostics(
                 "fault_clock_errors" => CounterKind::Error,
                 _ => CounterKind::Activity,
             },
+        });
+    }
+    for (name, kind) in [
+        ("trace_queued", CounterKind::Activity),
+        ("trace_high_water", CounterKind::Activity),
+        ("trace_queue_capacity", CounterKind::Activity),
+    ] {
+        d.counters.push(DiagnosticCounter {
+            name: name.into(),
+            scope: "system".into(),
+            value: snapshot_value(after_global, name),
+            kind,
         });
     }
     d.counters.push(DiagnosticCounter {
@@ -1057,12 +1089,6 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
         }
     }
     let quiescent = session.disable(&mut control_errors);
-    if !quiescent {
-        // A failed disable must not leave an attached producer running during
-        // potentially slow file serialization. Detach blocks new invocations;
-        // already accepted VM work remains explicitly unproven, so do not drain.
-        session.detach_sources(&mut control_errors);
-    }
     if quiescent {
         if let Err(error) = session.drain(&mut writer, &mut records, &mut lost, usize::MAX) {
             capture_error = Some(error);

@@ -5,7 +5,12 @@ pub use pulse_bpf_schema::*;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::{TaskInner, WaitContext, WakeContext};
 
-pub const TRACE_QUEUE_CAPACITY: usize = 128;
+/// Per-CPU handoff capacity for semantic tracepoint records.
+///
+/// The queue runs on the scheduler hot path, so it stays bounded and
+/// allocation-free. A 512-record window absorbs short scheduler contention
+/// bursts while keeping the producer contract unchanged.
+pub const TRACE_QUEUE_CAPACITY: usize = 512;
 pub const MAX_CPUS: usize = config::plat::MAX_CPU_NUM;
 
 static SUBSCRIBER_MASK: AtomicU32 = AtomicU32::new(0);
@@ -49,6 +54,24 @@ pub fn total_drop_stats() -> DropStats {
         total.dropped_full += s.dropped_full;
         total.dropped_recursive += s.dropped_recursive;
         total.total_enqueued += s.total_enqueued;
+    }
+    total
+}
+
+/// Query aggregate producer and consumer progress across all CPU queues.
+///
+/// `high_water` is the sum of each CPU queue's independent peak occupancy, so
+/// it has the same per-CPU capacity basis as the aggregate queue capacity.
+pub fn total_queue_stats() -> TraceQueueStats {
+    let mut total = TraceQueueStats::default();
+    for q in &CPU_QUEUES {
+        let stats = q.queue_stats();
+        total.dropped_full += stats.dropped_full;
+        total.dropped_recursive += stats.dropped_recursive;
+        total.total_enqueued += stats.total_enqueued;
+        total.total_dequeued += stats.total_dequeued;
+        total.queued += stats.queued;
+        total.high_water += stats.high_water;
     }
     total
 }

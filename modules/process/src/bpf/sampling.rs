@@ -39,6 +39,9 @@ mod runtime {
 
     use super::SamplingQueueStats;
 
+    /// Drain enough records per CPU to keep the bounded trace queues below
+    /// their producer-side burst window during one worker round.
+    const TRACE_DRAIN_BATCH: usize = 256;
     const DRAIN_PER_ROUND: usize = SampleQueue::CAPACITY;
 
     struct CpuStats {
@@ -160,7 +163,7 @@ mod runtime {
     fn drain_once() {
         // Copy contexts while task holds its short drain guard, then release
         // that guard before any interpreter allocation, helper or notification.
-        let mut records = [pulse_bpf_schema::EventRecord::empty(); 16];
+        let mut records = [pulse_bpf_schema::EventRecord::empty(); TRACE_DRAIN_BATCH];
         for cpu in 0..CPU_STATS.len() {
             let count = task::bpf_trace::drain_cpu_records(cpu, &mut records);
             for record in &records[..count] {

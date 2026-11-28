@@ -245,6 +245,59 @@ fn test_bounded_queue_fifo_and_drain() {
 }
 
 #[test]
+fn bounded_queue_drain_batch_preserves_generation_and_remaining_fifo() {
+    use pulse_bpf_schema::*;
+
+    let queue = BoundedTraceQueue::<8>::new();
+    queue
+        .enqueue_with_generation(TracepointId::TaskWake, &[1], 11)
+        .unwrap();
+    queue
+        .enqueue_with_generation(TracepointId::TaskWake, &[2], 12)
+        .unwrap();
+    queue
+        .enqueue_with_generation(TracepointId::TaskWake, &[3], 13)
+        .unwrap();
+
+    let initial_stats = queue.queue_stats();
+    assert_eq!(initial_stats.queued, 3);
+    assert_eq!(initial_stats.high_water, 3);
+    assert_eq!(initial_stats.total_dequeued, 0);
+
+    let mut first_batch = Vec::new();
+    assert_eq!(
+        queue.drain_with_generation(2, |id, bytes, generation| {
+            first_batch.push((id, bytes[0], generation));
+        }),
+        2
+    );
+    assert_eq!(
+        first_batch,
+        vec![
+            (TracepointId::TaskWake, 1, 11),
+            (TracepointId::TaskWake, 2, 12),
+        ]
+    );
+    let partial_stats = queue.queue_stats();
+    assert_eq!(partial_stats.total_dequeued, 2);
+    assert_eq!(partial_stats.queued, 1);
+    assert_eq!(partial_stats.high_water, 3);
+
+    let mut remaining = Vec::new();
+    assert_eq!(
+        queue.drain_with_generation(8, |id, bytes, generation| {
+            remaining.push((id, bytes[0], generation));
+        }),
+        1
+    );
+    assert_eq!(remaining, vec![(TracepointId::TaskWake, 3, 13)]);
+    let final_stats = queue.queue_stats();
+    assert_eq!(final_stats.total_dequeued, 3);
+    assert_eq!(final_stats.queued, 0);
+    assert_eq!(final_stats.high_water, 3);
+}
+
+#[test]
 fn test_bounded_queue_overflow_drop_accounting() {
     use pulse_bpf_schema::*;
 
@@ -314,6 +367,11 @@ fn test_bounded_queue_reentrancy_rejection() {
     // Test stats reset
     queue.reset_drop_stats();
     assert_eq!(queue.drop_stats(), DropStats::default());
+    let reset_stats = queue.queue_stats();
+    assert_eq!(reset_stats.total_enqueued, 0);
+    assert_eq!(reset_stats.total_dequeued, 0);
+    assert_eq!(reset_stats.queued, 1);
+    assert_eq!(reset_stats.high_water, 1);
 }
 
 #[test]
