@@ -214,6 +214,10 @@ impl Thread {
             .expect("Thread::process: process has been dropped")
     }
 
+    pub fn try_process(&self) -> Option<Arc<Process>> {
+        self.process_weak.upgrade()
+    }
+
     pub fn process_arc(&self) -> Arc<Process> {
         self.process_weak
             .upgrade()
