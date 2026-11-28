@@ -521,7 +521,7 @@ impl Session {
         }
         // Detach immediately after disabling so no new tracepoint records can
         // enter the handoff queues while the final drain barrier is observed.
-        self.detach_sources(errors);
+        let detached = self.detach_sources(errors);
         let start = errors.observe(sys::now());
         // The poll bound also prevents an unbounded retry if the clock itself
         // is broken. It is not presented as measured elapsed time.
@@ -541,6 +541,7 @@ impl Session {
                 if let Some(queued) = trace_queue_state {
                     ready &= queued == 0;
                 }
+                ready &= detached;
                 if ready {
                     if trace_queue_state.is_some() {
                         log("QUIESCENT inflight=0 trace_queued=0");
@@ -655,12 +656,14 @@ impl Session {
         }
         Ok(true)
     }
-    fn detach_sources(&self, errors: &mut ControlErrors) {
+    fn detach_sources(&self, errors: &mut ControlErrors) -> bool {
+        let mut detached = true;
         for source in self.sources.iter().rev() {
             if let Some(link) = source.link {
-                errors.observe(self.fd(link).detach_link());
+                detached &= errors.observe(self.fd(link).detach_link()).is_some();
             }
         }
+        detached
     }
 }
 impl Drop for Session {
