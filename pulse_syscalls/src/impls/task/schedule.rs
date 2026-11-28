@@ -1,47 +1,29 @@
 use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::Ordering;
 
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
-    CAP_SYS_NICE, PRIO_PGRP, PRIO_PROCESS, PRIO_USER, SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO,
-    SCHED_IDLE, SCHED_NORMAL, SCHED_RR, timespec,
+    CAP_SYS_NICE, PRIO_PGRP, PRIO_PROCESS, PRIO_USER, RLIMIT_NICE, RLIMIT_RTPRIO, timespec,
 };
 use process::{
     Process, Thread, current_process, current_thread, processes_snapshot, thread_by_tid_global,
 };
 
-use crate::impls::utils::{
-    alloc_zeroed_bytes, read_user_bytes, read_user_value, write_user_bytes, write_user_value,
+use crate::{
+    impls::utils::{
+        alloc_zeroed_bytes, read_user_bytes, read_user_value, write_user_bytes, write_user_value,
+    },
+    validation::schedule::{
+        CallerCreds, RT_PRIORITY_MAX, RT_PRIORITY_MIN, SCHED_ATTR_SIZE_VER0, SchedAttr,
+        SchedAttrSnapshot, SchedChangeRequest, SchedPolicy, TargetSchedSnapshot,
+        authorize_sched_change, check_zeroed_extension_bytes, decode_sched_setattr_size,
+        eevdf_priority_for_request, format_sched_attr_for_policy, is_same_sched_owner,
+        rlimit_permits_nice, sched_priority_max, sched_priority_min, validate_sched_getattr_args,
+        validate_sched_param_args, validate_sched_setattr, validate_sched_setattr_args,
+        validate_sched_setattr_policy_sign, validate_sched_setparam, validate_sched_setscheduler,
+        validate_sched_setscheduler_args,
+    },
 };
-
-const RT_PRIORITY_MIN: isize = 1;
-const RT_PRIORITY_MAX: isize = 99;
-const SCHED_ATTR_SIZE: u32 = core::mem::size_of::<SchedAttr>() as u32;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SchedAttr {
-    size: u32,
-    sched_policy: u32,
-    sched_flags: u64,
-    sched_nice: i32,
-    sched_priority: u32,
-    sched_runtime: u64,
-    sched_deadline: u64,
-    sched_period: u64,
-}
-
-pulse_user_abi::impl_user_abi_struct! {
-    for SchedAttr, size = 48 => {
-        size: u32,
-        sched_policy: u32,
-        sched_flags: u64,
-        sched_nice: i32,
-        sched_priority: u32,
-        sched_runtime: u64,
-        sched_deadline: u64,
-        sched_period: u64,
-    }
-}
 
 fn kernel_cpumask_bytes() -> usize {
     let usize_bits = core::mem::size_of::<usize>() * 8;
@@ -94,41 +76,95 @@ fn resolve_sched_target(pid: usize) -> Result<SchedTarget, LinuxError> {
     resolve_sched_target_with_negative(pid, LinuxError::EINVAL)
 }
 
-fn may_set_sched_target(target: &SchedTarget) -> Result<(), LinuxError> {
+fn caller_creds() -> Result<CallerCreds, LinuxError> {
     let caller = current_process()?;
-    let target_process = target.thread.try_process().ok_or(LinuxError::ESRCH)?;
-    if caller.has_capability(CAP_SYS_NICE) {
+    Ok(CallerCreds {
+        euid: caller.euid(),
+        has_cap_sys_nice: caller.has_capability(CAP_SYS_NICE),
+    })
+}
+
+fn may_set_sched_target(target: &SchedTarget) -> Result<(), LinuxError> {
+    let caller = caller_creds()?;
+    if caller.has_cap_sys_nice {
         return Ok(());
     }
-    let caller_euid = caller.euid();
-    if caller_euid != target_process.ruid() && caller_euid != target_process.euid() {
+    let target_process = target.thread.try_process().ok_or(LinuxError::ESRCH)?;
+    if !is_same_sched_owner(caller.euid, target_process.ruid(), target_process.euid()) {
         return Err(LinuxError::EPERM);
     }
     Ok(())
 }
 
-fn validate_rt_priority(policy: u32, priority: u32) -> Result<Option<isize>, LinuxError> {
-    match policy {
-        SCHED_FIFO | SCHED_RR => {
-            if (RT_PRIORITY_MIN as u32..=RT_PRIORITY_MAX as u32).contains(&priority) {
-                Ok(Some(priority as isize))
-            } else {
-                Err(LinuxError::EINVAL)
-            }
-        }
-        _ => Ok(None),
+fn target_rt_priority(target: &SchedTarget, policy: SchedPolicy) -> u32 {
+    let prio = target.task.priority();
+    if policy.is_rt() && (RT_PRIORITY_MIN..=RT_PRIORITY_MAX).contains(&prio) {
+        prio as u32
+    } else {
+        0
     }
 }
 
-fn apply_target_rt_policy(target: &SchedTarget, policy: u32) {
+fn snapshot_target_sched(target: &SchedTarget) -> Result<TargetSchedSnapshot, LinuxError> {
+    let target_proc = target.thread.try_process().ok_or(LinuxError::ESRCH)?;
+    let policy = SchedPolicy::from_u32(target.thread.sched_policy.load(Ordering::Acquire))?;
+    let nice = target.thread.sched_nice.load(Ordering::Acquire);
+    let rt_priority = target_rt_priority(target, policy);
+    let rlim_nice = target_proc
+        .get_rlimit(RLIMIT_NICE)
+        .map(|r| r.rlim_cur)
+        .unwrap_or(0);
+    let rlim_rtprio = target_proc
+        .get_rlimit(RLIMIT_RTPRIO)
+        .map(|r| r.rlim_cur)
+        .unwrap_or(0);
+    let (ruid, euid, _) = target_proc.uid_snapshot();
+    Ok(TargetSchedSnapshot {
+        policy,
+        rt_priority,
+        nice,
+        ruid,
+        euid,
+        rlim_nice,
+        rlim_rtprio,
+    })
+}
+
+fn apply_target_rt_policy(target: &SchedTarget, policy: SchedPolicy) {
     let Some(policy) = (match policy {
-        SCHED_FIFO => Some(task::RtPolicy::Fifo),
-        SCHED_RR => Some(task::RtPolicy::RoundRobin),
+        SchedPolicy::Fifo => Some(task::RtPolicy::Fifo),
+        SchedPolicy::Rr => Some(task::RtPolicy::RoundRobin),
         _ => None,
     }) else {
         return;
     };
     task::set_task_rt_policy(target.task.clone(), policy);
+}
+
+fn commit_sched_change(
+    target: &SchedTarget,
+    req: &SchedChangeRequest,
+    update_policy_and_meta: bool,
+) -> Result<(), LinuxError> {
+    let task_prio = eevdf_priority_for_request(req);
+    if !task::set_task_priority(target.task.clone(), task_prio) {
+        return Err(LinuxError::EINVAL);
+    }
+    if update_policy_and_meta {
+        apply_target_rt_policy(target, req.policy);
+        target
+            .thread
+            .sched_policy
+            .store(req.policy.as_u32(), Ordering::Release);
+        target.thread.sched_flags.store(req.flags, Ordering::Release);
+        if req.update_nice {
+            target.thread.sched_nice.store(req.nice, Ordering::Release);
+        }
+        target.thread.sched_runtime.store(req.runtime, Ordering::Release);
+        target.thread.sched_deadline.store(req.deadline, Ordering::Release);
+        target.thread.sched_period.store(req.period, Ordering::Release);
+    }
+    Ok(())
 }
 
 fn selected_priority_threads(
@@ -204,15 +240,15 @@ fn may_set_priority(caller: &Process, target: &Thread, nice: i32) -> Result<(), 
     }
 
     let target_process = target.process();
-    let caller_euid = caller.euid();
-    if caller_euid != target_process.ruid() && caller_euid != target_process.euid() {
+    if !is_same_sched_owner(caller.euid(), target_process.ruid(), target_process.euid()) {
         return Err(LinuxError::EPERM);
     }
-    if nice
-        < target
-            .sched_nice
-            .load(core::sync::atomic::Ordering::Acquire)
-    {
+    let current_nice = target.sched_nice.load(Ordering::Acquire);
+    let rlim_nice = target_process
+        .get_rlimit(RLIMIT_NICE)
+        .map(|r| r.rlim_cur)
+        .unwrap_or(0);
+    if nice < current_nice && !rlimit_permits_nice(rlim_nice, nice) {
         return Err(LinuxError::EACCES);
     }
     Ok(())
@@ -363,43 +399,73 @@ pub fn sys_sched_getscheduler(pid: usize) -> isize {
         Ok(target) => target,
         Err(e) => return -e.code() as isize,
     };
-    target
-        .thread
-        .sched_policy
-        .load(core::sync::atomic::Ordering::Relaxed) as isize
+    target.thread.sched_policy.load(Ordering::Acquire) as isize
+}
+
+fn for_each_extension_chunk(
+    attr_ptr: usize,
+    total_size: usize,
+    mut f: impl FnMut(usize, usize) -> Result<(), LinuxError>,
+) -> Result<(), LinuxError> {
+    let mut tail_addr = attr_ptr
+        .checked_add(SCHED_ATTR_SIZE_VER0 as usize)
+        .ok_or(LinuxError::EFAULT)?;
+    let mut remaining = total_size - SCHED_ATTR_SIZE_VER0 as usize;
+    while remaining > 0 {
+        let chunk = remaining.min(64);
+        f(tail_addr, chunk)?;
+        tail_addr = tail_addr.checked_add(chunk).ok_or(LinuxError::EFAULT)?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
+fn read_sched_attr_from_user(attr_ptr: usize) -> Result<SchedAttr, LinuxError> {
+    let raw_size: u32 = read_user_value(attr_ptr).map_err(|_| LinuxError::EFAULT)?;
+    let effective_size = match decode_sched_setattr_size(raw_size) {
+        Ok(size) => size,
+        Err(e) => {
+            let _ = write_user_value(attr_ptr, &SCHED_ATTR_SIZE_VER0);
+            return Err(e);
+        }
+    };
+    let user_attr: SchedAttr = read_user_value(attr_ptr).map_err(|_| LinuxError::EFAULT)?;
+    let mut buf = [0u8; 64];
+    for_each_extension_chunk(attr_ptr, effective_size, |addr, chunk| {
+        read_user_bytes(addr, &mut buf[..chunk]).map_err(|_| LinuxError::EFAULT)?;
+        if check_zeroed_extension_bytes(&buf[..chunk]).is_err() {
+            let _ = write_user_value(attr_ptr, &SCHED_ATTR_SIZE_VER0);
+            return Err(LinuxError::E2BIG);
+        }
+        Ok(())
+    })?;
+    Ok(user_attr)
+}
+
+fn do_sched_setparam(pid: usize, param_ptr: usize) -> Result<(), LinuxError> {
+    validate_sched_param_args(pid, param_ptr)?;
+    let sched_priority: i32 = read_user_value(param_ptr).map_err(|_| LinuxError::EFAULT)?;
+    let target = resolve_sched_target(pid)?;
+    let snap = snapshot_target_sched(&target)?;
+    let req = validate_sched_setparam(snap.policy, snap.nice, sched_priority)?;
+    authorize_sched_change(caller_creds()?, &snap, &req)?;
+    commit_sched_change(&target, &req, false)
 }
 
 pub fn sys_sched_setparam(pid: usize, param_ptr: usize) -> isize {
-    if let Err(e) = signed_sched_pid(pid, LinuxError::EINVAL) {
-        return -e.code() as isize;
-    }
-    if param_ptr == 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    let sched_priority: i32 = match read_user_value(param_ptr) {
-        Ok(priority) => priority,
-        Err(_) => return -LinuxError::EFAULT.code() as isize,
-    };
-    let target = match resolve_sched_target(pid) {
-        Ok(target) => target,
-        Err(e) => return -e.code() as isize,
-    };
-    if sched_priority < 0 || sched_priority > 99 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    if let Err(e) = may_set_sched_target(&target) {
-        return -e.code() as isize;
-    }
+    do_sched_setparam(pid, param_ptr)
+        .map(|_| 0)
+        .unwrap_or_else(|e| -e.code() as isize)
+}
 
-    let priority = if sched_priority > 0 {
-        sched_priority as isize
-    } else {
-        -100
-    };
-    if !task::set_task_priority(target.task, priority) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    0
+fn do_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> Result<(), LinuxError> {
+    validate_sched_setscheduler_args(pid, policy, param_ptr)?;
+    let sched_priority: i32 = read_user_value(param_ptr).map_err(|_| LinuxError::EFAULT)?;
+    let target = resolve_sched_target(pid)?;
+    let snap = snapshot_target_sched(&target)?;
+    let req = validate_sched_setscheduler(policy, sched_priority, snap.nice)?;
+    authorize_sched_change(caller_creds()?, &snap, &req)?;
+    commit_sched_change(&target, &req, true)
 }
 
 pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> isize {
@@ -409,91 +475,31 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
         policy,
         param_ptr
     );
-    if let Err(e) = signed_sched_pid(pid, LinuxError::EINVAL) {
-        return -e.code() as isize;
-    }
-    if (policy as i32) < 0 || param_ptr == 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    let sched_priority: i32 = match read_user_value(param_ptr) {
-        Ok(priority) => priority,
-        Err(_) => return -LinuxError::EFAULT.code() as isize,
-    };
-    let target = match resolve_sched_target(pid) {
-        Ok(target) => target,
-        Err(e) => return -e.code() as isize,
-    };
-    if !is_supported_policy(policy) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
+    do_sched_setscheduler(pid, policy, param_ptr)
+        .map(|_| 0)
+        .unwrap_or_else(|e| -e.code() as isize)
+}
 
-    let priority = if sched_priority >= 0 {
-        if let Ok(Some(priority)) = validate_rt_priority(policy as u32, sched_priority as u32) {
-            priority
-        } else if policy as u32 == SCHED_FIFO || policy as u32 == SCHED_RR {
-            return -LinuxError::EINVAL.code() as isize;
-        } else if sched_priority != 0 {
-            return -LinuxError::EINVAL.code() as isize;
-        } else {
-            -100
-        }
-    } else {
-        if policy as u32 == SCHED_FIFO || policy as u32 == SCHED_RR || sched_priority != 0 {
-            return -LinuxError::EINVAL.code() as isize;
-        }
-        -100
-    };
-    if let Err(e) = may_set_sched_target(&target) {
-        return -e.code() as isize;
-    }
-
-    if !task::set_task_priority(target.task.clone(), priority) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    apply_target_rt_policy(&target, policy as u32);
-    target
-        .thread
-        .sched_policy
-        .store(policy as u32, core::sync::atomic::Ordering::Relaxed);
-    0
+fn do_sched_getparam(pid: usize, param_ptr: usize) -> Result<(), LinuxError> {
+    validate_sched_param_args(pid, param_ptr)?;
+    let target = resolve_sched_target(pid)?;
+    let policy = SchedPolicy::from_u32(target.thread.sched_policy.load(Ordering::Acquire))?;
+    let rt_prio = target_rt_priority(&target, policy) as i32;
+    write_user_value(param_ptr, &rt_prio)
 }
 
 pub fn sys_sched_getparam(pid: usize, param_ptr: usize) -> isize {
-    if let Err(e) = signed_sched_pid(pid, LinuxError::EINVAL) {
-        return -e.code() as isize;
-    }
-    if param_ptr == 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    let target = match resolve_sched_target(pid) {
-        Ok(target) => target,
-        Err(e) => return -e.code() as isize,
-    };
-    let prio = target.task.priority();
-    let rt_prio = if (1..=99).contains(&prio) {
-        prio as i32
-    } else {
-        0
-    };
-    write_user_value(param_ptr, &rt_prio)
+    do_sched_getparam(pid, param_ptr)
         .map(|_| 0)
         .unwrap_or_else(|e| -e.code() as isize)
 }
 
 pub fn sys_sched_get_priority_max(policy: usize) -> isize {
-    match policy as u32 {
-        SCHED_FIFO | SCHED_RR => RT_PRIORITY_MAX,
-        SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => 0,
-        _ => -LinuxError::EINVAL.code() as isize,
-    }
+    sched_priority_max(policy).unwrap_or_else(|e| -e.code() as isize)
 }
 
 pub fn sys_sched_get_priority_min(policy: usize) -> isize {
-    match policy as u32 {
-        SCHED_FIFO | SCHED_RR => RT_PRIORITY_MIN,
-        SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => 0,
-        _ => -LinuxError::EINVAL.code() as isize,
-    }
+    sched_priority_min(policy).unwrap_or_else(|e| -e.code() as isize)
 }
 
 pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
@@ -509,6 +515,17 @@ pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
         .unwrap_or_else(|e| -e.code() as isize)
 }
 
+fn do_sched_setattr(pid: usize, attr: usize, flags: usize) -> Result<(), LinuxError> {
+    validate_sched_setattr_args(pid, attr, flags)?;
+    let user_attr = read_sched_attr_from_user(attr)?;
+    validate_sched_setattr_policy_sign(user_attr.sched_policy)?;
+    let target = resolve_sched_target(pid)?;
+    let snap = snapshot_target_sched(&target)?;
+    let req = validate_sched_setattr(user_attr, snap.nice)?;
+    authorize_sched_change(caller_creds()?, &snap, &req)?;
+    commit_sched_change(&target, &req, true)
+}
+
 pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
     kernel_log::debug!(
         "sys_sched_setattr: pid={}, attr={:#x}, flags={:#x}",
@@ -516,91 +533,30 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
         attr,
         flags
     );
-    if flags != 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    if let Err(e) = signed_sched_pid(pid, LinuxError::EINVAL) {
-        return -e.code() as isize;
-    }
-    if attr == 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
+    do_sched_setattr(pid, attr, flags)
+        .map(|_| 0)
+        .unwrap_or_else(|e| -e.code() as isize)
+}
 
-    let user_attr: SchedAttr = match read_user_value(attr) {
-        Ok(attr) => attr,
-        Err(_) => return -LinuxError::EFAULT.code() as isize,
-    };
+fn do_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> Result<(), LinuxError> {
+    let attr_size = validate_sched_getattr_args(pid, attr, size, flags)?;
+    let target = resolve_sched_target(pid)?;
+    let policy = SchedPolicy::from_u32(target.thread.sched_policy.load(Ordering::Acquire))?;
+    let sched_attr = format_sched_attr_for_policy(&SchedAttrSnapshot {
+        policy,
+        flags: target.thread.sched_flags.load(Ordering::Acquire),
+        nice: target.thread.sched_nice.load(Ordering::Acquire),
+        rt_priority: target_rt_priority(&target, policy),
+        runtime: target.thread.sched_runtime.load(Ordering::Acquire),
+        deadline: target.thread.sched_deadline.load(Ordering::Acquire),
+        period: target.thread.sched_period.load(Ordering::Acquire),
+    });
+    write_user_value(attr, &sched_attr)?;
 
-    if user_attr.size < SCHED_ATTR_SIZE {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    if !is_supported_policy(user_attr.sched_policy as usize) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-
-    let policy = user_attr.sched_policy;
-    let priority = user_attr.sched_priority;
-    let task_priority = if let Ok(Some(priority)) = validate_rt_priority(policy, priority) {
-        priority
-    } else if policy == SCHED_FIFO || policy == SCHED_RR {
-        return -LinuxError::EINVAL.code() as isize;
-    } else if policy == SCHED_DEADLINE {
-        if priority != 0
-            || user_attr.sched_runtime == 0
-            || user_attr.sched_deadline == 0
-            || user_attr.sched_period == 0
-            || user_attr.sched_runtime > user_attr.sched_deadline
-            || user_attr.sched_deadline > user_attr.sched_period
-        {
-            return -LinuxError::EINVAL.code() as isize;
-        }
-        -100
-    } else {
-        if priority != 0 || user_attr.sched_nice < -20 || user_attr.sched_nice > 19 {
-            return -LinuxError::EINVAL.code() as isize;
-        }
-        user_attr.sched_nice as isize - 100
-    };
-
-    let target = match resolve_sched_target(pid) {
-        Ok(target) => target,
-        Err(e) => return -e.code() as isize,
-    };
-    if let Err(e) = may_set_sched_target(&target) {
-        return -e.code() as isize;
-    }
-
-    if !task::set_task_priority(target.task.clone(), task_priority) {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    apply_target_rt_policy(&target, policy);
-
-    target
-        .thread
-        .sched_policy
-        .store(policy, core::sync::atomic::Ordering::Relaxed);
-    target
-        .thread
-        .sched_flags
-        .store(user_attr.sched_flags, core::sync::atomic::Ordering::Relaxed);
-    target
-        .thread
-        .sched_nice
-        .store(user_attr.sched_nice, core::sync::atomic::Ordering::Relaxed);
-    target.thread.sched_runtime.store(
-        user_attr.sched_runtime,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    target.thread.sched_deadline.store(
-        user_attr.sched_deadline,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    target.thread.sched_period.store(
-        user_attr.sched_period,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-
-    0
+    let zeros = [0u8; 64];
+    for_each_extension_chunk(attr, attr_size, |addr, chunk| {
+        write_user_bytes(addr, &zeros[..chunk]).map_err(|_| LinuxError::EFAULT)
+    })
 }
 
 pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> isize {
@@ -611,64 +567,9 @@ pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> 
         size,
         flags
     );
-    if flags != 0 || size < SCHED_ATTR_SIZE as usize {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    if let Err(e) = signed_sched_pid(pid, LinuxError::EINVAL) {
-        return -e.code() as isize;
-    }
-    if attr == 0 {
-        return -LinuxError::EINVAL.code() as isize;
-    }
-    let target = match resolve_sched_target(pid) {
-        Ok(target) => target,
-        Err(e) => return -e.code() as isize,
-    };
-    let prio = target.task.priority();
-    let rt_prio = if (1..=99).contains(&prio) {
-        prio as u32
-    } else {
-        0
-    };
-
-    let sched_attr = SchedAttr {
-        size: SCHED_ATTR_SIZE,
-        sched_policy: target
-            .thread
-            .sched_policy
-            .load(core::sync::atomic::Ordering::Relaxed),
-        sched_flags: target
-            .thread
-            .sched_flags
-            .load(core::sync::atomic::Ordering::Relaxed),
-        sched_nice: target
-            .thread
-            .sched_nice
-            .load(core::sync::atomic::Ordering::Relaxed),
-        sched_priority: rt_prio,
-        sched_runtime: target
-            .thread
-            .sched_runtime
-            .load(core::sync::atomic::Ordering::Relaxed),
-        sched_deadline: target
-            .thread
-            .sched_deadline
-            .load(core::sync::atomic::Ordering::Relaxed),
-        sched_period: target
-            .thread
-            .sched_period
-            .load(core::sync::atomic::Ordering::Relaxed),
-    };
-    write_user_value(attr, &sched_attr)
+    do_sched_getattr(pid, attr, size, flags)
         .map(|_| 0)
         .unwrap_or_else(|e| -e.code() as isize)
-}
-
-fn is_supported_policy(policy: usize) -> bool {
-    matches!(
-        policy as u32,
-        SCHED_NORMAL | SCHED_FIFO | SCHED_RR | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE
-    )
 }
 
 pub fn sys_getcpu(cpu_ptr: usize, node_ptr: usize, _tcache: usize) -> isize {

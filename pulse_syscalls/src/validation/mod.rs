@@ -14,6 +14,7 @@ pub(crate) mod io;
 pub(crate) mod io_uring;
 pub(crate) mod mm;
 pub(crate) mod resource;
+pub(crate) mod schedule;
 pub(crate) mod signal;
 pub(crate) mod system;
 pub(crate) mod time;

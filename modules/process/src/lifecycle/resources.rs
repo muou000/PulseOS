@@ -141,6 +141,14 @@ impl Process {
                 rlim_cur: res.memlock_state.soft_limit,
                 rlim_max: res.memlock_state.hard_limit,
             }),
+            RLIMIT_NICE => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.nice_soft,
+                rlim_max: res.rlimit_state.nice_hard,
+            }),
+            RLIMIT_RTPRIO => Some(rlimit64 {
+                rlim_cur: res.rlimit_state.rtprio_soft,
+                rlim_max: res.rlimit_state.rtprio_hard,
+            }),
             _ => None,
         }
     }
@@ -195,6 +203,16 @@ impl Process {
             RLIMIT_MEMLOCK => {
                 res.memlock_state.soft_limit = limit.rlim_cur;
                 res.memlock_state.hard_limit = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_NICE => {
+                res.rlimit_state.nice_soft = limit.rlim_cur;
+                res.rlimit_state.nice_hard = limit.rlim_max;
+                Ok(())
+            }
+            RLIMIT_RTPRIO => {
+                res.rlimit_state.rtprio_soft = limit.rlim_cur;
+                res.rlimit_state.rtprio_hard = limit.rlim_max;
                 Ok(())
             }
             _ => Err(AxError::InvalidInput),

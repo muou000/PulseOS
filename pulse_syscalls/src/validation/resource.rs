@@ -1,10 +1,10 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
-    RLIMIT_AS, RLIMIT_CORE, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_NOFILE,
-    RLIMIT_SIGPENDING, RLIMIT_STACK,
+    RLIMIT_AS, RLIMIT_CORE, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_MEMLOCK, RLIMIT_NICE, RLIMIT_NOFILE,
+    RLIMIT_RTPRIO, RLIMIT_SIGPENDING, RLIMIT_STACK,
 };
 
-pub(crate) const SUPPORTED_RESOURCES: [u32; 8] = [
+pub(crate) const SUPPORTED_RESOURCES: [u32; 10] = [
     RLIMIT_STACK,
     RLIMIT_FSIZE,
     RLIMIT_NOFILE,
@@ -13,6 +13,8 @@ pub(crate) const SUPPORTED_RESOURCES: [u32; 8] = [
     RLIMIT_DATA,
     RLIMIT_AS,
     RLIMIT_SIGPENDING,
+    RLIMIT_NICE,
+    RLIMIT_RTPRIO,
 ];
 
 pub(crate) fn validate_resource(resource: usize) -> Result<u32, LinuxError> {
@@ -106,6 +108,12 @@ mod tests {
         );
         assert_eq!(validate_nofile_ceiling(RLIMIT_NOFILE, 1024, 1024), Ok(()));
         assert_eq!(validate_nofile_ceiling(RLIMIT_CORE, u64::MAX, 1024), Ok(()));
+    }
+
+    #[test]
+    fn rlimit_nice_and_rtprio_are_supported() {
+        assert_eq!(validate_resource(RLIMIT_NICE as usize), Ok(RLIMIT_NICE));
+        assert_eq!(validate_resource(RLIMIT_RTPRIO as usize), Ok(RLIMIT_RTPRIO));
     }
 
     #[test]
