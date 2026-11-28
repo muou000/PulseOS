@@ -586,6 +586,19 @@ impl Process {
     }
 
     pub fn finish_thread_exit(&self, tid: u64, exit_code: i32) {
+        if tid == self.pid()
+            && let Some(task) = self.task_ref_by_tid(tid)
+            && let Some(handle) = crate::thread_handle_from_task(&task)
+        {
+            let attrs = handle.sched_attrs_snapshot();
+            let rt_priority =
+                crate::thread::rt_priority_for_task(attrs.policy, task::task_priority(&task));
+            *self.zombie_sched.lock() = Some(ZombieSchedSnapshot {
+                attrs,
+                rt_priority,
+                cpumask: task.cpumask(),
+            });
+        }
         crate::unregister_thread_global(tid);
         let (task, remaining) = self.take_exiting_thread(tid);
         if let Some(task) = task {

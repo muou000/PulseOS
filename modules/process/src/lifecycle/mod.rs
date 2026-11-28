@@ -421,6 +421,16 @@ impl TimeContext {
     }
 }
 
+/// Preserved scheduler attributes of an exited process leader until the
+/// zombie is reaped, matching Linux `find_process_by_pid()` lookup for
+/// `sched_get*` syscalls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZombieSchedSnapshot {
+    pub attrs: crate::ThreadSchedAttrs,
+    pub rt_priority: u32,
+    pub cpumask: task::AxCpuMask,
+}
+
 /// 进程控制块
 pub struct Process {
     /// 进程ID
@@ -447,6 +457,8 @@ pub struct Process {
     pub entry: AtomicUsize,
     /// 线程与任务状态注册表
     threads: SpinNoIrq<BTreeMap<u64, ThreadState>>,
+    /// Exited leader scheduler attributes retained until zombie retirement.
+    zombie_sched: SpinNoIrq<Option<ZombieSchedSnapshot>>,
     /// Serializes exec and identifies the thread performing irreversible teardown.
     exec_lock: Mutex<()>,
     exec_teardown_owner: AtomicU64,
@@ -758,6 +770,15 @@ impl Process {
         thread.set_tid_for_exec(new_tid);
         super::rebind_thread_global_for_exec(old_tid, new_tid, thread);
         registry.insert(new_tid, state);
+        self.clear_zombie_sched();
+    }
+
+    pub fn zombie_sched_snapshot(&self) -> Option<ZombieSchedSnapshot> {
+        *self.zombie_sched.lock()
+    }
+
+    pub(crate) fn clear_zombie_sched(&self) {
+        *self.zombie_sched.lock() = None;
     }
 
     pub fn thread_ids_snapshot(&self) -> Vec<u64> {

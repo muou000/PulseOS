@@ -1,6 +1,36 @@
 use super::*;
 
 impl Process {
+    fn finalize_and_spawn_child_thread(
+        self: &Arc<Self>,
+        inner: task::TaskInner,
+        child_proc: &Arc<Self>,
+        child_set_tid: Option<usize>,
+        child_clear_tid: Option<usize>,
+        is_thread_clone: bool,
+    ) {
+        let child_tid = inner.id().as_u64();
+        let _guard = NoPreemptIrqSave::new();
+        let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id());
+        let initial_sched = if let Ok(parent_thread) = current_thread() {
+            child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
+            child_thread.inherit_scheduler_from(&parent_thread, task::current_priority())
+        } else {
+            task::InitialTaskSched::normal_default()
+        };
+        if let Some(addr) = child_set_tid {
+            child_thread.set_child_tid_addr(addr);
+        }
+        if let Some(addr) = child_clear_tid {
+            child_thread.set_clear_child_tid(addr);
+        }
+        crate::register_thread_global(child_tid, child_thread.clone());
+        if !is_thread_clone {
+            self.add_child(child_proc.clone());
+        }
+        crate::spawn_task_with_thread_sched(inner, child_thread, !is_thread_clone, initial_sched);
+    }
+
     pub fn spawn_fork_from_trap_frame(
         self: &Arc<Self>,
         tf: &TrapFrame,
@@ -69,22 +99,13 @@ impl Process {
             let child_tid = child_tid as u32;
             self.write_user_u32(addr, child_tid)?;
         }
-        let _guard = NoPreemptIrqSave::new();
-        let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id());
-        crate::register_thread_global(child_tid, child_thread.clone());
-        if let Ok(parent_thread) = current_thread() {
-            child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
-            child_thread.inherit_scheduler_from(&parent_thread);
-        }
-        if let Some(addr) = params.child_set_tid {
-            child_thread.set_child_tid_addr(addr);
-        }
-        if let Some(addr) = params.child_clear_tid {
-            child_thread.set_clear_child_tid(addr);
-        }
-
-        self.add_child(child_proc.clone());
-        crate::spawn_task_with_thread(inner, child_thread, true);
+        self.finalize_and_spawn_child_thread(
+            inner,
+            &child_proc,
+            params.child_set_tid,
+            params.child_clear_tid,
+            false,
+        );
         Ok(child_proc)
     }
 
@@ -148,23 +169,13 @@ impl Process {
             }
         }
 
-        let child_thread = Thread::new(child_proc.clone(), child_tid, inner.id());
-        crate::register_thread_global(child_tid, child_thread.clone());
-        if let Ok(parent_thread) = current_thread() {
-            child_thread.set_signal_blocked_mask(parent_thread.signal_blocked_mask());
-            child_thread.inherit_scheduler_from(&parent_thread);
-        }
-        if let Some(addr) = params.child_set_tid {
-            child_thread.set_child_tid_addr(addr);
-        }
-        if let Some(addr) = params.child_clear_tid {
-            child_thread.set_clear_child_tid(addr);
-        }
-
-        if !params.is_thread_clone {
-            self.add_child(child_proc.clone());
-        }
-        crate::spawn_task_with_thread(inner, child_thread, !params.is_thread_clone);
+        self.finalize_and_spawn_child_thread(
+            inner,
+            &child_proc,
+            params.child_set_tid,
+            params.child_clear_tid,
+            params.is_thread_clone,
+        );
         Ok((child_tid, (!params.is_thread_clone).then_some(child_proc)))
     }
 }

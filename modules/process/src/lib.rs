@@ -35,7 +35,7 @@ use hashbrown::HashMap;
 use kspin::SpinNoIrq;
 pub use lifecycle::{
     ChildWaitResult, CloneParams, Credentials, ForkParams, MAX_POSIX_TIMER_COUNT, Process,
-    WaitidStatusType, run_futex_guest_checks,
+    WaitidStatusType, ZombieSchedSnapshot, run_futex_guest_checks,
 };
 pub use process_registry::{
     PROCESS_REGISTRY_SHARDS, ShardedProcessRegistry, process_shard_index,
@@ -58,7 +58,7 @@ pub use timers::{
     adjust_absolute_timers, init_itimer_hook, is_stdin_polling_enabled, schedule_itimer_event,
     schedule_posix_timer_event, set_stdin_polling_enabled,
 };
-pub use thread::{SignalMaskGuard, Thread, ThreadHandle};
+pub use thread::{SignalMaskGuard, Thread, ThreadHandle, ThreadSchedAttrs};
 #[cfg(feature = "guest-checks")]
 pub(crate) use thread::user_dispatches;
 
@@ -231,9 +231,25 @@ pub fn try_new_user_task(
 /// Binds hardware/software context (`page_table_root`, `TaskExt`, `PROCESS_REGISTRY`)
 /// to a `TaskInner` before publishing it to the scheduler queue.
 pub fn spawn_task_with_thread(
+    inner: task::TaskInner,
+    thread: Arc<Thread>,
+    register_proc: bool,
+) -> task::AxTaskRef {
+    spawn_task_with_thread_sched(
+        inner,
+        thread,
+        register_proc,
+        task::InitialTaskSched::normal_default(),
+    )
+}
+
+/// Binds hardware/software context and applies explicit pre-enqueue scheduler
+/// parameters before publishing the child task to a run queue.
+pub(crate) fn spawn_task_with_thread_sched(
     mut inner: task::TaskInner,
     thread: Arc<Thread>,
     register_proc: bool,
+    initial_sched: task::InitialTaskSched,
 ) -> task::AxTaskRef {
     inner.init_user_affinity();
     let proc = thread.process();
@@ -258,7 +274,7 @@ pub fn spawn_task_with_thread(
 
     inner.init_task_ext(ThreadHandle::new(thread));
 
-    let task = inner.into_arc();
+    let task = inner.into_arc_with_sched(initial_sched);
     proc.register_task_ref(task.clone());
     task::spawn_task_ref(task.clone());
     task

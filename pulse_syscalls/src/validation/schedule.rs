@@ -1,6 +1,7 @@
 use axerrno::LinuxError;
 use linux_raw_sys::general::{
-    SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO, SCHED_IDLE, SCHED_NORMAL, SCHED_RR,
+    SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO, SCHED_FLAG_RESET_ON_FORK, SCHED_IDLE, SCHED_NORMAL,
+    SCHED_RESET_ON_FORK, SCHED_RR,
 };
 
 pub(crate) const RT_PRIORITY_MIN: isize = 1;
@@ -9,6 +10,12 @@ pub(crate) const MIN_NICE: i32 = -20;
 pub(crate) const MAX_NICE: i32 = 19;
 pub(crate) const SCHED_ATTR_SIZE_VER0: u32 = core::mem::size_of::<SchedAttr>() as u32;
 pub(crate) const SCHED_ATTR_MAX_SIZE: usize = 4096;
+pub(crate) const SCHED_FLAG_RESET_ON_FORK_U64: u64 = SCHED_FLAG_RESET_ON_FORK as u64;
+const SUPPORTED_SCHED_FLAGS: u64 = SCHED_FLAG_RESET_ON_FORK_U64;
+
+pub(crate) const fn has_reset_on_fork(flags: u64) -> bool {
+    (flags & SCHED_FLAG_RESET_ON_FORK_U64) != 0
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,6 +125,7 @@ pub(crate) struct SchedChangeRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TargetSchedSnapshot {
     pub policy: SchedPolicy,
+    pub flags: u64,
     pub rt_priority: u32,
     pub nice: i32,
     pub ruid: u32,
@@ -252,6 +260,7 @@ fn validate_signed_policy_priority(
 pub(crate) fn validate_sched_setparam(
     current_policy: SchedPolicy,
     current_nice: i32,
+    current_flags: u64,
     sched_priority: i32,
 ) -> Result<SchedChangeRequest, LinuxError> {
     if current_policy.is_dl() {
@@ -263,11 +272,31 @@ pub(crate) fn validate_sched_setparam(
         rt_priority,
         nice: current_nice,
         update_nice: false,
-        flags: 0,
+        flags: current_flags & SUPPORTED_SCHED_FLAGS,
         runtime: 0,
         deadline: 0,
         period: 0,
     })
+}
+
+pub(crate) fn parse_setscheduler_policy(raw_policy: usize) -> Result<(SchedPolicy, u64), LinuxError> {
+    let signed = raw_policy as i32;
+    if signed < 0 {
+        return Err(LinuxError::EINVAL);
+    }
+    let raw_u32 = signed as u32;
+    let reset_on_fork = (raw_u32 & SCHED_RESET_ON_FORK) != 0;
+    let base_policy = raw_u32 & !SCHED_RESET_ON_FORK;
+    let policy = SchedPolicy::from_u32(base_policy)?;
+    if policy.is_dl() {
+        return Err(LinuxError::EINVAL);
+    }
+    let flags = if reset_on_fork {
+        SCHED_FLAG_RESET_ON_FORK_U64
+    } else {
+        0
+    };
+    Ok((policy, flags))
 }
 
 pub(crate) fn validate_sched_setscheduler(
@@ -275,17 +304,14 @@ pub(crate) fn validate_sched_setscheduler(
     sched_priority: i32,
     current_nice: i32,
 ) -> Result<SchedChangeRequest, LinuxError> {
-    let policy = SchedPolicy::from_raw(raw_policy)?;
-    if policy.is_dl() {
-        return Err(LinuxError::EINVAL);
-    }
+    let (policy, flags) = parse_setscheduler_policy(raw_policy)?;
     let rt_priority = validate_signed_policy_priority(policy, sched_priority)?;
     Ok(SchedChangeRequest {
         policy,
         rt_priority,
         nice: current_nice,
         update_nice: false,
-        flags: 0,
+        flags,
         runtime: 0,
         deadline: 0,
         period: 0,
@@ -297,7 +323,7 @@ pub(crate) fn validate_sched_setattr(
     current_nice: i32,
 ) -> Result<SchedChangeRequest, LinuxError> {
     validate_sched_setattr_policy_sign(attr.sched_policy)?;
-    if attr.sched_flags != 0 {
+    if (attr.sched_flags & !SUPPORTED_SCHED_FLAGS) != 0 {
         return Err(LinuxError::EINVAL);
     }
     attr.sched_nice = attr.sched_nice.clamp(MIN_NICE, MAX_NICE);
@@ -318,7 +344,7 @@ pub(crate) fn validate_sched_setattr(
             rt_priority: 0,
             nice: current_nice,
             update_nice: false,
-            flags: 0,
+            flags: attr.sched_flags,
             runtime: attr.sched_runtime,
             deadline: attr.sched_deadline,
             period: attr.sched_period,
@@ -336,7 +362,7 @@ pub(crate) fn validate_sched_setattr(
         rt_priority,
         nice,
         update_nice,
-        flags: 0,
+        flags: attr.sched_flags,
         runtime: 0,
         deadline: 0,
         period: 0,
@@ -395,6 +421,10 @@ pub(crate) fn authorize_sched_change(
         needs_priv = true;
     }
 
+    if has_reset_on_fork(target.flags) && !has_reset_on_fork(req.flags) {
+        needs_priv = true;
+    }
+
     if needs_priv && !caller.has_cap_sys_nice {
         return Err(LinuxError::EPERM);
     }
@@ -412,6 +442,14 @@ pub(crate) fn eevdf_priority_for_request(req: &SchedChangeRequest) -> isize {
     }
 }
 
+pub(crate) fn format_sched_getscheduler_policy(policy: SchedPolicy, flags: u64) -> isize {
+    let mut raw = policy.as_u32();
+    if has_reset_on_fork(flags) {
+        raw |= SCHED_RESET_ON_FORK;
+    }
+    raw as isize
+}
+
 pub(crate) fn format_sched_attr_for_policy(snap: &SchedAttrSnapshot) -> SchedAttr {
     let (sched_nice, sched_priority, sched_runtime, sched_deadline, sched_period) =
         match snap.policy {
@@ -422,7 +460,7 @@ pub(crate) fn format_sched_attr_for_policy(snap: &SchedAttrSnapshot) -> SchedAtt
     SchedAttr {
         size: SCHED_ATTR_SIZE_VER0,
         sched_policy: snap.policy.as_u32(),
-        sched_flags: snap.flags,
+        sched_flags: snap.flags & SUPPORTED_SCHED_FLAGS,
         sched_nice,
         sched_priority,
         sched_runtime,
@@ -438,6 +476,7 @@ mod tests {
     fn target(policy: SchedPolicy, rt_priority: u32, nice: i32) -> TargetSchedSnapshot {
         TargetSchedSnapshot {
             policy,
+            flags: 0,
             rt_priority,
             nice,
             ruid: 1000,
@@ -488,19 +527,19 @@ mod tests {
         assert_eq!(validate_sched_param_args(0, 0x1000), Ok(()));
 
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Normal, -5, 1),
+            validate_sched_setparam(SchedPolicy::Normal, -5, 0, 1),
             Err(LinuxError::EINVAL)
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Batch, 0, 1),
+            validate_sched_setparam(SchedPolicy::Batch, 0, 0, 1),
             Err(LinuxError::EINVAL)
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Idle, 0, 1),
+            validate_sched_setparam(SchedPolicy::Idle, 0, 0, 1),
             Err(LinuxError::EINVAL)
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Normal, -5, 0),
+            validate_sched_setparam(SchedPolicy::Normal, -5, 0, 0),
             Ok(SchedChangeRequest {
                 policy: SchedPolicy::Normal,
                 rt_priority: 0,
@@ -513,19 +552,19 @@ mod tests {
             })
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Fifo, 3, 0),
+            validate_sched_setparam(SchedPolicy::Fifo, 3, 0, 0),
             Err(LinuxError::EINVAL)
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Rr, 3, 100),
+            validate_sched_setparam(SchedPolicy::Rr, 3, 0, 100),
             Err(LinuxError::EINVAL)
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Fifo, 3, -1),
+            validate_sched_setparam(SchedPolicy::Fifo, 3, 0, -1),
             Err(LinuxError::EINVAL)
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Rr, 3, 50),
+            validate_sched_setparam(SchedPolicy::Rr, 3, 0, 50),
             Ok(SchedChangeRequest {
                 policy: SchedPolicy::Rr,
                 rt_priority: 50,
@@ -538,7 +577,7 @@ mod tests {
             })
         );
         assert_eq!(
-            validate_sched_setparam(SchedPolicy::Deadline, 0, 0),
+            validate_sched_setparam(SchedPolicy::Deadline, 0, 0, 0),
             Err(LinuxError::EINVAL)
         );
     }
@@ -620,7 +659,7 @@ mod tests {
         let unsupported_flags = SchedAttr {
             size: 48,
             sched_policy: SCHED_NORMAL,
-            sched_flags: 1,
+            sched_flags: 2,
             ..Default::default()
         };
         assert_eq!(
@@ -728,6 +767,69 @@ mod tests {
     }
 
     #[test]
+    fn sched_setscheduler_reset_on_fork_parsing_and_unknown_bits() {
+        let reset = SCHED_RESET_ON_FORK as usize;
+
+        for (raw_policy, prio, expected_policy) in [
+            (SCHED_NORMAL as usize | reset, 0, SchedPolicy::Normal),
+            (SCHED_FIFO as usize | reset, 10, SchedPolicy::Fifo),
+            (SCHED_RR as usize | reset, 10, SchedPolicy::Rr),
+            (SCHED_BATCH as usize | reset, 0, SchedPolicy::Batch),
+            (SCHED_IDLE as usize | reset, 0, SchedPolicy::Idle),
+        ] {
+            assert_eq!(
+                validate_sched_setscheduler(raw_policy, prio, -3),
+                Ok(SchedChangeRequest {
+                    policy: expected_policy,
+                    rt_priority: prio as u32,
+                    nice: -3,
+                    update_nice: false,
+                    flags: SCHED_FLAG_RESET_ON_FORK as u64,
+                    runtime: 0,
+                    deadline: 0,
+                    period: 0,
+                })
+            );
+        }
+
+        // DEADLINE, unknown bits, and invalid priorities with the flag fail with EINVAL.
+        assert_eq!(
+            validate_sched_setscheduler(SCHED_DEADLINE as usize | reset, 0, 0),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            validate_sched_setscheduler(SCHED_FIFO as usize | 0x2000_0000, 10, 0),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            validate_sched_setscheduler(SCHED_FIFO as usize | 0x8000_0000, 10, 0),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            validate_sched_setscheduler(SCHED_FIFO as usize | reset | 0x2000_0000, 10, 0),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            validate_sched_setscheduler(SCHED_FIFO as usize | reset, 0, 0),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            validate_sched_setscheduler(SCHED_NORMAL as usize | reset, 1, 0),
+            Err(LinuxError::EINVAL)
+        );
+
+        // sched_get_priority_min/max reject SCHED_RESET_ON_FORK in policy.
+        assert_eq!(
+            sched_priority_min(SCHED_FIFO as usize | reset),
+            Err(LinuxError::EINVAL)
+        );
+        assert_eq!(
+            sched_priority_max(SCHED_RR as usize | reset),
+            Err(LinuxError::EINVAL)
+        );
+    }
+
+    #[test]
     fn ltp_sched_setscheduler02_and_03_credentials_and_rlimits() {
         // sched_setscheduler02: unprivileged FIFO denied when RLIMIT_RTPRIO == 0
         let req_fifo_1 = validate_sched_setscheduler(SCHED_FIFO as usize, 1, 0).unwrap();
@@ -761,7 +863,7 @@ mod tests {
         // RT priority changes under RLIMIT_RTPRIO
         let mut rt_snap = target(SchedPolicy::Fifo, 10, 0);
         rt_snap.rlim_rtprio = 0;
-        let lower_fifo = validate_sched_setparam(SchedPolicy::Fifo, 0, 5).unwrap();
+        let lower_fifo = validate_sched_setparam(SchedPolicy::Fifo, 0, 0, 5).unwrap();
         assert_eq!(
             authorize_sched_change(unpriv(1000), &rt_snap, &lower_fifo),
             Ok(())
@@ -771,7 +873,7 @@ mod tests {
             authorize_sched_change(unpriv(1000), &rt_snap, &switch_to_rr),
             Err(LinuxError::EPERM)
         );
-        let raise_fifo = validate_sched_setparam(SchedPolicy::Fifo, 0, 11).unwrap();
+        let raise_fifo = validate_sched_setparam(SchedPolicy::Fifo, 0, 0, 11).unwrap();
         assert_eq!(
             authorize_sched_change(unpriv(1000), &rt_snap, &raise_fifo),
             Err(LinuxError::EPERM)
@@ -909,5 +1011,172 @@ mod tests {
         assert_eq!(eevdf_priority_for_request(&req_fair), -105);
         let req_rt = validate_sched_setscheduler(SCHED_RR as usize, 25, -5).unwrap();
         assert_eq!(eevdf_priority_for_request(&req_rt), 25);
+    }
+
+    #[test]
+    fn sched_setattr_reset_on_fork_parsing_and_unknown_flags() {
+        let reset_flag = SCHED_FLAG_RESET_ON_FORK as u64;
+        for (policy, prio, nice, expected_policy, expected_nice, update_nice) in [
+            (SCHED_NORMAL, 0, -4, SchedPolicy::Normal, -4, true),
+            (SCHED_FIFO, 10, -4, SchedPolicy::Fifo, -4, false),
+            (SCHED_RR, 15, -4, SchedPolicy::Rr, -4, false),
+            (SCHED_BATCH, 0, 5, SchedPolicy::Batch, 5, true),
+            (SCHED_IDLE, 0, -4, SchedPolicy::Idle, -4, false),
+        ] {
+            let attr = SchedAttr {
+                size: 48,
+                sched_policy: policy,
+                sched_flags: reset_flag,
+                sched_nice: nice,
+                sched_priority: prio,
+                ..Default::default()
+            };
+            assert_eq!(
+                validate_sched_setattr(attr, -4),
+                Ok(SchedChangeRequest {
+                    policy: expected_policy,
+                    rt_priority: prio,
+                    nice: expected_nice,
+                    update_nice,
+                    flags: reset_flag,
+                    runtime: 0,
+                    deadline: 0,
+                    period: 0,
+                })
+            );
+        }
+
+        let dl_reset = SchedAttr {
+            size: 48,
+            sched_policy: SCHED_DEADLINE,
+            sched_flags: reset_flag,
+            sched_runtime: 10_000,
+            sched_deadline: 20_000,
+            sched_period: 30_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_sched_setattr(dl_reset, 3),
+            Ok(SchedChangeRequest {
+                policy: SchedPolicy::Deadline,
+                rt_priority: 0,
+                nice: 3,
+                update_nice: false,
+                flags: reset_flag,
+                runtime: 10_000,
+                deadline: 20_000,
+                period: 30_000,
+            })
+        );
+
+        // Unknown sched_flags bits and legacy policy bit in attr.sched_policy must fail with EINVAL.
+        for bad_flags in [2, 0x80, reset_flag | 2, SCHED_RESET_ON_FORK as u64, u64::MAX] {
+            let attr = SchedAttr {
+                size: 48,
+                sched_policy: SCHED_FIFO,
+                sched_flags: bad_flags,
+                sched_priority: 10,
+                ..Default::default()
+            };
+            assert_eq!(validate_sched_setattr(attr, 0), Err(LinuxError::EINVAL));
+        }
+        let legacy_bit_in_attr_policy = SchedAttr {
+            size: 48,
+            sched_policy: SCHED_FIFO | SCHED_RESET_ON_FORK,
+            sched_flags: 0,
+            sched_priority: 10,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_sched_setattr(legacy_bit_in_attr_policy, 0),
+            Err(LinuxError::EINVAL)
+        );
+    }
+
+    #[test]
+    fn reset_on_fork_cross_api_formatting_and_auth() {
+        let reset_flag = SCHED_FLAG_RESET_ON_FORK as u64;
+
+        // Cross-representation output formatting
+        assert_eq!(
+            format_sched_getscheduler_policy(SchedPolicy::Fifo, reset_flag),
+            (SCHED_FIFO | SCHED_RESET_ON_FORK) as isize
+        );
+        assert_eq!(
+            format_sched_getscheduler_policy(SchedPolicy::Normal, 0),
+            SCHED_NORMAL as isize
+        );
+        let formatted_attr = format_sched_attr_for_policy(&SchedAttrSnapshot {
+            policy: SchedPolicy::Rr,
+            flags: reset_flag | 0x40,
+            nice: -5,
+            rt_priority: 10,
+            runtime: 0,
+            deadline: 0,
+            period: 0,
+        });
+        assert_eq!(formatted_attr.sched_policy, SCHED_RR);
+        assert_eq!(formatted_attr.sched_flags, reset_flag);
+        assert_eq!(formatted_attr.sched_priority, 10);
+
+        // Unprivileged 0 -> 1 and 1 -> 1 succeed when RTPRIO allows; 1 -> 0 requires CAP_SYS_NICE.
+        let mut snap = target(SchedPolicy::Fifo, 10, 0);
+        snap.rlim_rtprio = 10;
+        let req_set = validate_sched_setscheduler(
+            SCHED_FIFO as usize | SCHED_RESET_ON_FORK as usize,
+            10,
+            0,
+        )
+        .unwrap();
+        assert_eq!(authorize_sched_change(unpriv(1000), &snap, &req_set), Ok(()));
+
+        snap.flags = reset_flag;
+        assert_eq!(authorize_sched_change(unpriv(1000), &snap, &req_set), Ok(()));
+
+        // Clearing via sched_setscheduler(SCHED_FIFO) or SCHED_NORMAL fails with EPERM.
+        let req_clear_fifo = validate_sched_setscheduler(SCHED_FIFO as usize, 10, 0).unwrap();
+        assert_eq!(
+            authorize_sched_change(unpriv(1000), &snap, &req_clear_fifo),
+            Err(LinuxError::EPERM)
+        );
+        let req_clear_normal = validate_sched_setscheduler(SCHED_NORMAL as usize, 0, 0).unwrap();
+        assert_eq!(
+            authorize_sched_change(unpriv(1000), &snap, &req_clear_normal),
+            Err(LinuxError::EPERM)
+        );
+
+        // Clearing via sched_setattr(flags=0) also fails with EPERM, even with CAP-less downgrade.
+        let req_clear_attr = validate_sched_setattr(
+            SchedAttr {
+                size: 48,
+                sched_policy: SCHED_NORMAL,
+                sched_flags: 0,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            authorize_sched_change(unpriv(1000), &snap, &req_clear_attr),
+            Err(LinuxError::EPERM)
+        );
+
+        // CAP_SYS_NICE allows clearing the flag.
+        let priv_caller = CallerCreds {
+            euid: 1000,
+            has_cap_sys_nice: true,
+        };
+        assert_eq!(
+            authorize_sched_change(priv_caller, &snap, &req_clear_attr),
+            Ok(())
+        );
+
+        // sched_setparam preserves existing reset-on-fork flag for unprivileged caller.
+        let setparam_req = validate_sched_setparam(SchedPolicy::Fifo, 0, snap.flags, 5).unwrap();
+        assert_eq!(setparam_req.flags, reset_flag);
+        assert_eq!(
+            authorize_sched_change(unpriv(1000), &snap, &setparam_req),
+            Ok(())
+        );
     }
 }

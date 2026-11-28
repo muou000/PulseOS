@@ -37,6 +37,7 @@ impl Process {
                 map.insert(pid, ThreadState::Pending);
                 map
             }),
+            zombie_sched: SpinNoIrq::new(None),
             exec_lock: Mutex::new(()),
             exec_teardown_owner: AtomicU64::new(0),
             has_execed: AtomicBool::new(false),
@@ -203,6 +204,7 @@ impl Process {
                 map.insert(pid, ThreadState::Pending);
                 map
             }),
+            zombie_sched: SpinNoIrq::new(None),
             exec_lock: Mutex::new(()),
             exec_teardown_owner: AtomicU64::new(0),
             has_execed: AtomicBool::new(false),

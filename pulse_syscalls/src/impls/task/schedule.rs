@@ -6,7 +6,8 @@ use linux_raw_sys::general::{
     CAP_SYS_NICE, PRIO_PGRP, PRIO_PROCESS, PRIO_USER, RLIMIT_NICE, RLIMIT_RTPRIO, timespec,
 };
 use process::{
-    Process, Thread, current_process, current_thread, processes_snapshot, thread_by_tid_global,
+    Process, Thread, ThreadSchedAttrs, ZombieSchedSnapshot, current_process, current_thread,
+    process_by_pid, processes_snapshot, thread_by_tid_global,
 };
 
 use crate::{
@@ -17,8 +18,9 @@ use crate::{
         CallerCreds, RT_PRIORITY_MAX, RT_PRIORITY_MIN, SCHED_ATTR_SIZE_VER0, SchedAttr,
         SchedAttrSnapshot, SchedChangeRequest, SchedPolicy, TargetSchedSnapshot,
         authorize_sched_change, check_zeroed_extension_bytes, decode_sched_setattr_size,
-        eevdf_priority_for_request, format_sched_attr_for_policy, is_same_sched_owner,
-        rlimit_permits_nice, sched_priority_max, sched_priority_min, validate_sched_getattr_args,
+        eevdf_priority_for_request, format_sched_attr_for_policy,
+        format_sched_getscheduler_policy, is_same_sched_owner, rlimit_permits_nice,
+        sched_priority_max, sched_priority_min, validate_sched_getattr_args,
         validate_sched_param_args, validate_sched_setattr, validate_sched_setattr_args,
         validate_sched_setattr_policy_sign, validate_sched_setparam, validate_sched_setscheduler,
         validate_sched_setscheduler_args,
@@ -45,18 +47,13 @@ fn signed_sched_pid(pid: usize, negative_errno: LinuxError) -> Result<u64, Linux
     Ok(signed_pid as u64)
 }
 
-fn resolve_sched_target_with_negative(
-    pid: usize,
-    negative_errno: LinuxError,
-) -> Result<SchedTarget, LinuxError> {
-    let signed_pid = signed_sched_pid(pid, negative_errno)?;
-
+fn resolve_live_sched_target(signed_pid: u64) -> Result<SchedTarget, LinuxError> {
     let current = current_thread()?;
     let current_tid = current.tid();
-    let thread = if signed_pid == 0 || signed_pid as u64 == current_tid {
+    let thread = if signed_pid == 0 || signed_pid == current_tid {
         current.clone()
     } else {
-        thread_by_tid_global(signed_pid as u64).ok_or(LinuxError::ESRCH)?
+        thread_by_tid_global(signed_pid).ok_or(LinuxError::ESRCH)?
     };
     let process = thread.try_process().ok_or(LinuxError::ESRCH)?;
     let task = if thread.tid() == current_tid {
@@ -72,8 +69,41 @@ fn resolve_sched_target_with_negative(
     Ok(SchedTarget { thread, task })
 }
 
+fn resolve_sched_target_with_negative(
+    pid: usize,
+    negative_errno: LinuxError,
+) -> Result<SchedTarget, LinuxError> {
+    let signed_pid = signed_sched_pid(pid, negative_errno)?;
+    resolve_live_sched_target(signed_pid)
+}
+
 fn resolve_sched_target(pid: usize) -> Result<SchedTarget, LinuxError> {
     resolve_sched_target_with_negative(pid, LinuxError::EINVAL)
+}
+
+enum SchedReadTarget {
+    Live(SchedTarget),
+    Zombie(ZombieSchedSnapshot),
+}
+
+fn resolve_sched_read_target_with_negative(
+    pid: usize,
+    negative_errno: LinuxError,
+) -> Result<SchedReadTarget, LinuxError> {
+    let signed_pid = signed_sched_pid(pid, negative_errno)?;
+    match resolve_live_sched_target(signed_pid) {
+        Ok(target) => Ok(SchedReadTarget::Live(target)),
+        Err(LinuxError::ESRCH) if signed_pid > 0 => {
+            let proc = process_by_pid(signed_pid).ok_or(LinuxError::ESRCH)?;
+            let snap = proc.zombie_sched_snapshot().ok_or(LinuxError::ESRCH)?;
+            Ok(SchedReadTarget::Zombie(snap))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn resolve_sched_read_target(pid: usize) -> Result<SchedReadTarget, LinuxError> {
+    resolve_sched_read_target_with_negative(pid, LinuxError::EINVAL)
 }
 
 fn caller_creds() -> Result<CallerCreds, LinuxError> {
@@ -96,8 +126,7 @@ fn may_set_sched_target(target: &SchedTarget) -> Result<(), LinuxError> {
     Ok(())
 }
 
-fn target_rt_priority(target: &SchedTarget, policy: SchedPolicy) -> u32 {
-    let prio = target.task.priority();
+fn rt_priority_for_policy(policy: SchedPolicy, prio: isize) -> u32 {
     if policy.is_rt() && (RT_PRIORITY_MIN..=RT_PRIORITY_MAX).contains(&prio) {
         prio as u32
     } else {
@@ -105,10 +134,44 @@ fn target_rt_priority(target: &SchedTarget, policy: SchedPolicy) -> u32 {
     }
 }
 
+fn target_rt_priority(target: &SchedTarget, policy: SchedPolicy) -> u32 {
+    rt_priority_for_policy(policy, target.task.priority())
+}
+
+fn sched_attr_snapshot_from_thread_attrs(
+    attrs: ThreadSchedAttrs,
+    rt_priority: u32,
+) -> Result<SchedAttrSnapshot, LinuxError> {
+    let policy = SchedPolicy::from_u32(attrs.policy)?;
+    Ok(SchedAttrSnapshot {
+        policy,
+        flags: attrs.flags,
+        nice: attrs.nice,
+        rt_priority: rt_priority_for_policy(policy, rt_priority as isize),
+        runtime: attrs.runtime,
+        deadline: attrs.deadline,
+        period: attrs.period,
+    })
+}
+
+fn read_target_sched_attr_snapshot(target: SchedReadTarget) -> Result<SchedAttrSnapshot, LinuxError> {
+    match target {
+        SchedReadTarget::Live(target) => {
+            let attrs = target.thread.sched_attrs_snapshot();
+            let policy = SchedPolicy::from_u32(attrs.policy)?;
+            let rt_priority = target_rt_priority(&target, policy);
+            sched_attr_snapshot_from_thread_attrs(attrs, rt_priority)
+        }
+        SchedReadTarget::Zombie(zombie) => {
+            sched_attr_snapshot_from_thread_attrs(zombie.attrs, zombie.rt_priority)
+        }
+    }
+}
+
 fn snapshot_target_sched(target: &SchedTarget) -> Result<TargetSchedSnapshot, LinuxError> {
     let target_proc = target.thread.try_process().ok_or(LinuxError::ESRCH)?;
-    let policy = SchedPolicy::from_u32(target.thread.sched_policy.load(Ordering::Acquire))?;
-    let nice = target.thread.sched_nice.load(Ordering::Acquire);
+    let attrs = target.thread.sched_attrs_snapshot();
+    let policy = SchedPolicy::from_u32(attrs.policy)?;
     let rt_priority = target_rt_priority(target, policy);
     let rlim_nice = target_proc
         .get_rlimit(RLIMIT_NICE)
@@ -121,8 +184,9 @@ fn snapshot_target_sched(target: &SchedTarget) -> Result<TargetSchedSnapshot, Li
     let (ruid, euid, _) = target_proc.uid_snapshot();
     Ok(TargetSchedSnapshot {
         policy,
+        flags: attrs.flags,
         rt_priority,
-        nice,
+        nice: attrs.nice,
         ruid,
         euid,
         rlim_nice,
@@ -334,12 +398,15 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
         return -LinuxError::EINVAL.code() as isize;
     }
 
-    let target = match resolve_sched_target_with_negative(pid, LinuxError::ESRCH) {
+    let target = match resolve_sched_read_target_with_negative(pid, LinuxError::ESRCH) {
         Ok(target) => target,
         Err(e) => return -e.code() as isize,
     };
 
-    let cpumask = target.task.cpumask();
+    let cpumask = match target {
+        SchedReadTarget::Live(target) => target.task.cpumask(),
+        SchedReadTarget::Zombie(zombie) => zombie.cpumask,
+    };
     let mut mask_bytes = match alloc_zeroed_bytes(kernel_mask_bytes, "sys_sched_getaffinity.mask") {
         Ok(v) => v,
         Err(e) => return -e.code() as isize,
@@ -393,13 +460,17 @@ pub fn sys_sched_setaffinity(pid: usize, cpusetsize: usize, mask: usize) -> isiz
     }
 }
 
+fn do_sched_getscheduler(pid: usize) -> Result<isize, LinuxError> {
+    let snapshot = read_target_sched_attr_snapshot(resolve_sched_read_target(pid)?)?;
+    Ok(format_sched_getscheduler_policy(
+        snapshot.policy,
+        snapshot.flags,
+    ))
+}
+
 pub fn sys_sched_getscheduler(pid: usize) -> isize {
     kernel_log::debug!("sys_sched_getscheduler: pid={}", pid);
-    let target = match resolve_sched_target(pid) {
-        Ok(target) => target,
-        Err(e) => return -e.code() as isize,
-    };
-    target.thread.sched_policy.load(Ordering::Acquire) as isize
+    do_sched_getscheduler(pid).unwrap_or_else(|e| -e.code() as isize)
 }
 
 fn for_each_extension_chunk(
@@ -447,7 +518,7 @@ fn do_sched_setparam(pid: usize, param_ptr: usize) -> Result<(), LinuxError> {
     let sched_priority: i32 = read_user_value(param_ptr).map_err(|_| LinuxError::EFAULT)?;
     let target = resolve_sched_target(pid)?;
     let snap = snapshot_target_sched(&target)?;
-    let req = validate_sched_setparam(snap.policy, snap.nice, sched_priority)?;
+    let req = validate_sched_setparam(snap.policy, snap.nice, snap.flags, sched_priority)?;
     authorize_sched_change(caller_creds()?, &snap, &req)?;
     commit_sched_change(&target, &req, false)
 }
@@ -482,9 +553,8 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param_ptr: usize) -> is
 
 fn do_sched_getparam(pid: usize, param_ptr: usize) -> Result<(), LinuxError> {
     validate_sched_param_args(pid, param_ptr)?;
-    let target = resolve_sched_target(pid)?;
-    let policy = SchedPolicy::from_u32(target.thread.sched_policy.load(Ordering::Acquire))?;
-    let rt_prio = target_rt_priority(&target, policy) as i32;
+    let snapshot = read_target_sched_attr_snapshot(resolve_sched_read_target(pid)?)?;
+    let rt_prio = snapshot.rt_priority as i32;
     write_user_value(param_ptr, &rt_prio)
 }
 
@@ -503,7 +573,7 @@ pub fn sys_sched_get_priority_min(policy: usize) -> isize {
 }
 
 pub fn sys_sched_rr_get_interval(pid: usize, interval: usize) -> isize {
-    if let Err(e) = resolve_sched_target(pid) {
+    if let Err(e) = resolve_sched_read_target(pid) {
         return -e.code() as isize;
     }
     let ts = timespec {
@@ -540,17 +610,8 @@ pub fn sys_sched_setattr(pid: usize, attr: usize, flags: usize) -> isize {
 
 fn do_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> Result<(), LinuxError> {
     let attr_size = validate_sched_getattr_args(pid, attr, size, flags)?;
-    let target = resolve_sched_target(pid)?;
-    let policy = SchedPolicy::from_u32(target.thread.sched_policy.load(Ordering::Acquire))?;
-    let sched_attr = format_sched_attr_for_policy(&SchedAttrSnapshot {
-        policy,
-        flags: target.thread.sched_flags.load(Ordering::Acquire),
-        nice: target.thread.sched_nice.load(Ordering::Acquire),
-        rt_priority: target_rt_priority(&target, policy),
-        runtime: target.thread.sched_runtime.load(Ordering::Acquire),
-        deadline: target.thread.sched_deadline.load(Ordering::Acquire),
-        period: target.thread.sched_period.load(Ordering::Acquire),
-    });
+    let snapshot = read_target_sched_attr_snapshot(resolve_sched_read_target(pid)?)?;
+    let sched_attr = format_sched_attr_for_policy(&snapshot);
     write_user_value(attr, &sched_attr)?;
 
     let zeros = [0u8; 64];
