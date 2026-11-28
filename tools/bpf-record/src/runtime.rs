@@ -76,6 +76,11 @@ fn system_counts(text: &str) -> Result<(u64, u64)> {
         number(header, "trace_subscriptions").ok_or("missing trace subscription diagnostics")?,
     ))
 }
+fn global_number(text: &str, key: &str) -> Option<u64> {
+    text.lines()
+        .find(|line| line.starts_with("GLOBAL "))
+        .and_then(|line| number(line, key))
+}
 fn delta(before: Option<&str>, after: Option<&str>, key: &str) -> Option<u64> {
     before
         .and_then(|line| number(line, key))
@@ -514,6 +519,9 @@ impl Session {
                 }
             }
         }
+        // Detach immediately after disabling so no new tracepoint records can
+        // enter the handoff queues while the final drain barrier is observed.
+        self.detach_sources(errors);
         let start = errors.observe(sys::now());
         // The poll bound also prevents an unbounded retry if the clock itself
         // is broken. It is not presented as measured elapsed time.
@@ -529,8 +537,16 @@ impl Session {
                         None => ready = false,
                     }
                 }
+                let trace_queue_state = global_number(&stats, "trace_queued");
+                if let Some(queued) = trace_queue_state {
+                    ready &= queued == 0;
+                }
                 if ready {
-                    log("QUIESCENT inflight=0");
+                    if trace_queue_state.is_some() {
+                        log("QUIESCENT inflight=0 trace_queued=0");
+                    } else {
+                        log("QUIESCENT inflight=0 trace_queued=unknown");
+                    }
                     return true;
                 }
             }
@@ -1073,12 +1089,6 @@ fn record(plan: &SessionPlan, hooks: &Hooks) -> Result<()> {
         }
     }
     let quiescent = session.disable(&mut control_errors);
-    if !quiescent {
-        // A failed disable must not leave an attached producer running during
-        // potentially slow file serialization. Detach blocks new invocations;
-        // already accepted VM work remains explicitly unproven, so do not drain.
-        session.detach_sources(&mut control_errors);
-    }
     if quiescent {
         if let Err(error) = session.drain(&mut writer, &mut records, &mut lost, usize::MAX) {
             capture_error = Some(error);

@@ -367,6 +367,11 @@ fn test_bounded_queue_reentrancy_rejection() {
     // Test stats reset
     queue.reset_drop_stats();
     assert_eq!(queue.drop_stats(), DropStats::default());
+    let reset_stats = queue.queue_stats();
+    assert_eq!(reset_stats.total_enqueued, 0);
+    assert_eq!(reset_stats.total_dequeued, 0);
+    assert_eq!(reset_stats.queued, 1);
+    assert_eq!(reset_stats.high_water, 1);
 }
 
 #[test]

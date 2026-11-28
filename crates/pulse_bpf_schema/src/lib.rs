@@ -762,11 +762,11 @@ pub struct TraceQueueStats {
     pub dropped_recursive: u64,
     /// Total count of events successfully enqueued.
     pub total_enqueued: u64,
-    /// Total count of events removed by consumers.
+    /// Total count of records removed from this handoff queue before dispatch.
     pub total_dequeued: u64,
-    /// Number of records currently waiting in the queue.
+    /// Number of records currently waiting in this queue.
     pub queued: u64,
-    /// Highest observed queue occupancy.
+    /// Highest observed occupancy of this queue.
     pub high_water: u64,
 }
 
@@ -911,7 +911,11 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
         }
     }
 
-    /// Query drop, progress and occupancy statistics.
+    /// Query independently sampled drop, progress, and occupancy statistics.
+    ///
+    /// The counters and occupancy fields are diagnostic observations rather than
+    /// a transactional snapshot. `queued` is derived from the queue indices,
+    /// while the cumulative counters may advance before the next read.
     pub fn queue_stats(&self) -> TraceQueueStats {
         let head = self.head.load(core::sync::atomic::Ordering::Acquire);
         let tail = self.tail.load(core::sync::atomic::Ordering::Acquire);
@@ -931,7 +935,11 @@ impl<const CAP: usize> BoundedTraceQueue<CAP> {
         }
     }
 
-    /// Reset drop statistics.
+    /// Reset drop, dequeue, enqueue, and high-water statistics.
+    ///
+    /// Records already waiting in the queue remain available. The high-water
+    /// value is reset to the current occupancy so the next observation starts
+    /// from the retained queue state.
     pub fn reset_drop_stats(&self) {
         self.dropped_full
             .store(0, core::sync::atomic::Ordering::Relaxed);

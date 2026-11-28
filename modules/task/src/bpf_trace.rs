@@ -59,6 +59,9 @@ pub fn total_drop_stats() -> DropStats {
 }
 
 /// Query aggregate producer and consumer progress across all CPU queues.
+///
+/// `high_water` is the sum of each CPU queue's independent peak occupancy, so
+/// it has the same per-CPU capacity basis as the aggregate queue capacity.
 pub fn total_queue_stats() -> TraceQueueStats {
     let mut total = TraceQueueStats::default();
     for q in &CPU_QUEUES {
@@ -68,7 +71,7 @@ pub fn total_queue_stats() -> TraceQueueStats {
         total.total_enqueued += stats.total_enqueued;
         total.total_dequeued += stats.total_dequeued;
         total.queued += stats.queued;
-        total.high_water = total.high_water.max(stats.high_water);
+        total.high_water += stats.high_water;
     }
     total
 }
