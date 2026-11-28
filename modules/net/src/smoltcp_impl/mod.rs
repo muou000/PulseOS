@@ -90,6 +90,14 @@ pub fn readiness_stats_snapshot() -> ReadinessStats {
     }
 }
 
+pub fn readiness_stats_delta(before: ReadinessStats, after: ReadinessStats) -> ReadinessStats {
+    ReadinessStats {
+        interface_polls: after.interface_polls.saturating_sub(before.interface_polls),
+        socket_visits: after.socket_visits.saturating_sub(before.socket_visits),
+        wakeups: after.wakeups.saturating_sub(before.wakeups),
+    }
+}
+
 pub fn record_socket_readiness_visit() {
     READINESS_SOCKET_VISITS.fetch_add(1, Ordering::Relaxed);
 }

@@ -248,11 +248,10 @@ pub(super) fn wait_for_readiness(
     let ready = readiness_scan_once(pollfds, objects);
     if ready > 0 {
         let stats_after = net::readiness_stats_snapshot();
+        let stats = net::readiness_stats_delta(stats_before, stats_after);
         kernel_log::debug!(
             "readiness_stats interface_polls={} socket_visits={} wakeups={}",
-            stats_after.interface_polls.saturating_sub(stats_before.interface_polls),
-            stats_after.socket_visits.saturating_sub(stats_before.socket_visits),
-            stats_after.wakeups.saturating_sub(stats_before.wakeups),
+            stats.interface_polls, stats.socket_visits, stats.wakeups,
         );
         return ReadinessWaitResult::Ready(ready);
     }
@@ -260,11 +259,10 @@ pub(super) fn wait_for_readiness(
     let result = wait_event_driven(thread, pollfds, objects, deadline)
         .unwrap_or_else(|| wait_fallback(thread, pollfds, objects, deadline));
     let stats_after = net::readiness_stats_snapshot();
+    let stats = net::readiness_stats_delta(stats_before, stats_after);
     kernel_log::debug!(
         "readiness_stats interface_polls={} socket_visits={} wakeups={}",
-        stats_after.interface_polls.saturating_sub(stats_before.interface_polls),
-        stats_after.socket_visits.saturating_sub(stats_before.socket_visits),
-        stats_after.wakeups.saturating_sub(stats_before.wakeups),
+        stats.interface_polls, stats.socket_visits, stats.wakeups,
     );
     result
 }
